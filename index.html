@@ -159,6 +159,21 @@
              color: var(--ink); cursor: pointer; font-family: inherit; }
   .limitrow #limitToggleText { flex: 1; text-align: center; }
   .limitrow #planToggleText { flex: 1; text-align: center; }
+  .limitrow #whereToggleText { flex: 1; text-align: center; }
+  /* Phase 5 piece 2: where-to-move rows — one per curb, longest stay first.
+     Current-street rows are buttons (tap opens the map on that curb);
+     other-street rows are plain divs (their map shows when that street is
+     current). The swatch is the map curb color for the same verdict. */
+  .wtmrow { display: block; width: 100%; text-align: left; background: none; border: 0;
+            border-top: 1px solid var(--line); padding: 10px 2px; font-size: 17px;
+            color: var(--ink); font-family: inherit; }
+  .wtmrow:first-child { border-top: 0; }
+  button.wtmrow { cursor: pointer; }
+  button.wtmrow:hover, button.wtmrow:focus-visible { background: var(--soft-green); outline: none; }
+  div.wtmrow { cursor: default; }
+  .wtmrow .wtmhead { display: flex; align-items: center; gap: 8px; font-weight: 700; }
+  .wtmrow .wtmline { margin-top: 2px; }
+  .wtmrow .wtmnote { margin-top: 2px; font-size: 16px; color: var(--muted); }
   .limitrow .chev { color: var(--muted); font-size: 20px; display: inline-block; }
   .limitrow.open .chev { transform: rotate(90deg); }
   .limitrow:hover .chev, .limitrow:focus-visible .chev { color: var(--accent); }
@@ -227,6 +242,16 @@
   <div class="card" id="mapCard">
     <button class="limitrow" id="mapToggle" aria-expanded="false"><span id="mapToggleText">Street map</span><span class="chev" aria-hidden="true">&rsaquo;</span></button>
     <div id="mapBody" class="hidden"></div>
+  </div>
+
+  <!-- Phase 5 piece 2 (Nov 17): where to move — an expandable row in the
+       same collapsed-row pattern as the map / limit timer / plan ahead. It
+       ranks every curb we have verified data for by how long you can stay,
+       longest first. Curbs you cannot park on now and sides with no verified
+       rule are listed plainly at the end, never with a guessed stay time. -->
+  <div class="card" id="whereCard">
+    <button class="limitrow" id="whereToggle" aria-expanded="false"><span id="whereToggleText">Where to move</span><span class="chev" aria-hidden="true">&rsaquo;</span></button>
+    <div id="whereBody" class="hidden"></div>
   </div>
 
   <div class="card" id="limitCard">
@@ -427,6 +452,7 @@ function setStreet(slug, opts) {
   applyStreetData();
   _paidWarnSig = ""; /* the paid warning re-renders for the new street's side */
   _mapSelected = null; _mapSig = ""; /* the map re-renders for the new street */
+  _whereSig = ""; /* the where-to-move list re-renders for the new street */
   if (liveMode()) liveSetIdle(); /* ends the live lookup (renders with the new DATA) */
   if (opts.manual) setManualPick(slug);
   syncStreetUrl(slug);
@@ -1678,6 +1704,7 @@ function renderAll() {
   renderSideCards();
   renderHero();
   renderMap();
+  renderWhereToMove();
   renderLimit();
   renderPlanAhead();
   liveRenderChrome();
@@ -1949,6 +1976,25 @@ function init() {
   el("mapToggle").addEventListener("click", function () {
     setMapOpen(el("mapBody").classList.contains("hidden"));
   });
+  el("whereToggle").addEventListener("click", function () {
+    setWhereOpen(el("whereBody").classList.contains("hidden"));
+  });
+  /* A current-street where-to-move row opens the map on that curb (read-only,
+     like a curb tap). The rows are rebuilt on change, so the listener lives
+     on the container, not the rebuilt nodes. */
+  var whereBodyEl = el("whereBody");
+  if (whereBodyEl) {
+    whereBodyEl.addEventListener("click", function (e) {
+      var t = e.target || e.srcElement;
+      while (t && t !== whereBodyEl) {
+        if (t.getAttribute) {
+          var side = t.getAttribute("data-wtm-side");
+          if (side) { whereShowOnMap(side); return; }
+        }
+        t = t.parentNode;
+      }
+    });
+  }
   /* Curb taps + layer toggles + the detail close button all delegate from
      the map body (its innerHTML is rebuilt on change, so the listeners
      live on the container, not the rebuilt nodes). A curb tap only ever
@@ -3579,14 +3625,12 @@ function mapPathD(list) {
   });
   return d;
 }
-/* The curb color for one side at a moment. Reuses the Phase 2 verdict —
-   nothing here re-decides whether you can park. With the Cleaning layer
-   off, cleaning-derived states fall back to grey; a limit-derived state
-   (the limit binds, or your limit expired) keeps its color, because the
-   limit is not a cleaning marking. */
-function mapCurbColor(key, nowMs) {
-  nowMs = nowMs || Date.now();
-  var v = verdictForSide(key, nowMs, parkedAtForVerdict(key));
+/* The curb color for one verdict — the map and the where-to-move list share
+   this one rule, so a curb never shows two colors. No verdict -> grey.
+   With the Cleaning layer off, cleaning-derived states fall back to grey; a
+   limit-derived state (the limit binds, or your limit expired) keeps its
+   color, because the limit is not a cleaning marking. */
+function curbColorForVerdict(v) {
   if (!v) return "grey";
   if (v.kind === "no_stop" || v.kind === "cleaning_now" || v.kind === "limit_expired") {
     if (!MAP_LAYERS.cleaning && v.kind !== "limit_expired") return "grey";
@@ -3594,6 +3638,13 @@ function mapCurbColor(key, nowMs) {
   }
   if (!MAP_LAYERS.cleaning && v.kind !== "limit") return "grey";
   return "green";
+}
+/* The curb color for one side at a moment. Reuses the Phase 2 verdict —
+   nothing here re-decides whether you can park. */
+function mapCurbColor(key, nowMs) {
+  nowMs = nowMs || Date.now();
+  var v = verdictForSide(key, nowMs, parkedAtForVerdict(key));
+  return curbColorForVerdict(v);
 }
 function mapCurbColors(nowMs) {
   nowMs = nowMs || Date.now();
@@ -3603,6 +3654,35 @@ function mapCurbColors(nowMs) {
 }
 function mapColorStroke(color) {
   return color === "red" ? "var(--fine-ink)" : color === "green" ? "var(--accent)" : "#b3beb6";
+}
+/* The stay-until line for one curb, from its verdict — the same wording the
+   map detail card and the where-to-move rows use (shared, not a second
+   copy). Returns null when the verdict states no stay at all (a permit
+   exemption or a whole-side ban carry their own wording in the caller). */
+function stayUntilTextFor(side, lim, v, nowMs) {
+  if (!v) return null;
+  if ((v.kind === "cleaning_soon" || v.kind === "limit") && v.deadlineMs) {
+    return "Parking allowed until " + fmtDayTime(v.deadlineMs)
+      + (v.binds === "limit" ? " — parking limit." : " — cleaning starts then.");
+  }
+  if (v.kind === "cleaning_now") {
+    var r0 = nextWindowForSideData(side, new Date(nowMs));
+    if (r0 && r0.nw.state === "now") {
+      return "Parking allowed again at " + fmtTimeToronto(r0.nw.end) + ".";
+    }
+    return null;
+  }
+  if (v.kind === "season") {
+    var r1 = nextWindowForSideData(side, new Date(nowMs));
+    if (r1) {
+      /* Months out, the weekday + time alone ("Thu 5:30 PM") doesn't say
+         which Thursday — the date rides along. */
+      return "Parking allowed until " + fmtDateShortToronto(r1.nw.start) + ", "
+        + fmtTimeToronto(r1.nw.start) + " — cleaning resumes then.";
+    }
+    return null;
+  }
+  return null;
 }
 /* Detail card data for one side: the verdict wording, a stay-until line
    when a deadline exists, and the next rule. Pure — the HTML is a thin
@@ -3618,24 +3698,7 @@ function mapDetailForSide(key, nowMs) {
   if (!v) return { key: key, sideLabel: label, color: color,
     main: "No verified window for this side — the data doesn't say.",
     allowedUntil: null, comingUp: null };
-  var allowedUntil = null;
-  if ((v.kind === "cleaning_soon" || v.kind === "limit") && v.deadlineMs) {
-    allowedUntil = "Parking allowed until " + fmtDayTime(v.deadlineMs)
-      + (v.binds === "limit" ? " — parking limit." : " — cleaning starts then.");
-  } else if (v.kind === "cleaning_now") {
-    var r0 = nextWindowForSide(key, new Date(nowMs));
-    if (r0 && r0.nw.state === "now") {
-      allowedUntil = "Parking allowed again at " + fmtTimeToronto(r0.nw.end) + ".";
-    }
-  } else if (v.kind === "season") {
-    var r1 = nextWindowForSide(key, new Date(nowMs));
-    if (r1) {
-      /* Months out, the weekday + time alone ("Thu 5:30 PM") doesn't say
-         which Thursday — the date rides along. */
-      allowedUntil = "Parking allowed until " + fmtDateShortToronto(r1.nw.start) + ", "
-        + fmtTimeToronto(r1.nw.start) + " — cleaning resumes then.";
-    }
-  }
+  var allowedUntil = stayUntilTextFor(side, limitForSideKey(key), v, nowMs);
   var comingUp = null;
   var r = nextWindowForSide(key, new Date(nowMs));
   if (r) {
@@ -3764,6 +3827,7 @@ function mapSetLayer(name, on) {
   if (name !== "paid" && name !== "cleaning") return mapLayers();
   MAP_LAYERS[name] = !!on;
   renderMap();
+  renderWhereToMove(); /* the where-to-move swatches follow the same layer rule */
   return mapLayers();
 }
 function mapToggleLayer(name) {
@@ -3795,6 +3859,253 @@ function renderMap(nowMs) {
   if (sig === _mapSig) return;
   _mapSig = sig;
   body.innerHTML = mapBodyHtml(nowMs, geom, colors);
+}
+
+/* ---- Phase 5 piece 2 (Nov 17): where to move / where can I park ----
+   Every curb we have verified data for, ranked by how long you can stay if
+   you park there now (parkedAt = the eval time — this is "where CAN I
+   park", not "where AM I parked", so a running limit timer never moves a
+   curb). The ranking reuses the Phase 2 verdict exactly
+   (verdictForSideData): no second verdict, no forked priority.
+   Ranking rule, longest stay first:
+     1. No binding deadline: a permit-exempt curb (no deadline at all) first,
+        then a season curb, whose stay runs to the next season start (a real
+        date from the data, not "forever").
+     2. Deadline-bound curbs, latest deadline first (longest stay wins).
+        A tie goes to the cleaning-bound curb, mirroring the Phase 2 tie
+        rule (binding deadline: sooner of limit / cleaning, tie -> cleaning);
+        then street + side for a stable order.
+     3. Cannot park now (cleaning running, or a whole-side no-stopping
+        verdict): last among the decided curbs, with a plain "cannot park
+        here" line, never a stay time. Inside the group, a cleaning window
+        that resumes soonest comes first; a whole-side ban (never resumes)
+        comes last.
+     4. No verdict (not established / ambiguous / conflict): after the
+        cannot-park group, shown plainly as "Not established", never with a
+        guessed stay time.
+   LIMIT-ONLY CALL (open question — pending his word, do NOT silently
+   resolve): a side with a verified posted limit but no established
+   cleaning rule returns no verdict (the line-1308 gate: status not
+   established / no windows), so it lands in group 4. It is NOT ranked by
+   its limit alone — a limit cannot say you can stay, because cleaning may
+   be running unrecorded on that side. The verified limit IS stated as a
+   fact on its not-established row, never as a stay time. Whether such
+   sides should instead rank by their limit deadline is his call.
+   "Nearby" is every street with real data: the current street's two sides
+   (live sides when a live lookup is showing) plus the other baked streets.
+   A baked street that IS the live street (same block, inside the GPS
+   street-switch distance) is skipped, so it never appears twice. Only
+   streets with verified data appear; no curb is invented. The permit is
+   stated, never silently applied: when the posted limit would have bound
+   but the held sector permit exempts it, the row says so (the limit does
+   not bind, the cleaning deadline does). Fines are not shown here — the
+   verdicts already carry them where they apply. */
+function whereToMoveEntries(nowMs) {
+  nowMs = nowMs || Date.now();
+  var out = [];
+  function addStreet(slug, name, sides, lims, isCurrent) {
+    if (!sides) return;
+    Object.keys(sides).forEach(function (key) {
+      var side = sides[key];
+      if (!side) return;
+      var lim = (lims && lims[key]) || null;
+      var v = verdictForSideData(side, lim, nowMs, nowMs);
+      var e = { streetSlug: slug, streetName: name, sideKey: key, side: side,
+        sideLabel: side.label || key, isCurrent: !!isCurrent, verdict: v, lim: lim,
+        color: curbColorForVerdict(v), stayMs: null, binds: null,
+        cannotPark: false, notEstablished: false, limitOnly: false, resumeMs: null };
+      if (!v) {
+        e.notEstablished = true;
+        if (lim && typeof lim.minutes === "number") e.limitOnly = true;
+      } else if (v.kind === "no_stop" || v.kind === "cleaning_now" || v.kind === "limit_expired") {
+        e.cannotPark = true;
+        if (v.kind === "cleaning_now") {
+          var r = nextWindowForSideData(side, new Date(nowMs));
+          if (r && r.nw.state === "now") e.resumeMs = r.nw.end.getTime();
+        }
+      } else if (v.kind === "season") {
+        var r2 = nextWindowForSideData(side, new Date(nowMs));
+        e.stayMs = (r2 && r2.nw.start) ? r2.nw.start.getTime() : null;
+      } else if (v.kind === "permit_exempt") {
+        e.stayMs = Infinity;
+      } else if (v.deadlineMs) {
+        e.stayMs = v.deadlineMs;
+        e.binds = v.binds;
+      }
+      out.push(e);
+    });
+  }
+  if (liveMode() && LIVE.status === "ready" && LIVE.sides) {
+    addStreet(LIVE.streetSlug || "live", LIVE.streetName || "This street", LIVE.sides, null, true);
+    var switchM = (typeof DATA !== "undefined" && DATA && DATA.street_switch_m) || 300;
+    Object.keys(STREET_DATA || {}).forEach(function (slug) {
+      var reg = null;
+      (STREET_REGISTRY || []).forEach(function (r) { if (r.slug === slug) reg = r; });
+      if (reg && typeof LIVE.houseLat === "number" && typeof LIVE.houseLon === "number"
+          && streetDistM(LIVE.houseLat, LIVE.houseLon, reg) < switchM) return;
+      var d = STREET_DATA[slug].data;
+      addStreet(slug, d.street.short_name, d.sides, d.limits, false);
+    });
+  } else {
+    Object.keys(STREET_DATA || {}).forEach(function (slug) {
+      var d = STREET_DATA[slug].data;
+      addStreet(slug, d.street.short_name, d.sides, d.limits, slug === currentSlug());
+    });
+  }
+  function alpha(a, b) {
+    if (a.streetSlug !== b.streetSlug) return a.streetSlug < b.streetSlug ? -1 : 1;
+    return a.sideKey < b.sideKey ? -1 : (a.sideKey > b.sideKey ? 1 : 0);
+  }
+  out.sort(function (a, b) {
+    var ga = a.notEstablished ? 2 : (a.cannotPark ? 1 : 0);
+    var gb = b.notEstablished ? 2 : (b.cannotPark ? 1 : 0);
+    if (ga !== gb) return ga - gb;
+    if (ga === 2) return alpha(a, b);
+    if (ga === 1) {
+      var ra = (a.resumeMs === null) ? Infinity : a.resumeMs;
+      var rb = (b.resumeMs === null) ? Infinity : b.resumeMs;
+      if (ra !== rb) return ra - rb;
+      return alpha(a, b);
+    }
+    var sa = (a.stayMs === null) ? -Infinity : a.stayMs;
+    var sb = (b.stayMs === null) ? -Infinity : b.stayMs;
+    if (sa !== sb) return sb - sa;
+    if (a.binds === "cleaning" && b.binds !== "cleaning") return -1;
+    if (b.binds === "cleaning" && a.binds !== "cleaning") return 1;
+    return alpha(a, b);
+  });
+  return out;
+}
+/* Covered street names, from the ranked list itself — the note names exactly
+   the streets whose curbs are shown (a baked street that IS the live street
+   is skipped from the list, so its name must not appear here either). */
+function whereStreetNames(list) {
+  if (!list) list = whereToMoveEntries(Date.now());
+  var names = [];
+  list.forEach(function (e) { if (names.indexOf(e.streetName) < 0) names.push(e.streetName); });
+  return names;
+}
+/* One row's words: { head, line, note }. The line is the verdict's own
+   stay-until wording where one exists; a permit exemption the limit would
+   have hidden is stated in the note, never silently applied. */
+function whereRowText(e, nowMs) {
+  nowMs = nowMs || Date.now();
+  var head = e.streetName + " · " + e.sideLabel;
+  /* The permit note belongs only where the exemption changes the outcome
+     (a ranked curb whose limit would have bound but doesn't, or a
+     permit-exempt curb whose limit is exempt too). On a cannot-park row it
+     would be noise — the permit does not help while cleaning is running. */
+  var permitNote = (e.lim && limitExempted(e.lim)) ? permitLimitStatement(e.lim).replace(/^\s+/, "") : "";
+  if (e.notEstablished) {
+    return { head: head, line: "Not established — check the physical sign.",
+      note: e.limitOnly
+        ? "Posted " + limitAdjective(e.lim.minutes) + " limit — but cleaning is not established here, so no stay time can be given."
+        : "" };
+  }
+  if (e.cannotPark) {
+    if (e.verdict && e.verdict.kind === "cleaning_now") {
+      var r = nextWindowForSideData(e.side, new Date(nowMs));
+      var until = (r && r.nw.state === "now") ? fmtTimeToronto(r.nw.end) : null;
+      return { head: head,
+        line: until ? "Cannot park here now — cleaning until " + until + "." : "Cannot park here now — cleaning is running.",
+        note: "" };
+    }
+    return { head: head, line: (e.verdict && e.verdict.text) || "Cannot park here.", note: "" };
+  }
+  if (e.verdict && e.verdict.kind === "permit_exempt") {
+    return { head: head, line: e.verdict.text, note: permitNote };
+  }
+  var stay = stayUntilTextFor(e.side, e.lim, e.verdict, nowMs);
+  if (stay) return { head: head, line: stay, note: permitNote };
+  return { head: head, line: (e.verdict && e.verdict.text) || "No verified window for this side — the data doesn't say.", note: permitNote };
+}
+function whereRowHtml(e, nowMs) {
+  var t = whereRowText(e, nowMs);
+  var head = '<span class="mapsw" style="background:' + mapColorStroke(e.color) + '"></span><b>' + esc(t.head) + '</b>';
+  var body = '<div class="wtmline">' + esc(t.line) + '</div>';
+  if (t.note) body += '<div class="wtmnote">' + esc(t.note) + '</div>';
+  if (e.isCurrent) {
+    return '<button class="wtmrow" data-wtm-side="' + esc(e.sideKey) + '" aria-label="' + esc(t.head) + ' — show on map">'
+      + '<span class="wtmhead">' + head + '</span>' + body + '</button>';
+  }
+  return '<div class="wtmrow"><span class="wtmhead">' + head + '</span>' + body + '</div>';
+}
+function whereToMoveBodyHtml(nowMs, list) {
+  nowMs = nowMs || Date.now();
+  if (!list) list = whereToMoveEntries(nowMs);
+  var s = "";
+  list.forEach(function (e) { s += whereRowHtml(e, nowMs); });
+  var names = whereStreetNames(list);
+  s += '<div class="note" style="margin-top:8px">Only streets with verified data are listed'
+    + (names.length ? " — " + esc(names.join(", ")) : "") + ". No other curb is shown — never a guessed stay time.</div>";
+  return s;
+}
+/* The collapsed row label carries the best stay, like the limit row carries
+   its countdown: "Where to move — <street> · <side> until <time>". A
+   season stay months out carries its date (a bare weekday would not say
+   which week); a permit-exempt best has no deadline to carry. */
+function whereToMoveRowLabel(nowMs) {
+  nowMs = nowMs || Date.now();
+  var list = whereToMoveEntries(nowMs);
+  var best = null;
+  for (var i = 0; i < list.length; i++) {
+    if (!list[i].notEstablished && !list[i].cannotPark) { best = list[i]; break; }
+  }
+  if (!best) return "Where to move";
+  var head = best.streetName + " · " + best.sideLabel;
+  if (best.verdict && best.verdict.kind === "season" && best.stayMs) {
+    return "Where to move — " + head + " until "
+      + fmtDateShortToronto(new Date(best.stayMs)) + ", " + fmtTimeToronto(new Date(best.stayMs));
+  }
+  if (best.stayMs && isFinite(best.stayMs)) {
+    return "Where to move — " + head + " until " + fmtDayTime(best.stayMs);
+  }
+  if (best.stayMs === Infinity) return "Where to move — " + head + ", no deadline";
+  return "Where to move — " + head;
+}
+var _whereSig = "";
+function setWhereOpen(open) {
+  var body = el("whereBody");
+  if (!body) return;
+  body.classList.toggle("hidden", !open);
+  var b = el("whereToggle");
+  if (b) {
+    b.setAttribute("aria-expanded", open ? "true" : "false");
+    b.classList.toggle("open", !!open);
+  }
+  if (open) renderWhereToMove();
+}
+function whereOpen() {
+  var body = el("whereBody");
+  return !!(body && !body.classList.contains("hidden"));
+}
+/* The row label always refreshes (it carries the best stay); the body
+   re-renders only when open and something it shows changed, so the 30 s
+   hero tick never wipes the open list. */
+function renderWhereToMove(nowMs) {
+  var card = el("whereCard");
+  if (!card) return;
+  nowMs = nowMs || Date.now();
+  var txt = el("whereToggleText");
+  if (txt) txt.textContent = whereToMoveRowLabel(nowMs);
+  var body = el("whereBody");
+  if (!body || body.classList.contains("hidden")) return;
+  var list = whereToMoveEntries(nowMs);
+  var sig = list.map(function (e) {
+    return e.streetSlug + ":" + e.sideKey + ":" + (e.notEstablished ? "?" : e.cannotPark ? "x" : (e.stayMs === Infinity ? "inf" : e.stayMs))
+      + ":" + (e.binds || "-") + ":" + e.color + ":" + ((e.lim && limitExempted(e.lim)) ? "P" : "-");
+  }).join("|");
+  if (sig === _whereSig) return;
+  _whereSig = sig;
+  body.innerHTML = whereToMoveBodyHtml(nowMs, list);
+}
+/* Tapping a current-street row opens the map on that curb — the row reuses
+   the map's geometry and detail card (piece 1); it never changes the parked
+   side or the timer. */
+function whereShowOnMap(key) {
+  if (!key || liveActiveSideKeys().indexOf(key) < 0) return mapSelectedCurb();
+  setMapOpen(true);
+  return mapSelectCurb(key);
 }
 
 /* Test hook (also handy in the console): pure date/.ics logic. */
@@ -3862,6 +4173,12 @@ if (typeof window !== "undefined") {
     setMapOpen: setMapOpen, mapOpen: mapOpen, mapSelectCurb: mapSelectCurb,
     mapSelectedCurb: mapSelectedCurb, mapLayers: mapLayers, mapSetLayer: mapSetLayer,
     mapToggleLayer: mapToggleLayer, MAP_CURB_M: MAP_CURB_M,
+    curbColorForVerdict: curbColorForVerdict, stayUntilTextFor: stayUntilTextFor,
+    whereToMoveEntries: whereToMoveEntries, whereStreetNames: whereStreetNames,
+    whereRowText: whereRowText, whereRowHtml: whereRowHtml,
+    whereToMoveBodyHtml: whereToMoveBodyHtml, whereToMoveRowLabel: whereToMoveRowLabel,
+    renderWhereToMove: renderWhereToMove, setWhereOpen: setWhereOpen,
+    whereOpen: whereOpen, whereShowOnMap: whereShowOnMap,
     bindingDeadlineForSide: bindingDeadlineForSide, bindingDeadlineForSideData: bindingDeadlineForSideData,
     heroWarningState: heroWarningState, heroWarningStateForData: heroWarningStateForData,
     limitForSideKey: limitForSideKey, anchorLimitStartFor: anchorLimitStartFor,
