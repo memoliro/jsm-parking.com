@@ -744,8 +744,11 @@ function anchorLimitStart(nowMs) { return anchorLimitStartFor(limitForSide(), no
    if no timer is saved and the posted limit opens later today, arm the
    posted-limit timer at today's window start. It keeps counting until he taps
    Clear ("I'm back"). After a Clear, nothing re-arms until the next limit
-   day's pre-window period — a mid-day park stays manual (tap a tile =
-   "I just parked"). Reads localStorage (picked side + saved timer). */
+   day's pre-window period. Park now starts the timer mid-day
+   (setSelectedSide / startLimitTimerForSide, his call Nov 18) — this
+   auto-arm covers only a side picked without a timer, e.g. restored from
+   before the Park change, in the pre-window period. Reads localStorage
+   (picked side + saved timer). */
 function maybeAutoArmLimit(nowMs) {
   var lim0 = limitForSide();
   if (lim0 && limitExempted(lim0)) { clearLimitTimer(); return null; } /* the posted limit does not apply to this user — never arm, and a stale timer must not keep counting */
@@ -921,11 +924,12 @@ function getSelectedSide() {
   try { return localStorage.getItem(liveSideKey() || LS_KEY); } catch (e) { return null; }
 }
 /* Parking is a single tap: picking a side (or the Park toggle) says "I parked
-   here" — it also arms the limit timer when the window opens later (no saved
-   timer, pre-window only; maybeAutoArmLimit is a no-op otherwise). Clearing
-   the side ("Parked" / the ✕) says "I moved" — it clears the limit timer
-   too, so nothing keeps counting for a car that left. nowMs is test-only;
-   callers pass nothing and it defaults to now. */
+   here" — and Park starts the limit timer right away (his call Nov 18):
+   the stay starts at the tap, so the hero shows it immediately instead of
+   saying "Not parked" while the banner says "Parked". Clearing the side
+   ("Parked" / the ✕) says "I moved" — it clears the limit timer too, so
+   nothing keeps counting for a car that left. nowMs is test-only; callers
+   pass nothing and it defaults to now. */
 function setSelectedSide(key, nowMs) {
   nowMs = nowMs || Date.now();
   try {
@@ -933,11 +937,32 @@ function setSelectedSide(key, nowMs) {
     if (key) localStorage.setItem(sk, key); else localStorage.removeItem(sk);
   } catch (e) { /* private mode — selection just won't persist */ }
   if (!key) { clearLimitTimer(); }
-  else {
-    var armed = maybeAutoArmLimit(nowMs);
-    if (armed) saveLimitTimer(armed.parkedAt, armed.limitMin);
-  }
+  else { startLimitTimerForSide(key, nowMs); }
   renderAll();
+}
+/* Park starts the timer (his call Nov 18): the limit timer starts at the
+   tap, anchored to the posted hours when pre-window (exactly like a tile
+   tap with the posted limit's minutes) — so a car parked at 15:32 on a
+   15-minute side owes a move by 15:47. Guards: a stay that is still
+   running is never restarted — a re-tap of the same side, or a side
+   switch mid-stay, keeps the original park time (the check is the
+   roll-forward deadline, not the raw parkedAt + minutes, so a Tue 17:07
+   park still owes Wed 11:00 and a Wed-morning re-tap cannot extend it);
+   an expired stay starts fresh. A side with no verified limit starts
+   nothing (live streets, Lacombe, Freud — Park just selects, as before).
+   An exempted limit (permit held) starts nothing and clears a stale
+   timer — the limit does not apply to this user. */
+function startLimitTimerForSide(key, nowMs) {
+  var lim = limitForSideKey(key);
+  if (!lim) return;
+  if (limitExempted(lim)) { clearLimitTimer(); return; }
+  var saved = getLimitTimer();
+  if (saved) {
+    var dl = limitDeadlineMs(lim, saved.parkedAt);
+    if (dl !== null && dl > nowMs) return; /* stay still running — keep the original park time */
+    clearLimitTimer();
+  }
+  saveLimitTimer(anchorLimitStartFor(lim, nowMs), lim.minutes || 120);
 }
 function toggleParked(nowMs) {
   nowMs = nowMs || Date.now();
@@ -1519,11 +1544,13 @@ function parkedAtForVerdict(key) {
    | 'limit' (parked on a limit-only side: the posted limit is the stay).
    parkedAtMs (optional): when the car parked, from the running limit
    timer — renderHero passes parkedAtForVerdict(key). It is what separates
-   "parked" from "merely tapped" for a limit-only side (his Nov 18
+   "parked" from "not yet started" for a limit-only side (his Nov 18
    rulings): a limit-only side whose timer is running AND started
-   (parkedAt <= now) shows the limit stay; merely tapped (no timer, or a
-   timer that has not started yet) shows nothing about the side — the hero
-   stays in its default not-parked state. Established sides ignore
+   (parkedAt <= now) shows the limit stay; no timer saved yet (a side
+   restored without one), or a timer that has not started yet (pre-window
+   wait), shows nothing about the side — the hero stays in its default
+   not-parked state. Park starts the timer (his call Nov 18), so a tap no
+   longer leaves a limit side timer-less. Established sides ignore
    parkedAtMs here: their tap-to-preview (cleaning window when tapped)
    is unchanged. A limit-only side has NO cleaning window — the hero never
    shows one for it (ruling 1): no cleaning start/end, no cleaning
@@ -1547,11 +1574,13 @@ function heroState(key, now, parkedAtMs) {
     /* Limit-only side (Nov 18, his call): cleaning not established, but a
        verified posted limit exists. Parked (timer running and started) ->
        the hero shows the limit stay, from the same limit-only verdict the
-       map and where-to-move use. Merely tapped (no timer, or the timer
-       has not started yet — pre-window auto-arm) -> the hero says
-       nothing about the side: mode "prompt", the default not-parked
-       state. No limit, or an exempted limit, falls through to no_window
-       below — there is no stay to show. */
+       map and where-to-move use. No timer saved yet (a side restored
+       without one), or the timer has not started yet (pre-window wait) ->
+       the hero says nothing about the side: mode "prompt", the default
+       not-parked state. Park starts the timer (his call Nov 18), so a tap
+       no longer leaves a limit side in this state. No limit, or an
+       exempted limit, falls through to no_window below — there is no stay
+       to show. */
     var lim = limitForSideKey(key);
     if (lim && typeof lim.minutes === "number" && !limitExempted(lim)) {
       var nowMs = +now;
@@ -1632,15 +1661,16 @@ function renderHero() {
   var v = verdictForSide(key, Date.now(), parkedAtForVerdict(key));
   var warn = heroWarningState(key, Date.now(), parkedAtForVerdict(key));
   if (st.mode === "prompt") {
-    /* Tapped a limit-only side without parking (no timer running): the
-       hero says nothing about it — no window line, no verdict, no
-       detail, no warning. The hero content matches the default
-       not-parked state exactly. The selection chrome is untouched: the
-       "Parked: <side>" banner stays (a side IS picked) and the toggle
-       stays "Parked" (tapping it still clears the side) — only the
-       hero's rule content stays quiet. Known tension, for his call:
-       the banner says "Parked: <side>" while this hero says "Not
-       parked". */
+    /* A limit-only side with no timer running yet: the hero says nothing
+       about it — no window line, no verdict, no detail, no warning. The
+       hero content matches the default not-parked state exactly. The
+       selection chrome is untouched: the "Parked: <side>" banner stays
+       (a side IS picked) and the toggle stays "Parked" (tapping it still
+       clears the side) — only the hero's rule content stays quiet. This
+       is now only the pre-window wait (the timer is anchored to a future
+       window start) or a side restored without a timer: Park starts the
+       timer (his call Nov 18), so a tap no longer lands here mid-day —
+       the banner and the hero agree. */
     hero.classList.remove("hidden");
     hero.classList.remove("now");
     hero.classList.remove("next");
@@ -5536,7 +5566,8 @@ if (typeof window !== "undefined") {
     limitState: limitState, alarmLeadMin: alarmLeadMin, buildLimitIcs: buildLimitIcs,
     anchorLimitStart: anchorLimitStart, maybeAutoArmLimit: maybeAutoArmLimit,
     limitForSide: limitForSide,
-    getLimitTimer: getLimitTimer, saveLimitTimer: saveLimitTimer,
+    getLimitTimer: getLimitTimer, saveLimitTimer: saveLimitTimer, startLimitTimer: startLimitTimer,
+    startLimitTimerForSide: startLimitTimerForSide,
     clearLimitTimer: clearLimitTimer, LIMIT_KEY: LIMIT_KEY, LIMIT_OPTIONS: LIMIT_OPTIONS,
     showDetails: showDetails, showMain: showMain, swipeDirection: swipeDirection,
     keyTarget: keyTarget, limitRowLabel: limitRowLabel,
