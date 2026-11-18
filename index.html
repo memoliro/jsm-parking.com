@@ -2423,6 +2423,10 @@ var LIVE_NEARBY_MAX_STREETS = 5; /* landed cap (Nov 18 cap follow-up): the sweep
 var LIVE_NEARBY_MAX_TRIES = 10; /* try-cap (Nov 18 cap follow-up): the sweep never attempts an 11th lookup -- a candidate that yields nothing (no house, no centreline, no signs, a fetch failure) consumes a try, never a suggestion slot, so a neighbourhood where every street yields nothing stays bounded */
 var LIVE_NEARBY_CACHE_PREFIX = "ticketSaver.nearby.v1."; /* separate cache from the current-street lookup: a nearby result carries no paid data (the where-to-move rows never read it), so it must never be mistaken for a complete current-street entry */
 var LIVE_NEARBY_ENABLED = true; /* the live-repro suite disables the auto-sweep -- its Overpass fixture answers every area query with the des-pins ways, which would be wrong-fix candidates */
+var LIVE_JUNCTION_CLOSE_M = 40; /* junction display (Nov 18, his idea): the user is "close" to a junction when the reference house sits within 40 m of a segment end -- the Pierre-Dupaigne 8534 fix is 36.9 m from the Place Pierre-Dupaigne junction, so 30 m would miss the field case that prompted the idea; 40 m sits just beyond the 20 m junction-exclusion band, and a mid-segment fix (49.5 m from the nearest junction on the same street) stays quiet */
+var LIVE_JUNCTION_PAST_M = 30; /* same-street anchor: 30 m PAST the junction along the centreline -- an anchor AT the junction point still sits on the current block (its nearest house is on this side of the junction), so the next block's segment is never reached */
+var LIVE_JUNCTION_CACHE_PREFIX = "ticketSaver.junction.v1."; /* separate cache from the current-street (live v5) and nearby (v1) lookups: a neighbouring segment carries no paid data, like a nearby one, and must never be mistaken for a current-street entry */
+var LIVE_JUNCTION_ENABLED = true; /* the live-repro suite disables the auto-lookup -- its Overpass fixture answers every area query with the des-pins ways, which would be wrong-fix candidates */
 var LIVE_CARRIAGEWAY = ["motorway", "trunk", "primary", "secondary", "tertiary",
   "unclassified", "residential", "living_street"];
 var LIVE = { status: "idle", streetName: null, streetSlug: null, houseNumber: null,
@@ -2436,6 +2440,10 @@ var LIVE = { status: "idle", streetName: null, streetSlug: null, houseNumber: nu
 var LIVE_LOADING = null; /* { key, promise } — one lookup per street+house at a time */
 var LIVE_GEN = 0; /* bumped by liveSetIdle — a lookup from an older generation drops its result */
 var LIVE_NEARBY = { status: "idle", fixKey: null, fixLat: null, fixLon: null, streets: {} };
+var LIVE_JUNCTION = { status: "idle", fixKey: null, junction: null, sameStreet: null, crossStreet: null };
+/* junction: { side: "below"|"above", name, alongM, distanceM, lat, lon } -- the nearest NAMED junction within LIVE_JUNCTION_CLOSE_M of the reference house (measured from the house to the segment end).
+   sameStreet / crossStreet: null | { status: "loading"|"ready"|"none", result } -- result is a liveBuildResult output (sides + counts + segment + centreline + houseAlong), WITHOUT paid data. "none" = the lookup ran and yielded nothing (no house on that street near the anchor, no centreline, no signs) -- the map draws that side GREY, honestly, never a guessed colour. */
+var LIVE_JUNCTION_PROMISE = null; /* the in-flight junction lookup, for dedup by fix */
 /* streets[slug] = { name, slug, distM, result } — result is a liveBuildResult
    output (sides + counts + segment), WITHOUT paid data. Only in live mode:
    leaving live mode (liveSetIdle / liveSetError) clears it. */
@@ -3143,6 +3151,7 @@ function liveWillSwitch(slug) {
 function liveSetIdle() {
   LIVE_GEN++; /* any in-flight lookup belongs to the old generation now */
   LIVE_NEARBY = { status: "idle", fixKey: null, fixLat: null, fixLon: null, streets: {} }; /* leaving live mode invalidates the nearby results */
+  LIVE_JUNCTION = { status: "idle", fixKey: null, junction: null, sameStreet: null, crossStreet: null }; /* leaving live mode invalidates the junction display with it */
   if (LIVE.status !== "idle") {
     LIVE = { status: "idle", streetName: null, streetSlug: null, houseNumber: null,
       houseLat: null, houseLon: null, sides: null, counts: null, segment: null,
@@ -3154,6 +3163,7 @@ function liveSetIdle() {
 function liveSetError(status, title, detail) {
   LIVE.status = status; LIVE.errorTitle = title; LIVE.errorDetail = detail; LIVE.sides = null;
   LIVE_NEARBY = { status: "idle", fixKey: null, fixLat: null, fixLon: null, streets: {} }; /* a failed lookup lists nothing — the nearby results with it */
+  LIVE_JUNCTION = { status: "idle", fixKey: null, junction: null, sameStreet: null, crossStreet: null }; /* a failed lookup draws no junction either */
   if (typeof renderAll === "function") renderAll();
 }
 function liveMaybeLookup(lat, lon, feature) {
@@ -3614,6 +3624,7 @@ async function liveRunLookupInner(fix) {
       if (gen !== LIVE_GEN) return { status: "abandoned" }; /* left live mode mid-lookup */
       liveApplyResult(cached.result, dataAsOf);
       liveNearbySweep(fix.lat, fix.lon, fix.streetName); /* the where-to-move card suggests the streets around this one — fire and forget, the sweep renders as each street lands */
+      liveJunctionLookup(fix, null); /* the map shows the junction when the house sits close to one — fire and forget, each neighbouring segment lands as it arrives */
       return cached.result;
     }
     var houseLat = fix.houseLat, houseLon = fix.houseLon;
@@ -3669,6 +3680,7 @@ async function liveRunLookupInner(fix) {
       savedAt: Date.now(), result: result });
     liveApplyResult(result, dataAsOf);
     liveNearbySweep(fix.lat, fix.lon, fix.streetName); /* the where-to-move card suggests the streets around this one — fire and forget, the sweep renders as each street lands */
+    liveJunctionLookup(fix, over.ways); /* the map shows the junction when the house sits close to one — the cross street's ways are already in the .c set, so no extra Overpass query */
     return result;
   } catch (err) {
     if (gen !== LIVE_GEN) return { status: "abandoned" }; /* left live mode mid-lookup */
@@ -3801,7 +3813,7 @@ function liveNearbyCacheKey(slug, idTrc, houseNumber) {
    { name, slug, distM, result } or null when the street must be skipped:
    no house on it near its closest point, no centreline, no signs, a
    build error, or any fetch failure. Never throws. */
-async function liveNearbyLookupOne(fixLat, fixLon, cand, areaWays, dataAsOf) {
+async function liveNearbyLookupOne(fixLat, fixLon, cand, areaWays, dataAsOf, cacheKeyFn) {
   try {
     if (typeof fetch === "undefined") return null;
     var pt = await liveNearestAddressPoint(cand.name, cand.anchorLat, cand.anchorLon);
@@ -3810,7 +3822,9 @@ async function liveNearbyLookupOne(fixLat, fixLon, cand, areaWays, dataAsOf) {
     var geoRows = [];
     try { geoRows = await liveCkanSql(liveGeobaseSql(liveNomVoieCandidate(cand.name))); } catch (e) { geoRows = []; }
     var geoHit = liveGeobaseHit(geoRows, pt.number);
-    var key = liveNearbyCacheKey(slug, geoHit ? geoHit.idTrc : null, pt.number);
+    var key = (typeof cacheKeyFn === "function")
+      ? cacheKeyFn(slug, geoHit ? geoHit.idTrc : null, pt.number)
+      : liveNearbyCacheKey(slug, geoHit ? geoHit.idTrc : null, pt.number);
     var cached = liveCacheRead(key);
     if (cached && cached.result && cached.result.sides && (!dataAsOf || cached.dataAsOf === dataAsOf)) {
       return { name: cand.name, slug: slug, distM: cand.distM, result: cached.result };
@@ -3908,6 +3922,267 @@ function liveNearbyEntries() {
     if (s && s.result && s.result.sides) out.push({ slug: slug, name: s.name, distM: s.distM, sides: s.result.sides });
   });
   out.sort(function (a, b) { return a.distM - b.distM || (a.slug < b.slug ? -1 : 1); });
+  return out;
+}
+/* ---- junction display (Nov 18, his idea: "it can show the junction if
+   user is close to a junction with colours according city data, so user
+   can decide") ----
+   When the reference house sits close to a junction, the segments on the
+   other side of it are looked up too -- the same street continuing past
+   the junction (the next block) and the cross street itself -- through
+   the SAME pipeline the nearby sweep uses (nearest address on that street
+   as the reference point, centreline + CKAN signs + 1-pole city-data rule
+   + placement guards, minus paid), each in its own junction cache entry.
+   The map colours their curbs by THEIR verdicts. A neighbouring segment
+   that yields nothing draws GREY -- its status becomes "none", never a
+   guessed verdict. Live mode only; the current street's verdicts, hero,
+   where-to-move, fines, limits, permits and plan-ahead are never touched.
+   Fire and forget: each neighbouring result lands as it arrives and
+   re-renders the map. */
+function liveJunctionCacheKey(slug, idTrc, houseNumber) {
+  return LIVE_JUNCTION_CACHE_PREFIX + slug + "." + (idTrc || ("h" + houseNumber));
+}
+/* Which junction, if any, the reference house is close to: the nearest
+   NAMED segment end within LIVE_JUNCTION_CLOSE_M. A way end with no cross
+   street is not a junction (nothing on the other side to show), and the
+   far end is never chosen when the near end is closer. Measured from the
+   reference house (along 0) to the segment end -- the segment already
+   encodes the distance. Returns null when the house sits mid-block. */
+function liveJunctionDetect(segment) {
+  if (!segment || typeof segment.min !== "number" || typeof segment.max !== "number") return null;
+  var cands = [];
+  if (segment.belowName && -segment.min <= LIVE_JUNCTION_CLOSE_M && -segment.min > 0) {
+    cands.push({ side: "below", name: segment.belowName, alongM: segment.min,
+      distanceM: Math.round(-segment.min * 10) / 10 });
+  }
+  if (segment.aboveName && segment.max <= LIVE_JUNCTION_CLOSE_M && segment.max > 0) {
+    cands.push({ side: "above", name: segment.aboveName, alongM: segment.max,
+      distanceM: Math.round(segment.max * 10) / 10 });
+  }
+  if (!cands.length) return null;
+  cands.sort(function (a, b) { return a.distanceM - b.distanceM; });
+  return cands[0];
+}
+/* The lat/lon of the point `alongAbs` metres along the chain (the cum frame
+   of liveCumAlong, computed from the same points with the same reference --
+   so the along is the same one liveBuildResult used for the house). */
+function livePointAtAlong(chain, alongAbs, refLat, refLon) {
+  if (!chain || !chain.points || chain.points.length < 2) return null;
+  var pts = chain.points, cum = liveCumAlong(pts, refLat, refLon);
+  if (alongAbs <= cum[0]) return { lat: pts[0][0], lon: pts[0][1] };
+  var last = pts[pts.length - 1];
+  if (alongAbs >= cum[cum.length - 1]) return { lat: last[0], lon: last[1] };
+  for (var i = 0; i < cum.length - 1; i++) {
+    if (alongAbs >= cum[i] && alongAbs <= cum[i + 1]) {
+      var span = cum[i + 1] - cum[i];
+      var t = span === 0 ? 0 : (alongAbs - cum[i]) / span;
+      return { lat: pts[i][0] + (pts[i + 1][0] - pts[i][0]) * t,
+               lon: pts[i][1] + (pts[i + 1][1] - pts[i][1]) * t };
+    }
+  }
+  return null;
+}
+function liveJunctionLookup(fix, areaWays) {
+  if (!LIVE_JUNCTION_ENABLED) return Promise.resolve(null);
+  if (typeof fetch === "undefined") return Promise.resolve(null);
+  var key = liveNearbyFixKey(fix.lat, fix.lon);
+  if (LIVE_JUNCTION_PROMISE && LIVE_JUNCTION.fixKey === key && LIVE_JUNCTION.status !== "idle") return LIVE_JUNCTION_PROMISE;
+  if (LIVE_JUNCTION.fixKey === key && LIVE_JUNCTION.status === "ready") return Promise.resolve(LIVE_JUNCTION); /* same block, results already landed — one junction lookup per fix, not one per 90 s tick; a new fix re-runs */
+  var gen = (typeof LIVE_GEN !== "undefined") ? LIVE_GEN : 0;
+  LIVE_JUNCTION = { status: "loading", fixKey: key, junction: null, sameStreet: null, crossStreet: null };
+  var p = liveJunctionLookupInner(fix, areaWays, key, gen);
+  LIVE_JUNCTION_PROMISE = p;
+  p.then(function () { if (LIVE_JUNCTION_PROMISE === p) LIVE_JUNCTION_PROMISE = null; },
+    function () { if (LIVE_JUNCTION_PROMISE === p) LIVE_JUNCTION_PROMISE = null; });
+  return p;
+}
+async function liveJunctionLookupInner(fix, areaWays, key, gen) {
+  try {
+    /* The current lookup must be settled with a centreline — without it
+       there is no along-track frame to measure "past the junction" in. */
+    if (!LIVE || LIVE.status !== "ready" || !LIVE.centreline || LIVE.centreline.length < 2
+        || typeof LIVE.houseAlong !== "number" || !LIVE.segment) {
+      LIVE_JUNCTION = { status: "idle", fixKey: key, junction: null, sameStreet: null, crossStreet: null };
+      return null;
+    }
+    var j = liveJunctionDetect(LIVE.segment);
+    if (!j) {
+      /* Mid-block: nothing to show. The state stays "ready" with no
+         junction, so the map never draws one — and a later re-render
+         does not re-trigger the lookup. */
+      LIVE_JUNCTION = { status: "ready", fixKey: key, junction: null, sameStreet: null, crossStreet: null };
+      return LIVE_JUNCTION;
+    }
+    /* The junction point, in the current street's along-track frame
+       (houseAlong is the house's position on the chain). */
+    var refLat = LIVE.houseLat, refLon = LIVE.houseLon;
+    var chain = { points: LIVE.centreline };
+    var jAbs = LIVE.houseAlong + j.alongM;
+    var jPt = livePointAtAlong(chain, jAbs, refLat, refLon);
+    if (!jPt) { LIVE_JUNCTION = { status: "idle", fixKey: key, junction: null, sameStreet: null, crossStreet: null }; return null; }
+    var dir = (j.side === "above") ? 1 : -1;
+    if (gen !== LIVE_GEN || LIVE_JUNCTION.fixKey !== key) return null;
+    var ways = areaWays;
+    if (!ways) {
+      var over = await liveOverpassLookup(fix.streetName, fix.lat, fix.lon);
+      if (gen !== LIVE_GEN || LIVE_JUNCTION.fixKey !== key) return null;
+      ways = over.ways;
+    }
+    var dataAsOf = LIVE.dataAsOf || null;
+    /* The junction itself, for the map (its point + which side of the
+       house it sits on). */
+    LIVE_JUNCTION.junction = { side: j.side, name: j.name, alongM: j.alongM,
+      distanceM: j.distanceM, lat: jPt.lat, lon: jPt.lon };
+    LIVE_JUNCTION.status = "ready";
+    /* Same street, next block: the candidate is this street at an anchor
+       30 m PAST the junction, so it lands on the next block, not on this
+       one. The street must CONTINUE past the junction for a next block to
+       exist — the Pierre-Dupaigne chain ends AT Jacques-Casault (its
+       first node IS the junction), so south of JC there is no next block
+       at all: the anchor would sit outside the chain, and the nearest
+       house to such an anchor is 8511, ON the current block (the trap) —
+       so no lookup runs there and the side degrades to grey, honestly.
+       When the chain does continue, the anchor sits at most 30 m past
+       the junction (closer when the chain ends sooner), and the returned
+       segment is accepted only if it meets the junction — see
+       liveJunctionSameSegment. */
+    LIVE_JUNCTION.sameStreet = { status: "loading", result: null };
+    var cum = liveCumAlong(chain.points, refLat, refLon);
+    var chainEnd = (dir > 0) ? cum[cum.length - 1] : cum[0];
+    var remaining = (dir > 0) ? chainEnd - jAbs : jAbs - chainEnd;
+    if (remaining <= 0) {
+      LIVE_JUNCTION.sameStreet = { status: "none", result: null };
+    } else {
+      var past = Math.min(LIVE_JUNCTION_PAST_M, Math.max(5, remaining - 5));
+      var anchorPt = livePointAtAlong(chain, jAbs + dir * past, refLat, refLon) || jPt;
+      var same = await liveNearbyLookupOne(fix.lat, fix.lon,
+        { name: fix.streetName, slug: liveSlug(fix.streetName), distM: j.distanceM + past, anchorLat: anchorPt.lat, anchorLon: anchorPt.lon },
+        ways, dataAsOf, liveJunctionCacheKey);
+      if (gen !== LIVE_GEN || LIVE_JUNCTION.fixKey !== key) return null;
+      var sameSeg = (same && same.result && same.result.sides)
+        ? liveJunctionSameSegment(same.result, j, LIVE.houseAlong) : null;
+      LIVE_JUNCTION.sameStreet = sameSeg
+        ? { status: "ready", result: same.result } : { status: "none", result: null };
+    }
+    if (typeof renderMap === "function") renderMap();
+    /* Cross street: try the anchors in order — the junction point, then
+       100 m each way along the cross street's own chain — and take the
+       first whose segment touches the junction. The junction-point anchor
+       usually yields nothing (at Pierre-Dupaigne / Jacques-Casault the
+       reverse list holds 20 features, 0 on the cross street — houses sit
+       back from the junction), so the further-along anchors are the ones
+       that find a reference house on the block adjacent to the junction
+       (house 1101, 150 m along Jacques-Casault). */
+    LIVE_JUNCTION.crossStreet = { status: "loading", result: null };
+    var crossAnchors = liveJunctionCrossAnchors(j, jPt, ways);
+    for (var ci = 0; ci < crossAnchors.length; ci++) {
+      if (gen !== LIVE_GEN || LIVE_JUNCTION.fixKey !== key) return null;
+      var cr = await liveNearbyLookupOne(fix.lat, fix.lon,
+        { name: j.name, slug: liveSlug(j.name), distM: j.distanceM, anchorLat: crossAnchors[ci].lat, anchorLon: crossAnchors[ci].lon },
+        ways, dataAsOf, liveJunctionCacheKey);
+      if (gen !== LIVE_GEN || LIVE_JUNCTION.fixKey !== key) return null;
+      if (cr && cr.result && cr.result.sides && liveJunctionCrossTouches(cr.result, j, jPt)) {
+        LIVE_JUNCTION.crossStreet = { status: "ready", result: cr.result };
+        break;
+      }
+    }
+    if (LIVE_JUNCTION.crossStreet.status === "loading") LIVE_JUNCTION.crossStreet = { status: "none", result: null };
+    if (typeof renderMap === "function") renderMap();
+    return LIVE_JUNCTION;
+  } catch (e) {
+    if (LIVE_JUNCTION.fixKey === key) LIVE_JUNCTION = { status: "idle", fixKey: key, junction: null, sameStreet: null, crossStreet: null };
+    return null;
+  }
+}
+/* The same street's next block, converted into the current street's
+   along-track frame: { segMin, segMax } when the block is adjacent to the
+   junction, null when it is not. The next block MUST meet the junction
+   (its far end for the below side, its near end for the above side) — if
+   the conversion lands anywhere else, the reference house sits on a
+   different block than the one past the junction, and the result is not
+   accepted. The 8511 trap is exactly this: a reference house across the
+   junction on the CURRENT block converts back onto the current segment,
+   whose far end is ~99 m from the junction. */
+function liveJunctionSameSegment(result, junction, curHouseAlong) {
+  if (!result || typeof result.houseAlong !== "number" || !result.segment) return null;
+  var segMin = result.houseAlong + result.segment.min - curHouseAlong;
+  var segMax = result.houseAlong + result.segment.max - curHouseAlong;
+  var meets = (junction.side === "below") ? Math.abs(segMax - junction.alongM) : Math.abs(segMin - junction.alongM);
+  if (meets > 5) return null;
+  return { segMin: segMin, segMax: segMax };
+}
+/* The cross street's candidate anchors, nearest first: the junction point
+   itself, then 100 m each way along the cross street's own chain (clamped
+   to the chain). Returns just the junction point when the cross street has
+   no chain in the area ways. */
+function liveJunctionCrossAnchors(j, jPt, ways) {
+  var out = [{ lat: jPt.lat, lon: jPt.lon }];
+  if (!ways) return out;
+  var chain = liveChainStreetWays(ways, j.name, jPt.lat, jPt.lon);
+  if (!chain) return out;
+  var cum = liveCumAlong(chain.points, jPt.lat, jPt.lon);
+  var sn = liveSnap(jPt.lat, jPt.lon, chain.points, jPt.lat, jPt.lon);
+  if (!sn) return out;
+  var jAlong = liveAlongFromSnap(cum, chain.points, sn, jPt.lat, jPt.lon);
+  [100, -100].forEach(function (off) {
+    var a = jAlong + off;
+    if (a < cum[0] || a > cum[cum.length - 1]) return;
+    var p = livePointAtAlong(chain, a, jPt.lat, jPt.lon);
+    if (p) out.push(p);
+  });
+  return out;
+}
+/* Does this cross-street result's segment touch the junction? The
+   junction's along-track position on the result's own centreline (rel. the
+   result's reference house) must sit within 5 m of one of the segment's
+   ends — the junction is a crossing, so it bounds the segment. A result
+   whose segment spans across the junction, or sits on a far block, is not
+   the adjacent segment and is not accepted. */
+function liveJunctionCrossTouches(result, j, jPt) {
+  if (!result || !result.centreline || result.centreline.length < 2
+      || typeof result.houseAlong !== "number" || !result.segment) return false;
+  var refLat = result.houseLat, refLon = result.houseLon;
+  var cum = liveCumAlong(result.centreline, refLat, refLon);
+  var sn = liveSnap(jPt.lat, jPt.lon, result.centreline, refLat, refLon);
+  if (!sn || sn.dist > 10) return false; /* the junction is not on this chain at all */
+  var jRel = liveAlongFromSnap(cum, result.centreline, sn, refLat, refLon) - result.houseAlong;
+  return Math.abs(jRel - result.segment.min) <= 5 || Math.abs(jRel - result.segment.max) <= 5;
+}
+/* What the map draws for the junction display: null when there is no
+   junction close by or its lookups have not landed yet; otherwise the
+   junction + the neighbouring segments' data, already converted into the
+   current street's along-track frame for the same street (the chain is the
+   same way, so the conversion is exact — and guarded by
+   liveJunctionSameSegment, so a non-adjacent block is reported "none"
+   instead of drawn on the wrong stretch) and self-consistent for the cross
+   street (its own centreline + houseAlong + segment). A "none" neighbouring
+   segment is reported as { status: "none" } — the map draws it grey. */
+function liveJunctionForMap() {
+  if (!LIVE_JUNCTION || LIVE_JUNCTION.status !== "ready" || !LIVE_JUNCTION.junction) return null;
+  var j = LIVE_JUNCTION.junction;
+  var out = { side: j.side, name: j.name, alongM: j.alongM, distanceM: j.distanceM,
+    lat: j.lat, lon: j.lon, sameStreet: null, crossStreet: null };
+  if (LIVE_JUNCTION.sameStreet) {
+    var s = LIVE_JUNCTION.sameStreet;
+    if (s.status === "ready" && s.result && typeof LIVE.houseAlong === "number") {
+      var sameSeg = liveJunctionSameSegment(s.result, j, LIVE.houseAlong);
+      if (sameSeg) {
+        out.sameStreet = { status: "ready", segMin: sameSeg.segMin, segMax: sameSeg.segMax,
+          sides: s.result.sides, attributed: s.result.attributed,
+          houseNumber: s.result.houseNumber, houseCt: s.result.houseCt };
+      } else out.sameStreet = { status: "none" };
+    } else if (s.status === "none") out.sameStreet = { status: "none" };
+  }
+  if (LIVE_JUNCTION.crossStreet) {
+    var c = LIVE_JUNCTION.crossStreet;
+    if (c.status === "ready" && c.result) {
+      out.crossStreet = { status: "ready", name: c.result.streetName,
+        centreline: c.result.centreline, houseAlong: c.result.houseAlong,
+        segMin: c.result.segment.min, segMax: c.result.segment.max,
+        sides: c.result.sides, attributed: c.result.attributed,
+        houseNumber: c.result.houseNumber, houseCt: c.result.houseCt };
+    } else if (c.status === "none") out.crossStreet = { status: "none" };
+  }
   return out;
 }
 
@@ -4161,7 +4436,8 @@ function mapSource() {
              seg: { min: LIVE.segment.min, max: LIVE.segment.max },
              mapSeg: mapSegFromLiveSegment(LIVE.segment),
              ends: { low: LIVE.segment.belowName || null, high: LIVE.segment.aboveName || null },
-             attributed: null, streetName: LIVE.streetName };
+             attributed: null, streetName: LIVE.streetName,
+             junction: (typeof liveJunctionForMap === "function") ? liveJunctionForMap() : null };
   }
   var extent = mapSegmentExtent();
   if (!extent) return { error: "no-segment",
@@ -4255,6 +4531,74 @@ function mapGeometry() {
       return { x: p.x + n[0] * MAP_CURB_M * signs[k], y: p.y + n[1] * MAP_CURB_M * signs[k], rel: p.rel };
     });
   });
+  /* Junction display (Nov 18, his idea): when the reference house sits
+     close to a junction, the segments on the other side of it are drawn
+     too — the same street continuing past the junction (its curbs ride
+     the same road, past the junction) and the cross street (a stub road
+     branching off at the junction). Their curbs are coloured by THEIR
+     verdicts, from the junction lookup's own sides — the current
+     street's verdicts never move. A neighbouring segment with no
+     established window draws GREY (its sides are not_established /
+     ambiguous, or the lookup yielded nothing). */
+  var junction = src.junction || null;
+  var junctionRoads = [];
+  if (junction) {
+    var next = junction.sameStreet;
+    if (next && next.status === "ready" && next.sides) {
+      var nextSigns = mapSideCtSigns(next.attributed, next.houseNumber, next.houseCt);
+      var nextPts = mapClipRange(pts, next.segMin, next.segMax);
+      liveActiveSideKeys().forEach(function (k) {
+        if (!nextSigns[k]) return;
+        curbs["next-" + k] = nextPts.map(function (p, jj) {
+          var n = normalOn(nextPts, jj);
+          return { x: p.x + n[0] * MAP_CURB_M * nextSigns[k], y: p.y + n[1] * MAP_CURB_M * nextSigns[k], rel: p.rel };
+        });
+      });
+    }
+    var cross = junction.crossStreet;
+    if (cross && cross.status === "ready" && cross.centreline && cross.centreline.length >= 2
+        && typeof cross.houseAlong === "number") {
+      /* The stub road: the cross street's own centreline, projected into
+         the same local-metre frame (the current house is the reference,
+         so the stub meets the current road at the junction) and clipped
+         to ITS segment — the same clipping the main road uses, written
+         out rather than factored, so the main road's pinned geometry is
+         not touched. */
+      var crossCum = liveCumAlong(cross.centreline, refLat, refLon);
+      var crossPts = [];
+      function pushCrossPt(x, y, rel) {
+        var last = crossPts[crossPts.length - 1];
+        if (last && Math.abs(last.x - x) < 0.01 && Math.abs(last.y - y) < 0.01) return;
+        crossPts.push({ x: x, y: y, rel: rel });
+      }
+      for (var ci = 0; ci < cross.centreline.length - 1; ci++) {
+        var ca = mapXY(cross.centreline[ci][0], cross.centreline[ci][1], refLat, refLon);
+        var cb = mapXY(cross.centreline[ci + 1][0], cross.centreline[ci + 1][1], refLat, refLon);
+        var cra = crossCum[ci] - cross.houseAlong, crb = crossCum[ci + 1] - cross.houseAlong;
+        var clo = Math.min(cra, crb), chi = Math.max(cra, crb);
+        if (chi < cross.segMin || clo > cross.segMax) continue;
+        var ct0 = 0, ct1 = 1;
+        if (cra < cross.segMin) ct0 = Math.max(ct0, (cross.segMin - cra) / (crb - cra));
+        if (cra > cross.segMax) ct0 = Math.max(ct0, (cra - cross.segMax) / (cra - crb));
+        if (crb < cross.segMin) ct1 = Math.min(ct1, (cross.segMin - cra) / (crb - cra));
+        if (crb > cross.segMax) ct1 = Math.min(ct1, (cra - cross.segMax) / (cra - crb));
+        if (ct1 < ct0) continue;
+        pushCrossPt(ca.x + (cb.x - ca.x) * ct0, ca.y + (cb.y - ca.y) * ct0, cra + (crb - cra) * ct0);
+        pushCrossPt(ca.x + (cb.x - ca.x) * ct1, ca.y + (cb.y - ca.y) * ct1, cra + (crb - cra) * ct1);
+      }
+      if (crossPts.length >= 2) {
+        var crossSigns = mapSideCtSigns(cross.attributed, cross.houseNumber, cross.houseCt);
+        liveActiveSideKeys().forEach(function (k) {
+          if (!crossSigns[k]) return;
+          curbs["cross-" + k] = crossPts.map(function (p, jj) {
+            var n = normalOn(crossPts, jj);
+            return { x: p.x + n[0] * MAP_CURB_M * crossSigns[k], y: p.y + n[1] * MAP_CURB_M * crossSigns[k], rel: p.rel };
+          });
+        });
+        junctionRoads.push({ pts: crossPts, name: cross.name || junction.name || null });
+      }
+    }
+  }
   var dots = [];
   if (MAP_LAYERS.paid) {
     var sides = liveActiveSides();
@@ -4283,6 +4627,9 @@ function mapGeometry() {
      card tall. PAD 34 leaves room for the title block + the labels. */
   var all = [];
   pts.forEach(function (p) { all.push([p.x, -p.y]); });
+  junctionRoads.forEach(function (jr) {
+    jr.pts.forEach(function (p) { all.push([p.x, -p.y]); });
+  });
   Object.keys(curbs).forEach(function (k) {
     curbs[k].forEach(function (p) { all.push([p.x, -p.y]); });
   });
@@ -4368,6 +4715,23 @@ function mapGeometry() {
     addInnerLabel(mapSeg.innerBelow);
     addInnerLabel(mapSeg.innerAbove);
   }
+  /* The cross street's name rides along its stub (rotated, like the
+     interior labels) — so the junction reads as a named crossing, not
+     an anonymous branch. */
+  junctionRoads.forEach(function (jr) {
+    if (!jr.name || !jr.pts || jr.pts.length < 2) return;
+    var mid = Math.floor(jr.pts.length / 2);
+    var mp = jr.pts[mid];
+    var mn = normalOn(jr.pts, mid);
+    var mang = Math.atan2(mn[0], mn[1]) * 180 / Math.PI;
+    if (mang > 90) mang -= 180;
+    if (mang < -90) mang += 180;
+    var ax = mp.x + mn[0] * 12, ay = -mp.y - mn[1] * 12;
+    var c = mapClampRotatedLabel(ax, ay, jr.name, endFs, mang, vb, false);
+    if (!c) return;
+    labels.push({ x: c.x, y: c.y, anchor: "middle", fontSize: endFs, text: jr.name,
+      angle: mang, leader: { x1: mp.x, y1: -mp.y, x2: c.x, y2: c.y } });
+  });
   if (src.kind === "baked") {
     /* The bracketing junctions sit at the segment ends; the road extends
        past them, so mark where the coloured curbs end. */
@@ -4378,6 +4742,7 @@ function mapGeometry() {
   return { ok: true, streetName: src.streetName, segMin: segMin, segMax: segMax,
     drawMin: drawMin, drawMax: drawMax, extended: extended,
     ends: src.ends, signs: signs, road: pts, curbs: curbs, dots: dots, home: home,
+    junctionRoads: junctionRoads, junction: junction,
     title: title, subtitle: subtitle, labels: labels,
     viewBox: vbX.toFixed(1) + " " + vbY.toFixed(1) + " "
       + vbW.toFixed(1) + " " + vbH.toFixed(1) };
@@ -4409,16 +4774,35 @@ function curbColorForVerdict(v) {
    nothing here re-decides whether you can park — plus the limit-only
    fallback for sides with a verified limit but no established cleaning
    rule (Nov 18 call). */
+/* Junction curbs ("next-*" = the same street past the junction,
+   "cross-*" = the cross street): coloured by THEIR sides' verdicts (the
+   junction lookup's own sides), never the current street's. A
+   neighbouring side has no posted limit (live streets carry none), so the
+   limit-only fallback has nothing to fall back on — the verdict is the
+   cleaning verdict alone, and a side with no established window is grey. */
 function mapCurbColor(key, nowMs) {
   nowMs = nowMs || Date.now();
+  var jm = /^((?:next|cross)-)(even|odd)$/.exec(key || "");
+  if (jm) {
+    var jn = (typeof liveJunctionForMap === "function") ? liveJunctionForMap() : null;
+    var jr = jn && (jm[1] === "next-" ? jn.sameStreet : jn.crossStreet);
+    if (!jr || jr.status !== "ready" || !jr.sides) return "grey";
+    return curbColorForVerdict(verdictForSideData(jr.sides[jm[2]], null, nowMs, null));
+  }
   var v = verdictForSide(key, nowMs, parkedAtForVerdict(key));
   if (!v) v = limitOnlyVerdictForSideData(liveActiveSides()[key], limitForSideKey(key), nowMs, parkedAtForVerdict(key));
   return curbColorForVerdict(v);
 }
-function mapCurbColors(nowMs) {
+function mapCurbColors(nowMs, geom) {
   nowMs = nowMs || Date.now();
   var out = {};
   liveActiveSideKeys().forEach(function (k) { out[k] = mapCurbColor(k, nowMs); });
+  /* Junction curbs, when the geometry has them — the keys come from the
+     geometry itself, so a colour is computed exactly for the curbs drawn. */
+  if (!geom) geom = mapGeometry();
+  if (geom && geom.ok && geom.curbs) {
+    Object.keys(geom.curbs).forEach(function (k) { if (!(k in out)) out[k] = mapCurbColor(k, nowMs); });
+  }
   return out;
 }
 function mapColorStroke(color) {
@@ -4458,6 +4842,39 @@ function stayUntilTextFor(side, lim, v, nowMs) {
    wrapper below. */
 function mapDetailForSide(key, nowMs) {
   nowMs = nowMs || Date.now();
+  /* A junction curb's detail card reads from the junction lookup's own
+     sides — the same verdict text as the current street's cards, labelled
+     with where the curb sits (past the junction, or on the cross street).
+     No "Report a sign here" button: a report is filed against the street
+     the app is showing, and this curb belongs to a neighbouring street —
+     reporting it here would misattribute it. (The reports-override build
+     can wire neighbouring-street reports properly.) */
+  var jm = /^((?:next|cross)-)(even|odd)$/.exec(key || "");
+  if (jm) {
+    var jn = (typeof liveJunctionForMap === "function") ? liveJunctionForMap() : null;
+    var jr = jn && (jm[1] === "next-" ? jn.sameStreet : jn.crossStreet);
+    if (!jr || jr.status !== "ready" || !jr.sides) return null;
+    var jside = jr.sides[jm[2]];
+    if (!jside) return null;
+    var jcolor = mapCurbColor(key, nowMs);
+    var jwhere = (jm[1] === "next-")
+      ? "Past " + (jn.name || "the junction") + " — the next block"
+      : (jn.name || "the cross street");
+    var jlabel = (jside.label || jm[2]) + " — " + jwhere;
+    var jv = verdictForSideData(jside, null, nowMs, null);
+    if (!jv) return { key: key, sideLabel: jlabel, color: jcolor,
+      main: "No verified window for this side — the data doesn't say.",
+      allowedUntil: null, comingUp: null, note: null, reportable: false };
+    var jallowed = stayUntilTextFor(jside, null, jv, nowMs);
+    var jcoming = null;
+    var jr2 = nextWindowForSideData(jside, new Date(nowMs));
+    if (jr2) {
+      if (jr2.nw.state === "season_over") jcoming = "Coming up: cleaning resumes " + seasonStartLabel(jr2.win) + ".";
+      else jcoming = "Coming up: " + windowHeadline(jr2.win) + ".";
+    }
+    return { key: key, sideLabel: jlabel, color: jcolor, main: jv.text,
+             allowedUntil: jallowed, comingUp: jcoming, note: null, reportable: false };
+  }
   var sides = liveActiveSides();
   var side = sides[key];
   if (!side) return null;
@@ -4493,7 +4910,7 @@ function mapDetailHtml(key, nowMs) {
   if (d.note) s += '<div style="margin-top:4px">' + esc(d.note) + '</div>';
   if (d.allowedUntil) s += '<div style="margin-top:4px">' + esc(d.allowedUntil) + '</div>';
   if (d.comingUp) s += '<div style="margin-top:4px">' + esc(d.comingUp) + '</div>';
-  s += '<div style="margin-top:8px"><button class="linkbtn" data-report-side="' + esc(d.key) + '">Report a sign here</button></div>';
+  if (d.reportable !== false) s += '<div style="margin-top:8px"><button class="linkbtn" data-report-side="' + esc(d.key) + '">Report a sign here</button></div>';
   return s + '</div>';
 }
 /* The SVG + legend + (when a curb is tapped) the detail card. */
@@ -4512,12 +4929,15 @@ function mapSvgHtml(nowMs, geom, colors) {
   s += '<div class="mapsvg"><svg viewBox="' + geom.viewBox + '" role="img" aria-label="Map of '
     + esc(geom.streetName || "this street") + ' with parking rules by side">';
   s += '<path d="' + mapPathD(geom.road) + '" fill="none" style="stroke:var(--line)" stroke-width="9" stroke-linecap="round"/>';
+  (geom.junctionRoads || []).forEach(function (jr) {
+    s += '<path d="' + mapPathD(jr.pts) + '" fill="none" style="stroke:var(--line)" stroke-width="9" stroke-linecap="round"/>';
+  });
   Object.keys(geom.curbs).forEach(function (k) {
     var color = colors[k] || "grey";
     var d = mapPathD(geom.curbs[k]);
     s += '<path d="' + d + '" fill="none" style="stroke:' + mapColorStroke(color) + '" stroke-width="4.5" stroke-linecap="round"/>';
     s += '<path class="mapcurb-hit" data-map-side="' + esc(k) + '" tabindex="0" role="button" aria-label="'
-      + esc((sides[k] && sides[k].label) || k) + ' — '
+      + esc(mapCurbAriaLabel(k, nowMs)) + ' — '
       + (color === "red" ? "cannot park here now" : color === "green" ? "parking allowed until the deadline" : "no verified rule")
       + '" d="' + d + '" fill="none" stroke="rgba(0,0,0,0)" stroke-width="18" stroke-linecap="round"/>';
   });
@@ -4591,8 +5011,29 @@ function mapOpen() {
 /* Tapping a curb opens (or closes, on a second tap) its detail card — and
    changes nothing else. Read-only info: never the parked side, never the
    timer. */
+/* The tap target's spoken label: the side's own label, or for a junction
+   curb the detail card's label ("Even numbers side — Past Rue
+   Jacques-Casault — the next block"). */
+function mapCurbAriaLabel(key, nowMs) {
+  var sides = liveActiveSides();
+  if (sides[key] && sides[key].label) return sides[key].label;
+  var d = mapDetailForSide(key, nowMs);
+  if (d && d.sideLabel) return d.sideLabel;
+  return key;
+}
+/* Every curb the map draws is tappable: the current street's sides plus
+   the junction curbs (from the geometry itself, so a key is selectable
+   exactly when its curb is drawn). */
+function mapSelectableKeys() {
+  var keys = liveActiveSideKeys().slice();
+  var geom = mapGeometry();
+  if (geom && geom.ok && geom.curbs) {
+    Object.keys(geom.curbs).forEach(function (k) { if (keys.indexOf(k) < 0) keys.push(k); });
+  }
+  return keys;
+}
 function mapSelectCurb(key) {
-  if (!key || liveActiveSideKeys().indexOf(key) < 0) return _mapSelected;
+  if (!key || mapSelectableKeys().indexOf(key) < 0) return _mapSelected;
   _mapSelected = (_mapSelected === key) ? null : key;
   renderMap();
   return _mapSelected;
@@ -4621,16 +5062,18 @@ function renderMap(nowMs) {
   if (!body || body.classList.contains("hidden")) return;
   nowMs = nowMs || Date.now();
   var geom = mapGeometry();
-  var colors = mapCurbColors(nowMs);
+  var colors = mapCurbColors(nowMs, geom);
   var paidSig = "";
   var sides = liveActiveSides();
   liveActiveSideKeys().forEach(function (k) {
     var p = sides[k] && sides[k].paid;
     if (p && p.places_along_m) paidSig += k + ":" + p.places_along_m.join(",") + ";";
   });
+  var jn = (typeof liveJunctionForMap === "function") ? liveJunctionForMap() : null;
+  var jSig = jn ? ("j:" + (jn.sameStreet ? jn.sameStreet.status : "-") + "/" + (jn.crossStreet ? jn.crossStreet.status : "-")) : "j:-";
   var sig = (liveMode() ? "live:" + (LIVE.streetSlug || "") : "baked:" + currentSlug())
     + "|" + JSON.stringify(colors) + "|" + (MAP_LAYERS.paid ? "P" : "p") + (MAP_LAYERS.cleaning ? "C" : "c")
-    + "|" + paidSig + "|" + (_mapSelected || "-") + "|"
+    + "|" + paidSig + "|" + (_mapSelected || "-") + "|" + jSig + "|"
     + (geom && geom.ok ? geom.viewBox : "nogeo:" + (geom && geom.reason || "?"));
   if (sig === _mapSig) return;
   _mapSig = sig;
@@ -5121,6 +5564,17 @@ if (typeof window !== "undefined") {
     liveNearbySetEnabled: function (b) { LIVE_NEARBY_ENABLED = !!b; },
     liveNearbyGetState: function () { return LIVE_NEARBY; },
     liveNearbySetState: function (s) { LIVE_NEARBY = s; },
+    liveJunctionDetect: liveJunctionDetect, livePointAtAlong: livePointAtAlong,
+    liveJunctionLookup: liveJunctionLookup, liveJunctionForMap: liveJunctionForMap,
+    liveJunctionSameSegment: liveJunctionSameSegment,
+    liveJunctionCrossAnchors: liveJunctionCrossAnchors, liveJunctionCrossTouches: liveJunctionCrossTouches,
+    liveJunctionSetEnabled: function (b) { LIVE_JUNCTION_ENABLED = !!b; },
+    liveJunctionGetState: function () { return LIVE_JUNCTION; },
+    liveJunctionSetState: function (s) { LIVE_JUNCTION = s; },
+    LIVE_JUNCTION_CLOSE_M: LIVE_JUNCTION_CLOSE_M, LIVE_JUNCTION_PAST_M: LIVE_JUNCTION_PAST_M,
+    LIVE_JUNCTION_CACHE_PREFIX: LIVE_JUNCTION_CACHE_PREFIX,
+    liveJunctionCacheKey: liveJunctionCacheKey,
+    mapSelectableKeys: mapSelectableKeys, mapCurbAriaLabel: mapCurbAriaLabel,
     LIVE_NEARBY_RADIUS_M: LIVE_NEARBY_RADIUS_M, LIVE_NEARBY_MAX_STREETS: LIVE_NEARBY_MAX_STREETS,
     LIVE_NEARBY_MAX_TRIES: LIVE_NEARBY_MAX_TRIES,
     LIVE_NEARBY_CACHE_PREFIX: LIVE_NEARBY_CACHE_PREFIX,
