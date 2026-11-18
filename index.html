@@ -2373,16 +2373,20 @@ var FINES = {
      8. Nearby streets (Nov 18, his call: "suggest the closest places"
         from city data, never the previously visited streets): once the
         current street's lookup settles, an Overpass area query (~500 m)
-        finds the streets around the fix; the nearest 5 (baked streets
-        never) each run the same pipeline -- centreline + CKAN signs +
+        finds the streets around the fix; candidates run the same
+        pipeline in distance order -- centreline + CKAN signs +
         side mapping via the nearest address on that street as the
         reference point (the no-house-number fallback, at the street's
         closest point to the fix), 1-pole city-data rule, placement
-        guards, conflict/withhold. A street whose lookup fails is
-        skipped silently, never a guessed row. The results feed
-        where-to-move only -- never the hero, the map, or any verdict
-        for the street you are on. Live mode only: on a baked street
-        where-to-move lists that street alone, as before.
+        guards, conflict/withhold -- until 5 have LANDED (Nov 18 cap
+        follow-up, his call: "keep trying farther streets"), with a
+        try-cap of 10 lookups per sweep so a neighbourhood where every
+        street yields nothing stays bounded. A street whose lookup
+        fails is skipped silently, never a guessed row, and never
+        consumes a suggestion slot -- only a try. Baked streets never.
+        The results feed where-to-move only -- never the hero, the map,
+        or any verdict for the street you are on. Live mode only: on a
+        baked street where-to-move lists that street alone, as before.
    The result is cached in localStorage keyed by street + segment and
    re-validated against the dataset's metadata_modified on every open.
    The limit timer stays manual-only on a live street (no limits in the
@@ -2415,7 +2419,8 @@ var LIVE_CACHE_TTL_MS = 7 * 86400000;
 var LIVE_CACHE_PREFIX = "ticketSaver.live.v5."; /* v5: sides assembled under the 1-pole city-data rule (Nov 18) — v4 entries re-fetch once */
 var LIVE_RPA_KEY = "ticketSaver.rpa.v1";
 var LIVE_NEARBY_RADIUS_M = 500; /* nearby-streets lookup (Nov 18): where-to-move suggests the closest streets around the fix, from city data -- proximity filters the candidates, the listing logic ranks them */
-var LIVE_NEARBY_MAX_STREETS = 5; /* cap: the 5 nearest streets -- each extra street costs a Photon + Geobase + signs round trip and a row in the list; 5 streets is 10 curbs, the ones you would actually walk or drive to */
+var LIVE_NEARBY_MAX_STREETS = 5; /* landed cap (Nov 18 cap follow-up): the sweep suggests at most 5 nearby streets -- it keeps trying candidates in distance order until 5 have landed; each landed street costs a Photon + Geobase + signs round trip and a row in the list; 5 streets is 10 curbs, the ones you would actually walk or drive to */
+var LIVE_NEARBY_MAX_TRIES = 10; /* try-cap (Nov 18 cap follow-up): the sweep never attempts an 11th lookup -- a candidate that yields nothing (no house, no centreline, no signs, a fetch failure) consumes a try, never a suggestion slot, so a neighbourhood where every street yields nothing stays bounded */
 var LIVE_NEARBY_CACHE_PREFIX = "ticketSaver.nearby.v1."; /* separate cache from the current-street lookup: a nearby result carries no paid data (the where-to-move rows never read it), so it must never be mistaken for a complete current-street entry */
 var LIVE_NEARBY_ENABLED = true; /* the live-repro suite disables the auto-sweep -- its Overpass fixture answers every area query with the des-pins ways, which would be wrong-fix candidates */
 var LIVE_CARRIAGEWAY = ["motorway", "trunk", "primary", "secondary", "tertiary",
@@ -3748,7 +3753,10 @@ function liveNearbyClosestPoint(fixLat, fixLon, geometry) {
 }
 /* Pure candidate selection from an area-query way set: distinct named
    carriageway streets, minus the current street and the baked streets,
-   within the radius, nearest first, capped. */
+   within the radius, nearest first. NOT capped here -- the sweep caps
+   what it tries (landed 5, tries 10); this list is only proximity
+   filtering, so a farther street with data is reachable once a nearer
+   one yields nothing. */
 function liveNearbyCandidates(ways, currentName, fixLat, fixLon) {
   var byName = {}, order = [];
   (ways || []).forEach(function (w) {
@@ -3783,7 +3791,7 @@ function liveNearbyCandidates(ways, currentName, fixLat, fixLon) {
       anchorLat: best.lat, anchorLon: best.lon });
   });
   out.sort(function (a, b) { return a.distM - b.distM || (a.slug < b.slug ? -1 : 1); });
-  return out.slice(0, LIVE_NEARBY_MAX_STREETS);
+  return out;
 }
 function liveNearbyCacheKey(slug, idTrc, houseNumber) {
   return LIVE_NEARBY_CACHE_PREFIX + slug + "." + (idTrc || ("h" + houseNumber));
@@ -3838,7 +3846,10 @@ async function liveNearbyLookupOne(fixLat, fixLon, cand, areaWays, dataAsOf) {
   }
 }
 /* The sweep: area query -> candidates -> one lookup each, in distance
-   order, each result landing as it arrives. Deduped by fix (same fix
+   order, each result landing as it arrives -- until 5 have LANDED or
+   10 have been TRIED, whichever comes first (Nov 18 cap follow-up).
+   A candidate that yields nothing is skipped silently and never
+   consumes a suggestion slot, only a try. Deduped by fix (same fix
    re-sweeps nothing) and abandoned when the generation moves on (the
    user picked a baked street or a new lookup started). Fire and forget:
    callers never await it. */
@@ -3867,11 +3878,14 @@ async function liveNearbySweepInner(fixLat, fixLon, currentStreetName, key, gen)
       dataAsOf = (pkg.metadata_modified || pkg.metadata_created || "").slice(0, 10) || null;
     } catch (e) { dataAsOf = null; }
     if (gen !== LIVE_GEN || LIVE_NEARBY.fixKey !== key) return null;
-    for (var i = 0; i < cands.length; i++) {
+    var landed = 0, tried = 0;
+    for (var i = 0; i < cands.length && landed < LIVE_NEARBY_MAX_STREETS && tried < LIVE_NEARBY_MAX_TRIES; i++) {
       if (gen !== LIVE_GEN || LIVE_NEARBY.fixKey !== key) return null;
+      tried++;
       var r = await liveNearbyLookupOne(fixLat, fixLon, cands[i], area.ways, dataAsOf);
       if (gen !== LIVE_GEN || LIVE_NEARBY.fixKey !== key) return null;
       if (r && r.result && r.result.sides) {
+        landed++;
         LIVE_NEARBY.streets[r.slug] = r;
         LIVE_NEARBY.status = "ready";
         if (typeof renderWhereToMove === "function") renderWhereToMove();
@@ -5108,6 +5122,7 @@ if (typeof window !== "undefined") {
     liveNearbyGetState: function () { return LIVE_NEARBY; },
     liveNearbySetState: function (s) { LIVE_NEARBY = s; },
     LIVE_NEARBY_RADIUS_M: LIVE_NEARBY_RADIUS_M, LIVE_NEARBY_MAX_STREETS: LIVE_NEARBY_MAX_STREETS,
+    LIVE_NEARBY_MAX_TRIES: LIVE_NEARBY_MAX_TRIES,
     LIVE_NEARBY_CACHE_PREFIX: LIVE_NEARBY_CACHE_PREFIX,
     liveSlug: liveSlug, liveMaybeLookup: liveMaybeLookup, liveRunLookup: liveRunLookup,
     liveWillSwitch: liveWillSwitch, liveNearestKnownStreetDist: liveNearestKnownStreetDist,
