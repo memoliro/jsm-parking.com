@@ -81,6 +81,27 @@
   .warnrow:focus-visible { outline: none; }
   .paidstrip { margin-top: 10px; }
   .paidstrip svg { display: block; width: 100%; height: auto; }
+  /* Phase 5 (Nov 17): the colored map. An SVG of the current street drawn
+     from the real centreline (same along-track snaps as the paid strip);
+     one curb line per side, colored by the verdict in effect right now.
+     Red is the fine-ink (the only red in the palette); green is the accent;
+     grey is neutral. Curbs are schematic — offset 6 m from the centreline
+     so the two sides read apart — the centreline itself is real geometry. */
+  .mapsvg svg { display: block; width: 100%; height: auto; }
+  .maplayer { font-family: inherit; font-size: 16px; font-weight: 700; padding: 6px 14px;
+             border-radius: 999px; border: 2px solid var(--line); background: var(--card);
+             color: var(--muted); cursor: pointer; }
+  .maplayer[aria-pressed="true"] { background: var(--soft-green); border-color: var(--accent); color: var(--ink); }
+  .maplayer:focus-visible { outline: none; border-color: var(--accent);
+             box-shadow: 0 0 0 1px rgba(49,196,141,.35); }
+  .maplegend { font-size: 15px; color: var(--muted); margin-top: 10px; line-height: 1.7; }
+  .mapsw { display: inline-block; width: 14px; height: 14px; border-radius: 4px; vertical-align: -2px; margin-right: 4px; }
+  .mapdotsw { display: inline-block; width: 12px; height: 12px; border-radius: 50%; background: #d97706;
+             border: 1.5px solid #fff; outline: 1px solid #d97706; vertical-align: -1px; margin-right: 4px; }
+  .mapdetail { background: #f7f8f7; border-left: 3px solid var(--accent); border-radius: 0 8px 8px 0;
+             padding: 10px 12px; margin-top: 10px; font-size: 17px; text-align: left; }
+  .mapcurb-hit { cursor: pointer; }
+  .mapcurb-hit:focus-visible { outline: none; }
   .verdict { font-size: 18px; font-weight: 700; margin-top: 4px; }
   .planinputs { display: flex; gap: 10px; margin-top: 10px; }
   .planinputs input { flex: 1 1 0; min-width: 0; font-family: inherit; font-size: 18px;
@@ -195,6 +216,17 @@
   <div class="card" id="pickCard">
     <button class="sidebtn" id="btnSide0"></button>
     <button class="sidebtn" id="btnSide1"></button>
+  </div>
+
+  <!-- Phase 5 (Nov 17): the colored map — an expandable row in the same
+       collapsed-row pattern as the limit timer / plan ahead, so the compact
+       one-screen main view is preserved. The map is the verdict, visualized:
+       each curb line is colored by the verdict in effect right now on that
+       side. Tapping a curb opens a detail card only — it never changes the
+       parked side or the timer. -->
+  <div class="card" id="mapCard">
+    <button class="limitrow" id="mapToggle" aria-expanded="false"><span id="mapToggleText">Street map</span><span class="chev" aria-hidden="true">&rsaquo;</span></button>
+    <div id="mapBody" class="hidden"></div>
   </div>
 
   <div class="card" id="limitCard">
@@ -394,6 +426,7 @@ function setStreet(slug, opts) {
   CENTERLINE = STREET_DATA[slug].centreline;
   applyStreetData();
   _paidWarnSig = ""; /* the paid warning re-renders for the new street's side */
+  _mapSelected = null; _mapSig = ""; /* the map re-renders for the new street */
   if (liveMode()) liveSetIdle(); /* ends the live lookup (renders with the new DATA) */
   if (opts.manual) setManualPick(slug);
   syncStreetUrl(slug);
@@ -1644,6 +1677,7 @@ function renderAll() {
   renderPermitSetting();
   renderSideCards();
   renderHero();
+  renderMap();
   renderLimit();
   renderPlanAhead();
   liveRenderChrome();
@@ -1912,6 +1946,37 @@ function init() {
   el("paidWarnToggle").addEventListener("click", function () {
     setPaidWarnOpen(el("paidWarnBody").classList.contains("hidden"));
   });
+  el("mapToggle").addEventListener("click", function () {
+    setMapOpen(el("mapBody").classList.contains("hidden"));
+  });
+  /* Curb taps + layer toggles + the detail close button all delegate from
+     the map body (its innerHTML is rebuilt on change, so the listeners
+     live on the container, not the rebuilt nodes). A curb tap only ever
+     opens its detail card — it never touches the parked side or the timer. */
+  var mapBodyEl = el("mapBody");
+  if (mapBodyEl) {
+    mapBodyEl.addEventListener("click", function (e) {
+      var t = e.target || e.srcElement;
+      while (t && t !== mapBodyEl) {
+        if (t.getAttribute) {
+          var layer = t.getAttribute("data-map-layer");
+          if (layer) { mapToggleLayer(layer); return; }
+          var side = t.getAttribute("data-map-side");
+          if (side) { mapSelectCurb(side); return; }
+          if (t.getAttribute("data-map-close") !== null) { _mapSelected = null; renderMap(); return; }
+        }
+        t = t.parentNode;
+      }
+    });
+    mapBodyEl.addEventListener("keydown", function (e) {
+      if (e.key !== "Enter" && e.key !== " ") return;
+      var t = e.target || e.srcElement;
+      if (t && t.getAttribute) {
+        var side2 = t.getAttribute("data-map-side");
+        if (side2) { e.preventDefault(); mapSelectCurb(side2); }
+      }
+    });
+  }
   ["planDate", "planTime"].forEach(function (id) {
     var n = el(id);
     if (n) n.addEventListener("input", function () { renderPlanAhead(); });
@@ -1987,6 +2052,7 @@ function init() {
   }, 90000);
   setInterval(function () {
     renderHero();
+    try { renderMap(); } catch (e) { /* a map fault must never swallow the hero tick */ }
     try { renderLimit(); } catch (e) { /* a timer fault must never swallow the hero tick */ }
     try { renderPlanAhead(); } catch (e) { /* a plan-ahead fault must never swallow the hero tick */ }
   }, 30000);
@@ -2091,14 +2157,18 @@ var LIVE_BAND_MIN_M = 3, LIVE_BAND_MAX_M = 10;
 var LIVE_PAID_BAND_MIN_M = 1, LIVE_PAID_BAND_MAX_M = 10; /* place centres sit on the road, closer than sign poles */
 var LIVE_INTERSECTION_M = 20, LIVE_CONSENSUS = 2;
 var LIVE_CACHE_TTL_MS = 7 * 86400000;
-var LIVE_CACHE_PREFIX = "ticketSaver.live.v3."; /* v3: the cached paid block carries the strip-map positions (Phase 4 presentation fix) */
+var LIVE_CACHE_PREFIX = "ticketSaver.live.v4."; /* v4: the cached result retains the centreline (Phase 5 map) — v3 entries re-fetch once */
 var LIVE_RPA_KEY = "ticketSaver.rpa.v1";
 var LIVE_CARRIAGEWAY = ["motorway", "trunk", "primary", "secondary", "tertiary",
   "unclassified", "residential", "living_street"];
 var LIVE = { status: "idle", streetName: null, streetSlug: null, houseNumber: null,
   houseLat: null, houseLon: null, sides: null, counts: null, segment: null,
   sideMethod: null, idTrc: null, dataAsOf: null, errorTitle: null, errorDetail: null,
-  geoDisagreement: false };
+  geoDisagreement: false, centreline: null, houseAlong: null, houseCt: null };
+/* centreline / houseAlong / houseCt (Phase 5): the map needs the road the
+   lookup already chained — the centreline points, the house's along-track
+   position on them, and its cross-track sign. Retained from the lookup
+   result, never re-derived, never invented. */
 var LIVE_LOADING = null; /* { key, promise } — one lookup per street+house at a time */
 var LIVE_GEN = 0; /* bumped by liveSetIdle — a lookup from an older generation drops its result */
 
@@ -2487,7 +2557,13 @@ function liveBuildResult(input) {
       belowName: seg.belowName, aboveName: seg.aboveName },
     houseSide: houseParity, sideMethod: sideMethod, geoDisagreement: geoDisagreement,
     idTrc: geo ? geo.idTrc : null, dataAsOf: input.dataAsOf || null,
-    streetName: input.streetName, houseNumber: input.houseNumber, attributed: attributed };
+    streetName: input.streetName, houseNumber: input.houseNumber, attributed: attributed,
+    /* Phase 5: the map's geometry, retained from this lookup — the chained
+       centreline points, the house's along-track position on them, and its
+       cross-track sign (which side the house sits on). The cache stores
+       this result whole, so a cached lookup maps too. */
+    centreline: chain.points, houseAlong: houseAlong, houseCt: houseSnap.ct,
+    houseLat: input.houseLat, houseLon: input.houseLon };
 }
 
 /* ---- small pure helpers (street name, house number, SQL, cache keys) ---- */
@@ -2754,7 +2830,7 @@ function liveSetIdle() {
     LIVE = { status: "idle", streetName: null, streetSlug: null, houseNumber: null,
       houseLat: null, houseLon: null, sides: null, counts: null, segment: null,
       sideMethod: null, idTrc: null, dataAsOf: null, errorTitle: null, errorDetail: null,
-      geoDisagreement: false };
+      geoDisagreement: false, centreline: null, houseAlong: null, houseCt: null };
     if (typeof renderAll === "function") renderAll();
   }
 }
@@ -3104,7 +3180,8 @@ async function liveRunLookupInner(fix) {
   LIVE = { status: "loading", streetName: fix.streetName, streetSlug: slug,
     houseNumber: fix.houseNumber, houseLat: fix.houseLat, houseLon: fix.houseLon,
     sides: null, counts: null, segment: null, sideMethod: null, idTrc: null,
-    dataAsOf: null, errorTitle: null, errorDetail: null, geoDisagreement: false };
+    dataAsOf: null, errorTitle: null, errorDetail: null, geoDisagreement: false,
+    centreline: null, houseAlong: null, houseCt: null };
   if (typeof renderAll === "function") renderAll();
   try {
     if (typeof fetch === "undefined") {
@@ -3206,7 +3283,518 @@ function liveApplyResult(result, dataAsOf) {
   LIVE.idTrc = result.idTrc; LIVE.dataAsOf = dataAsOf || result.dataAsOf || null;
   LIVE.geoDisagreement = !!result.geoDisagreement;
   LIVE.houseLat = result.houseLat || LIVE.houseLat; LIVE.houseLon = result.houseLon || LIVE.houseLon;
+  /* Phase 5: retain the map geometry from the result (or null when an older
+     cached entry has none — the map then says so plainly). */
+  LIVE.centreline = result.centreline || null;
+  LIVE.houseAlong = (typeof result.houseAlong === "number") ? result.houseAlong : null;
+  LIVE.houseCt = (typeof result.houseCt === "number") ? result.houseCt : null;
   if (typeof renderAll === "function") renderAll();
+}
+
+
+/* ---- Phase 5: the colored map (Nov 17) ----
+   An SVG of the current street, drawn from the REAL centreline geometry
+   (the same along-track snaps the paid strip already uses — no basemap
+   tiles, no server, offline-friendly). Two curb lines, one per side,
+   colored by the rule in effect RIGHT NOW, computed by REUSING the Phase 2
+   verdict functions per side — no forked verdict logic anywhere here.
+   Curb-color rule (the map IS the verdict, visualized):
+     red   — the verdict says you cannot park/stay there now: cleaning in
+             effect, a whole-side no-stopping verdict, or your own limit
+             expired on that side (verdict kinds no_stop / cleaning_now /
+             limit_expired);
+     green — the verdict gives a stay-until deadline: cleaning starts later,
+             the limit binds first (kinds cleaning_soon / limit), no
+             cleaning until next season (kind season — the deadline is the
+             next window start), or your permit exempts the window
+             (kind permit_exempt);
+     grey  — no verdict (not established / ambiguous / conflict / unknown):
+             never green, never red.
+   Layer toggles exist ONLY for what we have real data for: "Paid" (the
+   real metered spots, never invented) and "Cleaning / no-parking" (the
+   red/green curb coloring). Both ON by default. Toggling Cleaning off
+   hides the cleaning-derived coloring — cleaning states fall back to
+   neutral grey, while a limit-derived state (limit binds / limit expired)
+   keeps its color, because the limit is not a cleaning marking. Toggling
+   Paid off hides the metered-spot dots only. The detail card stays
+   available on tap whatever the toggles say. There are no construction /
+   EV / accessible layers: we have no data for them, so those toggles do
+   not exist. Snow is deferred — nothing here draws it.
+   Tapping a curb opens a detail card (side name + "Parking allowed until
+   {deadline}" + "Coming up {next rule}", reusing verdict wording) and
+   changes NOTHING else: not the parked side, not the timer.
+   Geometry: centreline points are projected to local metres around the
+   reference address; the segment is clipped to the street's real extent
+   (along-track metres from the reference address); curbs are the
+   centreline offset 6 m to each side — schematic, so the two sides read
+   apart; the centreline itself is real. Cross-street labels come from the
+   segment ends (paid seg_ends when they match the extent, else the
+   segment bound strings); a bound that is a way end, not a cross street,
+   gets no label rather than an invented one.
+   Live streets map from the same live data: the lookup retains its
+   centreline + house along-track + house cross-track (live-lookup.js), so
+   the live map needs no second fetch. A live street whose lookup kept no
+   centreline (an older cached entry) says so plainly instead of drawing
+   something false. */
+var MAP_CURB_M = 6; /* schematic half-width: curbs sit 6 m off the centreline */
+var MAP_LAYERS = { paid: true, cleaning: true };
+var _mapSelected = null; /* side key whose detail card is open, or null */
+var _mapSig = "";
+function mapXY(lat, lon, refLat, refLon) {
+  var coslat = Math.cos(refLat * Math.PI / 180);
+  return [(lon - refLon) * 111320 * coslat, (lat - refLat) * 110540];
+}
+function mapHomeSideKey(houseNumber) {
+  var keys = liveActiveSideKeys();
+  if (keys.indexOf("even") >= 0 && keys.indexOf("odd") >= 0) {
+    if (typeof houseNumber !== "number") return null;
+    return (houseNumber % 2 === 0) ? "even" : "odd";
+  }
+  if (typeof DATA !== "undefined" && DATA && DATA.street && DATA.street.default_side) return DATA.street.default_side;
+  return keys[0] || null;
+}
+/* Which cross-track sign each side sits on: the attributed signs' majority
+   where they exist, else the reference address — the house point's
+   cross-track sign gives the home side, the other side is opposite. A side
+   with no evidence at all gets 0 (unknown): its curb is not drawn. */
+function mapSideCtSigns(attributed, houseNumber, houseCt) {
+  var counts = {};
+  (attributed || []).forEach(function (s) {
+    if (!s || !s.side || typeof s.cross_track_m !== "number") return;
+    counts[s.side] = counts[s.side] || { pos: 0, neg: 0 };
+    if (s.cross_track_m >= 0) counts[s.side].pos++; else counts[s.side].neg++;
+  });
+  var homeKey = mapHomeSideKey(houseNumber);
+  var out = {};
+  liveActiveSideKeys().forEach(function (k) {
+    var c = counts[k];
+    if (c && c.pos !== c.neg) { out[k] = c.pos > c.neg ? 1 : -1; return; }
+    if (typeof houseCt === "number" && houseCt !== 0 && homeKey) {
+      var homeSign = houseCt > 0 ? 1 : -1;
+      out[k] = (k === homeKey) ? homeSign : -homeSign;
+      return;
+    }
+    out[k] = 0;
+  });
+  return out;
+}
+/* The segment extent (along-track metres from the reference address) +
+   its bound strings, from the baked street's own extent record. The two
+   extent shapes in the data (min/max, ne_end/sw_end) are both read. */
+function mapSegmentExtent() {
+  if (typeof DATA === "undefined" || !DATA || !DATA.street) return null;
+  var e = DATA.street.segment_extent_along_track_m;
+  if (!e) return null;
+  var min = (typeof e.min === "number") ? e.min : e.ne_end;
+  var max = (typeof e.max === "number") ? e.max : e.sw_end;
+  if (typeof min !== "number" || typeof max !== "number" || !(max > min)) return null;
+  return { min: min, max: max, lowBound: e.min_bound || e.ne_bound || null,
+           highBound: e.max_bound || e.sw_bound || null };
+}
+/* A bound string names a cross street ("Rue McGregor intersection (OSM)")
+   or a way end ("East end of Av Freud (OSM way end)"). Only the first is
+   a label; a way end is not a cross street, so it gets none. */
+function mapEndLabelFromBound(bound) {
+  if (!bound) return null;
+  var s = String(bound);
+  if (/^\s*(East|West|North|South)\s+end\b/i.test(s)) return null;
+  var m = /^\s*((?:Rue|Avenue|Chemin|Boulevard|Place|All[eé]e|Impasse|Terrasse|Square|Croissant|Mont[eé]e|C[ôo]te)\s+[^,(]+)/i.exec(s);
+  if (!m) return null;
+  /* "Avenue Victoria intersection (OSM)" -> "Avenue Victoria": the capture
+     stops at the "(" but keeps the word "intersection" — strip it. */
+  return m[1].replace(/\s+$/, "").replace(/\s+intersection$/i, "");
+}
+/* Cross-street labels for the baked segment: the paid block's seg_ends
+   when they match this exact extent (clean names, same segment), else the
+   bound strings parsed above. */
+function mapBakedEndLabels(extent) {
+  var sides = liveActiveSides();
+  var keys = Object.keys(sides || {});
+  for (var i = 0; i < keys.length; i++) {
+    var p = sides[keys[i]] && sides[keys[i]].paid;
+    if (p && p.seg_m && p.seg_ends && p.seg_m[0] === extent.min && p.seg_m[1] === extent.max
+        && p.seg_ends.length === 2) return { low: p.seg_ends[0], high: p.seg_ends[1] };
+  }
+  return { low: mapEndLabelFromBound(extent.lowBound), high: mapEndLabelFromBound(extent.highBound) };
+}
+/* Where the map's geometry comes from, baked or live. Live needs a ready
+   lookup WITH a retained centreline; anything else is an honest "no map". */
+function mapSource() {
+  if (liveMode()) {
+    if (LIVE.status === "loading") return { error: "loading" };
+    if (LIVE.status !== "ready") {
+      return { error: "live-error",
+               message: "No street map here — " + (LIVE.errorDetail || "the live lookup didn't produce a street map.") };
+    }
+    if (!LIVE.centreline || LIVE.centreline.length < 2) {
+      return { error: "no-centreline",
+               message: "No street map here — this saved lookup kept no centreline, so nothing can be drawn. Re-check your location to redraw it." };
+    }
+    if (!LIVE.segment || typeof LIVE.segment.min !== "number" || typeof LIVE.segment.max !== "number") {
+      return { error: "no-segment",
+               message: "No street map here — the live lookup kept no street segment, so nothing can be drawn." };
+    }
+    return { kind: "live", centreline: LIVE.centreline, refLat: LIVE.houseLat, refLon: LIVE.houseLon,
+             houseNumber: LIVE.houseNumber, houseCt: LIVE.houseCt,
+             seg: { min: LIVE.segment.min, max: LIVE.segment.max },
+             ends: { low: LIVE.segment.belowName || null, high: LIVE.segment.aboveName || null },
+             attributed: null, streetName: LIVE.streetName };
+  }
+  var extent = mapSegmentExtent();
+  if (!extent) return { error: "no-segment",
+    message: "No street map here — this street has no recorded segment extent, so nothing can be drawn." };
+  if (!CENTERLINE || CENTERLINE.length < 2) return { error: "no-centreline",
+    message: "No street map here — this street has no centreline, so nothing can be drawn." };
+  var houseNumber = (typeof DATA !== "undefined" && DATA && DATA.street && DATA.street.address_number)
+    ? parseInt(DATA.street.address_number, 10) : NaN;
+  return { kind: "baked", centreline: CENTERLINE, refLat: HOME_LAT, refLon: HOME_LON,
+           houseNumber: isNaN(houseNumber) ? null : houseNumber, houseCt: null,
+           seg: extent, ends: mapBakedEndLabels(extent),
+           attributed: (typeof DATA !== "undefined" && DATA) ? DATA.attributed_signs : null,
+           streetName: (typeof DATA !== "undefined" && DATA && DATA.street) ? DATA.street.short_name : null };
+}
+/* Pure geometry: clip the centreline to the segment, offset the curbs,
+   place the paid dots + the home tick. All math in local metres (y = north);
+   the SVG flips y at render. Returns { ok: false, reason, message } when
+   nothing honest can be drawn. */
+function mapGeometry() {
+  var src = mapSource();
+  if (!src || src.error) return { ok: false, reason: src ? src.error : "no-source",
+    message: (src && src.message) || "No street map here." };
+  var cl = src.centreline, refLat = src.refLat, refLon = src.refLon;
+  var cum = liveCumAlong(cl, refLat, refLon);
+  var houseSnap = liveSnap(refLat, refLon, cl, refLat, refLon);
+  if (!houseSnap) return { ok: false, reason: "no-snap",
+    message: "No street map here — the reference address doesn't sit on the street map." };
+  var homeAlong = liveAlongFromSnap(cum, cl, houseSnap, refLat, refLon);
+  var houseCt = (typeof src.houseCt === "number") ? src.houseCt : houseSnap.ct;
+  var signs = mapSideCtSigns(src.attributed, src.houseNumber, houseCt);
+  var segMin = src.seg.min, segMax = src.seg.max;
+  /* Clip the centreline to [segMin, segMax] in along-track metres from the
+     reference address, interpolating the boundary points. */
+  var pts = [];
+  function pushPt(x, y, rel) {
+    var last = pts[pts.length - 1];
+    if (last && Math.abs(last.x - x) < 0.01 && Math.abs(last.y - y) < 0.01) return;
+    pts.push({ x: x, y: y, rel: rel });
+  }
+  for (var i = 0; i < cl.length - 1; i++) {
+    var a = mapXY(cl[i][0], cl[i][1], refLat, refLon);
+    var b = mapXY(cl[i + 1][0], cl[i + 1][1], refLat, refLon);
+    var ra = cum[i] - homeAlong, rb = cum[i + 1] - homeAlong;
+    var lo = Math.min(ra, rb), hi = Math.max(ra, rb);
+    if (hi < segMin || lo > segMax) continue;
+    var t0 = 0, t1 = 1;
+    if (ra < segMin) t0 = Math.max(t0, (segMin - ra) / (rb - ra));
+    if (ra > segMax) t0 = Math.max(t0, (ra - segMax) / (ra - rb));
+    if (rb < segMin) t1 = Math.min(t1, (segMin - ra) / (rb - ra));
+    if (rb > segMax) t1 = Math.min(t1, (ra - segMax) / (ra - rb));
+    if (t1 < t0) continue;
+    pushPt(a[0] + (b[0] - a[0]) * t0, a[1] + (b[1] - a[1]) * t0, ra + (rb - ra) * t0);
+    pushPt(a[0] + (b[0] - a[0]) * t1, a[1] + (b[1] - a[1]) * t1, ra + (rb - ra) * t1);
+  }
+  if (pts.length < 2) return { ok: false, reason: "no-snap",
+    message: "No street map here — the street segment doesn't overlap the centreline." };
+  function normalAt(j) {
+    var p = pts[j], q = pts[Math.min(j + 1, pts.length - 1)], r = pts[Math.max(j - 1, 0)];
+    var dx = q.x - r.x, dy = q.y - r.y, len = Math.sqrt(dx * dx + dy * dy) || 1;
+    return [-dy / len, dx / len]; /* +normal is the +cross-track direction */
+  }
+  function pointAtRel(rel) {
+    for (var j = 0; j < pts.length - 1; j++) {
+      var r0 = pts[j].rel, r1 = pts[j + 1].rel;
+      if ((rel >= r0 && rel <= r1) || (rel >= r1 && rel <= r0)) {
+        var t = (r1 === r0) ? 0 : (rel - r0) / (r1 - r0);
+        var nx = normalAt(j);
+        return { x: pts[j].x + (pts[j + 1].x - pts[j].x) * t,
+                 y: pts[j].y + (pts[j + 1].y - pts[j].y) * t, n: nx };
+      }
+    }
+    return null;
+  }
+  var curbs = {};
+  liveActiveSideKeys().forEach(function (k) {
+    if (!signs[k]) return; /* unknown side: no curb is drawn, honestly */
+    curbs[k] = pts.map(function (p, j) {
+      var n = normalAt(j);
+      return { x: p.x + n[0] * MAP_CURB_M * signs[k], y: p.y + n[1] * MAP_CURB_M * signs[k] };
+    });
+  });
+  var dots = [];
+  if (MAP_LAYERS.paid) {
+    var sides = liveActiveSides();
+    liveActiveSideKeys().forEach(function (k) {
+      var p = sides[k] && sides[k].paid;
+      if (!p || p.status !== "paid" || !p.places_along_m || !signs[k]) return;
+      p.places_along_m.forEach(function (m) {
+        var at = pointAtRel(m);
+        if (!at) return;
+        dots.push({ x: at.x + at.n[0] * MAP_CURB_M * signs[k],
+                    y: at.y + at.n[1] * MAP_CURB_M * signs[k], side: k });
+      });
+    });
+  }
+  var home = null;
+  if (segMin <= 0 && 0 <= segMax) {
+    var hp = pointAtRel(0);
+    if (hp) home = { x: hp.x, y: hp.y, n: hp.n,
+      label: (typeof DATA !== "undefined" && DATA && DATA.street && DATA.street.address_number && !liveMode())
+        ? String(DATA.street.address_number)
+        : (liveMode() && LIVE.houseNumber ? String(LIVE.houseNumber) : null) };
+  }
+  /* Fit: everything in SVG coords (y flipped), padded for the labels. */
+  var all = [];
+  pts.forEach(function (p) { all.push([p.x, -p.y]); });
+  Object.keys(curbs).forEach(function (k) {
+    curbs[k].forEach(function (p) { all.push([p.x, -p.y]); });
+  });
+  dots.forEach(function (d) { all.push([d.x, -d.y]); });
+  var minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  all.forEach(function (q) {
+    if (q[0] < minX) minX = q[0]; if (q[0] > maxX) maxX = q[0];
+    if (q[1] < minY) minY = q[1]; if (q[1] > maxY) maxY = q[1];
+  });
+  var PAD = 34;
+  var mid = pointAtRel((segMin + segMax) / 2);
+  var streetAngle = 0;
+  if (mid) {
+    var j0 = 0;
+    for (var j = 0; j < pts.length - 1; j++) {
+      if ((pts[j].rel <= (segMin + segMax) / 2 && pts[j + 1].rel >= (segMin + segMax) / 2)
+          || (pts[j].rel >= (segMin + segMax) / 2 && pts[j + 1].rel <= (segMin + segMax) / 2)) { j0 = j; break; }
+    }
+    var ang = Math.atan2(-(pts[j0 + 1].y - pts[j0].y), pts[j0 + 1].x - pts[j0].x) * 180 / Math.PI;
+    if (Math.abs(ang) <= 75) streetAngle = ang;
+  }
+  return { ok: true, streetName: src.streetName, segMin: segMin, segMax: segMax,
+    ends: src.ends, signs: signs, road: pts, curbs: curbs, dots: dots, home: home,
+    mid: mid ? { x: mid.x, y: -mid.y, angle: streetAngle } : null,
+    viewBox: (minX - PAD).toFixed(1) + " " + (minY - PAD).toFixed(1) + " "
+      + (maxX - minX + 2 * PAD).toFixed(1) + " " + (maxY - minY + 2 * PAD).toFixed(1) };
+}
+function mapPathD(list) {
+  var d = "";
+  list.forEach(function (p, i) {
+    d += (i === 0 ? "M" : "L") + p.x.toFixed(1) + " " + (-p.y).toFixed(1);
+  });
+  return d;
+}
+/* The curb color for one side at a moment. Reuses the Phase 2 verdict —
+   nothing here re-decides whether you can park. With the Cleaning layer
+   off, cleaning-derived states fall back to grey; a limit-derived state
+   (the limit binds, or your limit expired) keeps its color, because the
+   limit is not a cleaning marking. */
+function mapCurbColor(key, nowMs) {
+  nowMs = nowMs || Date.now();
+  var v = verdictForSide(key, nowMs, parkedAtForVerdict(key));
+  if (!v) return "grey";
+  if (v.kind === "no_stop" || v.kind === "cleaning_now" || v.kind === "limit_expired") {
+    if (!MAP_LAYERS.cleaning && v.kind !== "limit_expired") return "grey";
+    return "red";
+  }
+  if (!MAP_LAYERS.cleaning && v.kind !== "limit") return "grey";
+  return "green";
+}
+function mapCurbColors(nowMs) {
+  nowMs = nowMs || Date.now();
+  var out = {};
+  liveActiveSideKeys().forEach(function (k) { out[k] = mapCurbColor(k, nowMs); });
+  return out;
+}
+function mapColorStroke(color) {
+  return color === "red" ? "var(--fine-ink)" : color === "green" ? "var(--accent)" : "#b3beb6";
+}
+/* Detail card data for one side: the verdict wording, a stay-until line
+   when a deadline exists, and the next rule. Pure — the HTML is a thin
+   wrapper below. */
+function mapDetailForSide(key, nowMs) {
+  nowMs = nowMs || Date.now();
+  var sides = liveActiveSides();
+  var side = sides[key];
+  if (!side) return null;
+  var color = mapCurbColor(key, nowMs);
+  var label = side.label || key;
+  var v = verdictForSide(key, nowMs, parkedAtForVerdict(key));
+  if (!v) return { key: key, sideLabel: label, color: color,
+    main: "No verified window for this side — the data doesn't say.",
+    allowedUntil: null, comingUp: null };
+  var allowedUntil = null;
+  if ((v.kind === "cleaning_soon" || v.kind === "limit") && v.deadlineMs) {
+    allowedUntil = "Parking allowed until " + fmtDayTime(v.deadlineMs)
+      + (v.binds === "limit" ? " — parking limit." : " — cleaning starts then.");
+  } else if (v.kind === "cleaning_now") {
+    var r0 = nextWindowForSide(key, new Date(nowMs));
+    if (r0 && r0.nw.state === "now") {
+      allowedUntil = "Parking allowed again at " + fmtTimeToronto(r0.nw.end) + ".";
+    }
+  } else if (v.kind === "season") {
+    var r1 = nextWindowForSide(key, new Date(nowMs));
+    if (r1) {
+      /* Months out, the weekday + time alone ("Thu 5:30 PM") doesn't say
+         which Thursday — the date rides along. */
+      allowedUntil = "Parking allowed until " + fmtDateShortToronto(r1.nw.start) + ", "
+        + fmtTimeToronto(r1.nw.start) + " — cleaning resumes then.";
+    }
+  }
+  var comingUp = null;
+  var r = nextWindowForSide(key, new Date(nowMs));
+  if (r) {
+    if (r.nw.state === "season_over") {
+      comingUp = "Coming up: cleaning resumes " + seasonStartLabel(r.win) + ".";
+    } else {
+      comingUp = "Coming up: " + windowHeadline(r.win) + ".";
+    }
+  }
+  return { key: key, sideLabel: label, color: color, main: v.text,
+           allowedUntil: allowedUntil, comingUp: comingUp };
+}
+function mapDetailHtml(key, nowMs) {
+  var d = mapDetailForSide(key, nowMs);
+  if (!d) return "";
+  var s = '<div class="mapdetail"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px">'
+    + '<b>' + esc(d.sideLabel) + '</b>'
+    + '<span class="mapsw" style="background:' + mapColorStroke(d.color) + '"></span>'
+    + '<button class="linkbtn" data-map-close aria-label="Close detail">&#10005;</button></div>'
+    + '<div style="margin-top:4px">' + esc(d.main) + '</div>';
+  if (d.allowedUntil) s += '<div style="margin-top:4px">' + esc(d.allowedUntil) + '</div>';
+  if (d.comingUp) s += '<div style="margin-top:4px">' + esc(d.comingUp) + '</div>';
+  return s + '</div>';
+}
+/* The SVG + legend + (when a curb is tapped) the detail card. */
+function mapSvgHtml(nowMs, geom, colors) {
+  nowMs = nowMs || Date.now();
+  if (!geom) geom = mapGeometry();
+  if (!colors) colors = mapCurbColors(nowMs);
+  var s = '<div style="display:flex;gap:8px;justify-content:center;margin-bottom:10px">'
+    + '<button class="maplayer" data-map-layer="paid" aria-pressed="' + MAP_LAYERS.paid + '">Paid</button>'
+    + '<button class="maplayer" data-map-layer="cleaning" aria-pressed="' + MAP_LAYERS.cleaning + '">Cleaning / no-parking</button>'
+    + '</div>';
+  if (!geom.ok) {
+    return s + '<div class="note">' + esc(geom.message || "No street map here.") + '</div>';
+  }
+  var sides = liveActiveSides();
+  s += '<div class="mapsvg"><svg viewBox="' + geom.viewBox + '" role="img" aria-label="Map of '
+    + esc(geom.streetName || "this street") + ' with parking rules by side">';
+  s += '<path d="' + mapPathD(geom.road) + '" fill="none" style="stroke:var(--line)" stroke-width="9" stroke-linecap="round"/>';
+  Object.keys(geom.curbs).forEach(function (k) {
+    var color = colors[k] || "grey";
+    var d = mapPathD(geom.curbs[k]);
+    s += '<path d="' + d + '" fill="none" style="stroke:' + mapColorStroke(color) + '" stroke-width="4.5" stroke-linecap="round"/>';
+    s += '<path class="mapcurb-hit" data-map-side="' + esc(k) + '" tabindex="0" role="button" aria-label="'
+      + esc((sides[k] && sides[k].label) || k) + ' — '
+      + (color === "red" ? "cannot park here now" : color === "green" ? "parking allowed until the deadline" : "no verified rule")
+      + '" d="' + d + '" fill="none" stroke="rgba(0,0,0,0)" stroke-width="18" stroke-linecap="round"/>';
+  });
+  geom.dots.forEach(function (dot) {
+    s += '<circle cx="' + dot.x.toFixed(1) + '" cy="' + (-dot.y).toFixed(1)
+      + '" r="4.5" fill="#d97706" stroke="#fff" stroke-width="1.5"/>';
+  });
+  if (geom.home) {
+    var hx = geom.home.x, hy = -geom.home.y;
+    var nx = geom.home.n[0], ny = -geom.home.n[1];
+    s += '<line x1="' + (hx - nx * 7).toFixed(1) + '" y1="' + (hy - ny * 7).toFixed(1)
+      + '" x2="' + (hx + nx * 7).toFixed(1) + '" y2="' + (hy + ny * 7).toFixed(1)
+      + '" style="stroke:var(--ink)" stroke-width="2"/>';
+    if (geom.home.label) {
+      s += '<text x="' + hx.toFixed(1) + '" y="' + (hy + 20).toFixed(1)
+        + '" font-size="11" font-weight="bold" style="fill:var(--ink)" text-anchor="middle">' + esc(geom.home.label) + '</text>';
+    }
+  }
+  if (geom.mid && geom.streetName) {
+    s += '<text x="' + geom.mid.x.toFixed(1) + '" y="' + (geom.mid.y - 16).toFixed(1)
+      + '" font-size="12" font-weight="bold" style="fill:var(--ink)" text-anchor="middle"'
+      + (geom.mid.angle ? ' transform="rotate(' + geom.mid.angle.toFixed(1) + ' ' + geom.mid.x.toFixed(1) + ' ' + (geom.mid.y - 16).toFixed(1) + ')"' : '')
+      + '>' + esc(geom.streetName) + '</text>';
+  }
+  if (geom.ends) {
+    var road = geom.road;
+    if (geom.ends.low && road.length) {
+      var p0 = road[0], p1 = road[1] || road[0];
+      var ox = p0.x - p1.x, oy = -(p0.y - p1.y), ol = Math.sqrt(ox * ox + oy * oy) || 1;
+      s += '<text x="' + (p0.x + ox / ol * 12).toFixed(1) + '" y="' + (-p0.y + oy / ol * 12 - 6).toFixed(1)
+        + '" font-size="10" style="fill:var(--muted)" text-anchor="'
+        + (ox < -0.3 * ol ? "end" : ox > 0.3 * ol ? "start" : "middle") + '">' + esc(geom.ends.low) + '</text>';
+    }
+    if (geom.ends.high && road.length) {
+      var q0 = road[road.length - 1], q1 = road[road.length - 2] || q0;
+      var px = q0.x - q1.x, py = -(q0.y - q1.y), pl = Math.sqrt(px * px + py * py) || 1;
+      s += '<text x="' + (q0.x + px / pl * 12).toFixed(1) + '" y="' + (-q0.y + py / pl * 12 - 6).toFixed(1)
+        + '" font-size="10" style="fill:var(--muted)" text-anchor="'
+        + (px < -0.3 * pl ? "end" : px > 0.3 * pl ? "start" : "middle") + '">' + esc(geom.ends.high) + '</text>';
+    }
+  }
+  s += '</svg></div>';
+  s += '<div class="maplegend"><span class="mapsw" style="background:var(--accent)"></span>You can stay until the deadline'
+    + ' &nbsp; <span class="mapsw" style="background:var(--fine-ink)"></span>Cannot park / stay now'
+    + ' &nbsp; <span class="mapsw" style="background:#b3beb6"></span>Not established';
+  if (geom.dots.length) s += ' &nbsp; <span class="mapdotsw"></span>Metered spot';
+  s += '</div>';
+  s += '<div class="note" style="margin-top:6px">Schematic map — curbs drawn from the street&rsquo;s centreline. Tap a curb for its rule.</div>';
+  if (_mapSelected) s += mapDetailHtml(_mapSelected, nowMs);
+  return s;
+}
+function mapBodyHtml(nowMs, geom, colors) { return mapSvgHtml(nowMs, geom, colors); }
+function setMapOpen(open) {
+  var body = el("mapBody");
+  if (!body) return;
+  body.classList.toggle("hidden", !open);
+  var b = el("mapToggle");
+  if (b) {
+    b.setAttribute("aria-expanded", open ? "true" : "false");
+    b.classList.toggle("open", open);
+  }
+  if (open) renderMap();
+}
+function mapOpen() {
+  var body = el("mapBody");
+  return !!(body && !body.classList.contains("hidden"));
+}
+/* Tapping a curb opens (or closes, on a second tap) its detail card — and
+   changes nothing else. Read-only info: never the parked side, never the
+   timer. */
+function mapSelectCurb(key) {
+  if (!key || liveActiveSideKeys().indexOf(key) < 0) return _mapSelected;
+  _mapSelected = (_mapSelected === key) ? null : key;
+  renderMap();
+  return _mapSelected;
+}
+function mapSelectedCurb() { return _mapSelected; }
+function mapLayers() { return { paid: MAP_LAYERS.paid, cleaning: MAP_LAYERS.cleaning }; }
+function mapSetLayer(name, on) {
+  if (name !== "paid" && name !== "cleaning") return mapLayers();
+  MAP_LAYERS[name] = !!on;
+  renderMap();
+  return mapLayers();
+}
+function mapToggleLayer(name) {
+  if (name !== "paid" && name !== "cleaning") return mapLayers();
+  return mapSetLayer(name, !MAP_LAYERS[name]);
+}
+/* The map body re-renders only when something it shows changed (street,
+   curb colors, layers, paid spots, selected curb, geometry) — the 30 s
+   hero tick and the expand/collapse toggle must never wipe an open detail
+   card. */
+function renderMap(nowMs) {
+  var card = el("mapCard");
+  if (!card) return;
+  var body = el("mapBody");
+  if (!body || body.classList.contains("hidden")) return;
+  nowMs = nowMs || Date.now();
+  var geom = mapGeometry();
+  var colors = mapCurbColors(nowMs);
+  var paidSig = "";
+  var sides = liveActiveSides();
+  liveActiveSideKeys().forEach(function (k) {
+    var p = sides[k] && sides[k].paid;
+    if (p && p.places_along_m) paidSig += k + ":" + p.places_along_m.join(",") + ";";
+  });
+  var sig = (liveMode() ? "live:" + (LIVE.streetSlug || "") : "baked:" + currentSlug())
+    + "|" + JSON.stringify(colors) + "|" + (MAP_LAYERS.paid ? "P" : "p") + (MAP_LAYERS.cleaning ? "C" : "c")
+    + "|" + paidSig + "|" + (_mapSelected || "-") + "|"
+    + (geom && geom.ok ? geom.viewBox : "nogeo:" + (geom && geom.reason || "?"));
+  if (sig === _mapSig) return;
+  _mapSig = sig;
+  body.innerHTML = mapBodyHtml(nowMs, geom, colors);
 }
 
 /* Test hook (also handy in the console): pure date/.ics logic. */
@@ -3265,6 +3853,15 @@ if (typeof window !== "undefined") {
     paidUnknownHtml: paidUnknownHtml, paidWarnRowText: paidWarnRowText,
     paidStripHtml: paidStripHtml, paidWarnBodyHtml: paidWarnBodyHtml,
     renderPaidWarn: renderPaidWarn, setPaidWarnOpen: setPaidWarnOpen, FINES: FINES,
+    mapGeometry: mapGeometry, mapSource: mapSource, mapSegmentExtent: mapSegmentExtent,
+    mapEndLabelFromBound: mapEndLabelFromBound, mapBakedEndLabels: mapBakedEndLabels,
+    mapSideCtSigns: mapSideCtSigns, mapHomeSideKey: mapHomeSideKey,
+    mapCurbColor: mapCurbColor, mapCurbColors: mapCurbColors, mapColorStroke: mapColorStroke,
+    mapDetailForSide: mapDetailForSide, mapDetailHtml: mapDetailHtml,
+    mapSvgHtml: mapSvgHtml, mapBodyHtml: mapBodyHtml, renderMap: renderMap,
+    setMapOpen: setMapOpen, mapOpen: mapOpen, mapSelectCurb: mapSelectCurb,
+    mapSelectedCurb: mapSelectedCurb, mapLayers: mapLayers, mapSetLayer: mapSetLayer,
+    mapToggleLayer: mapToggleLayer, MAP_CURB_M: MAP_CURB_M,
     bindingDeadlineForSide: bindingDeadlineForSide, bindingDeadlineForSideData: bindingDeadlineForSideData,
     heroWarningState: heroWarningState, heroWarningStateForData: heroWarningStateForData,
     limitForSideKey: limitForSideKey, anchorLimitStartFor: anchorLimitStartFor,
