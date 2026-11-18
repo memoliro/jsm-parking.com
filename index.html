@@ -160,6 +160,18 @@
   .limitrow #limitToggleText { flex: 1; text-align: center; }
   .limitrow #planToggleText { flex: 1; text-align: center; }
   .limitrow #whereToggleText { flex: 1; text-align: center; }
+  .limitrow #reportToggleText { flex: 1; text-align: center; }
+  /* Phase 5 piece 3 (Nov 18): sign reports — free-text textarea + the list
+     of reports for this street. Same 17–18px type as the rest; report rows
+     are left-aligned like the where-to-move rows. */
+  .reporttext { width: 100%; font-family: inherit; font-size: 18px; padding: 12px;
+             border: 2px solid var(--line); border-radius: 12px; background: var(--card);
+             color: var(--ink); margin-top: 10px; min-height: 84px; resize: vertical; }
+  .reporttext:focus-visible { outline: none; border-color: var(--accent);
+             box-shadow: 0 0 0 1px rgba(49,196,141,.35); }
+  .reportitem { border-top: 1px solid var(--line); padding: 10px 2px; font-size: 17px; text-align: left; }
+  .reportitem:first-child { border-top: 0; }
+  .reportitem .repflag { font-weight: 700; }
   /* Phase 5 piece 2: where-to-move rows — one per curb, longest stay first.
      Current-street rows are buttons (tap opens the map on that curb);
      other-street rows are plain divs (their map shows when that street is
@@ -252,6 +264,25 @@
   <div class="card" id="whereCard">
     <button class="limitrow" id="whereToggle" aria-expanded="false"><span id="whereToggleText">Where to move</span><span class="chev" aria-hidden="true">&rsaquo;</span></button>
     <div id="whereBody" class="hidden"></div>
+  </div>
+
+  <!-- Phase 5 piece 3 (Nov 18): sign reports — a collapsed row in the same
+       pattern as the map / where-to-move rows, so the compact one-screen main
+       view stays compact. A report names the curb (prefilled from the tapped
+       map curb or the picked side) + what the sign says (free text). Reports
+       are community reports, never verified rules: they are shown labelled
+       unverified and never change a verdict, countdown, fine or map color.
+       Text only — photos need R2, which is not enabled on the account. -->
+  <div class="card" id="reportCard">
+    <button class="limitrow" id="reportToggle" aria-expanded="false"><span id="reportToggleText">Report a sign</span><span class="chev" aria-hidden="true">&rsaquo;</span></button>
+    <div id="reportBody" class="hidden">
+      <div id="reportCurb" style="font-size:17px"></div>
+      <textarea class="reporttext" id="reportText" rows="3" maxlength="500" aria-label="What does the sign say?" placeholder="What does the sign say?"></textarea>
+      <div style="margin-top:10px"><button class="action primary" id="reportSubmit">Send report</button></div>
+      <div id="reportStatus" style="font-size:17px;margin-top:10px"></div>
+      <div id="reportList" style="margin-top:6px"></div>
+      <div class="note" style="margin-top:8px">Reports are unverified &mdash; they never change a verdict, a countdown, a fine or a map color. A report a second driver reports in the same words is shown as corroborated &mdash; still a report, never a verified rule.</div>
+    </div>
   </div>
 
   <div class="card" id="limitCard">
@@ -1705,6 +1736,7 @@ function renderAll() {
   renderHero();
   renderMap();
   renderWhereToMove();
+  renderReportCard();
   renderLimit();
   renderPlanAhead();
   liveRenderChrome();
@@ -1979,6 +2011,22 @@ function init() {
   el("whereToggle").addEventListener("click", function () {
     setWhereOpen(el("whereBody").classList.contains("hidden"));
   });
+  el("reportToggle").addEventListener("click", function () {
+    setReportOpen(el("reportBody").classList.contains("hidden"));
+  });
+  el("reportSubmit").addEventListener("click", function () {
+    var textEl = el("reportText");
+    var st = el("reportStatus");
+    var err = validateReportText(textEl ? textEl.value : "");
+    if (err) { if (st) st.textContent = err; return; }
+    var key = reportCurbKey();
+    if (!key) { if (st) st.textContent = "Pick your side first."; return; }
+    if (st) st.textContent = "Sending\u2026";
+    submitSignReport(reportPayload(reportStreetSlug(), key, textEl.value)).then(function (res) {
+      if (st) st.textContent = reportSubmitMessage(res);
+      if (res.ok) { if (textEl) textEl.value = ""; fetchReports(); }
+    });
+  });
   /* A current-street where-to-move row opens the map on that curb (read-only,
      like a curb tap). The rows are rebuilt on change, so the listener lives
      on the container, not the rebuilt nodes. */
@@ -2005,6 +2053,8 @@ function init() {
       var t = e.target || e.srcElement;
       while (t && t !== mapBodyEl) {
         if (t.getAttribute) {
+          var rep = t.getAttribute("data-report-side");
+          if (rep) { openReportForm(rep); return; }
           var layer = t.getAttribute("data-map-layer");
           if (layer) { mapToggleLayer(layer); return; }
           var side = t.getAttribute("data-map-side");
@@ -3721,6 +3771,7 @@ function mapDetailHtml(key, nowMs) {
     + '<div style="margin-top:4px">' + esc(d.main) + '</div>';
   if (d.allowedUntil) s += '<div style="margin-top:4px">' + esc(d.allowedUntil) + '</div>';
   if (d.comingUp) s += '<div style="margin-top:4px">' + esc(d.comingUp) + '</div>';
+  s += '<div style="margin-top:8px"><button class="linkbtn" data-report-side="' + esc(d.key) + '">Report a sign here</button></div>';
   return s + '</div>';
 }
 /* The SVG + legend + (when a curb is tapped) the detail card. */
@@ -4108,6 +4159,167 @@ function whereShowOnMap(key) {
   return mapSelectCurb(key);
 }
 
+/* ---- Phase 5 piece 3 (Nov 18): sign reports ----
+   A driver reports a sign: WHICH curb (street + side, prefilled from the
+   tapped map curb or the picked side) + WHAT it says (free text). Text
+   only — photos need R2, which is not enabled on the account.
+   Server: Worker jsm-parking-reports + KV on his Cloudflare account
+   (see ~/workspace/ticket-saver-reports/). The D1 variant is kept there;
+   same endpoints, so the app never changes if the store moves to D1.
+   HARD GUARD: reports are UNVERIFIED until they match city data or a
+   second independent report (same street + side + wording, different
+   reporter — the server flips those to "corroborated"). Corroborated is
+   still shown as a report, never as a verified rule. NOTHING in this
+   section is read by verdictForSideData, whereToMoveEntries, mapCurbColor
+   or any countdown/fine code: a report can NEVER change a verdict, a
+   countdown, a fine line or a map color — the guard is structural, not a
+   flag. The list is fetched only when the card opens, never on the 30 s
+   hero tick. Submit failure (offline / service down) is said plainly on
+   screen — never pretended sent.
+   Kill switch: set REPORTS_URL = "" and rebuild — the card hides entirely
+   and nothing is fetched or sent. */
+var REPORTS_URL = "https://jsm-parking-reports.memoliro.workers.dev";
+var REPORTS_KEY = "ticketSaver.reporter.v1";
+var _reportSide = null;      /* curb the next report is about */
+var _reportCache = [];       /* last fetched list for the current street */
+var _reportStreet = "";
+function reportsEnabled() { return typeof REPORTS_URL === "string" && REPORTS_URL.length > 0; }
+/* The street a report belongs to: the live slug when a live lookup is
+   showing (a slug the server accepts), else the baked street slug. */
+function reportStreetSlug() {
+  if (liveMode() && LIVE.streetSlug) return LIVE.streetSlug;
+  return currentSlug();
+}
+/* Which curb the report is about: the tapped map curb first, then the
+   picked side, then the first side — never a guessed curb. */
+function reportCurbKey() {
+  if (_reportSide && liveActiveSideKeys().indexOf(_reportSide) >= 0) return _reportSide;
+  var sel = getSelectedSide();
+  if (sel && liveActiveSideKeys().indexOf(sel) >= 0) return sel;
+  var keys = liveActiveSideKeys();
+  return keys.length ? keys[0] : null;
+}
+function reportSideLabel(key) {
+  var sides = liveActiveSides();
+  return (sides[key] && sides[key].label) || key;
+}
+function reportCurbLabel() {
+  var key = reportCurbKey();
+  if (!key) return "";
+  var street = (liveMode() && LIVE.streetName) ? LIVE.streetName : DATA.street.short_name;
+  return street + " \u00b7 " + reportSideLabel(key);
+}
+/* One stable anonymous id per device (localStorage only) — the server's
+   consensus guard counts DISTINCT reporter_ids, and its idempotency guard
+   dedupes a retry from the same device. No name, no account, no location. */
+function reportDeviceId() {
+  try {
+    var id = localStorage.getItem(REPORTS_KEY);
+    if (!id) {
+      id = "r-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10);
+      localStorage.setItem(REPORTS_KEY, id);
+    }
+    return id;
+  } catch (e) { return "r-anon"; }
+}
+function normalizeReportText(t) {
+  return String(t || "").replace(/\s+/g, " ").replace(/^\s+|\s+$/g, "").toLowerCase();
+}
+function validateReportText(t) {
+  var n = normalizeReportText(t);
+  if (!n) return "Write what the sign says first.";
+  if (n.length < 3) return "That is too short to be a sign \u2014 write what it says.";
+  if (n.length > 500) return "That is too long \u2014 keep it under 500 characters.";
+  return "";
+}
+function reportPayload(street, side, text) {
+  return { street: street, side: side, text: normalizeReportText(text), reporter_id: reportDeviceId() };
+}
+/* fetchImpl is injectable for tests; in the page it is the browser fetch.
+   Resolves { ok, status, error } — never throws, so a dropped connection
+   lands as an honest failure, not a crash. */
+function submitSignReport(payload, fetchImpl) {
+  var f = fetchImpl || (typeof fetch === "function" ? fetch : null);
+  if (!f || !reportsEnabled()) return Promise.resolve({ ok: false, error: "offline" });
+  return f(REPORTS_URL + "/report", { method: "POST",
+      headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) })
+    .then(function (resp) {
+      return resp.json().then(function (j) {
+        return { ok: !!resp.ok && !!j.ok, status: j.status || "unverified", error: j.error || "" };
+      });
+    })
+    .catch(function () { return { ok: false, error: "offline" }; });
+}
+function reportSubmitMessage(result) {
+  if (result.ok) return "Report sent \u2014 shown as unverified. It can take up to a minute to appear in the list below. It never changes a verdict.";
+  return "Report NOT sent \u2014 you are offline or the service is down. Nothing was recorded; try again.";
+}
+function reportListHtml(reports) {
+  if (!reports || !reports.length) return '<div class="note">No reports for this street yet.</div>';
+  return reports.map(function (r) {
+    var flag = (r.status === "corroborated")
+      ? "Reported by " + (r.confirmations || 2) + " drivers \u2014 still unverified"
+      : "Unverified report";
+    return '<div class="reportitem"><span class="repflag">' + esc(flag) + '</span> \u2014 '
+      + esc(reportSideLabel(r.side)) + ': ' + esc(r.text) + '</div>';
+  }).join("");
+}
+/* The card re-renders from cache only — no fetch here, so renderAll and the
+   hero tick never hit the network. A stale cache from another street is
+   dropped, never shown under the wrong street name. */
+function renderReportCard() {
+  var card = el("reportCard");
+  if (!card) return;
+  card.classList.toggle("hidden", !reportsEnabled());
+  if (!reportsEnabled()) return;
+  var slug = reportStreetSlug();
+  if (_reportStreet !== slug) { _reportCache = []; _reportStreet = slug; }
+  var curb = el("reportCurb");
+  if (curb) { var label = reportCurbLabel(); curb.textContent = label ? "Curb: " + label : ""; }
+  var list = el("reportList");
+  if (list) list.innerHTML = reportListHtml(_reportCache);
+}
+function setReportOpen(open) {
+  var body = el("reportBody");
+  if (!body) return;
+  if (!open) _reportSide = null;
+  body.classList.toggle("hidden", !open);
+  var b = el("reportToggle");
+  if (b) {
+    b.setAttribute("aria-expanded", open ? "true" : "false");
+    b.classList.toggle("open", !!open);
+  }
+  if (open) { renderReportCard(); fetchReports(); }
+}
+function reportOpen() {
+  var body = el("reportBody");
+  return !!(body && !body.classList.contains("hidden"));
+}
+function fetchReports(fetchImpl) {
+  var f = fetchImpl || (typeof fetch === "function" ? fetch : null);
+  if (!f || !reportsEnabled()) return Promise.resolve([]);
+  var slug = reportStreetSlug();
+  return f(REPORTS_URL + "/reports?street=" + encodeURIComponent(slug))
+    .then(function (resp) { return resp.json(); })
+    .then(function (j) {
+      if (j && j.reports) { _reportCache = j.reports; _reportStreet = slug; renderReportCard(); }
+    })
+    .catch(function () {
+      var st = el("reportStatus");
+      if (st) st.textContent = "Could not load reports \u2014 check your connection.";
+    });
+}
+/* From the map detail card: the tapped curb prefills the report, the card
+   opens, and the textarea takes focus. Read-only for everything else —
+   like a curb tap, it never touches the parked side or the timer. */
+function openReportForm(sideKey) {
+  if (sideKey && liveActiveSideKeys().indexOf(sideKey) >= 0) _reportSide = sideKey;
+  setReportOpen(true);
+  var t = el("reportText");
+  if (t && t.focus) t.focus();
+  return _reportSide;
+}
+
 /* Test hook (also handy in the console): pure date/.ics logic. */
 if (typeof window !== "undefined") {
   window.__ticketSaver = { nextWindow: nextWindow, buildIcs: buildIcs,
@@ -4195,7 +4407,21 @@ if (typeof window !== "undefined") {
     permitSectors: permitSectors, renderPermitSetting: renderPermitSetting,
     onPermitToggle: onPermitToggle, PERMITS_KEY: PERMITS_KEY,
     renderLimit: renderLimit, exportLimitIcs: exportLimitIcs,
-    renderHero: renderHero };
+    renderHero: renderHero,
+    REPORTS_URL: REPORTS_URL, reportsEnabled: reportsEnabled,
+    setReportsUrl: function (u) { REPORTS_URL = u; },
+    reportStreetSlug: reportStreetSlug, reportCurbKey: reportCurbKey,
+    reportCurbLabel: reportCurbLabel, reportSideLabel: reportSideLabel,
+    reportDeviceId: reportDeviceId, REPORTS_KEY: REPORTS_KEY,
+    normalizeReportText: normalizeReportText,
+    validateReportText: validateReportText, reportPayload: reportPayload,
+    submitSignReport: submitSignReport,
+    reportSubmitMessage: reportSubmitMessage,
+    reportListHtml: reportListHtml, renderReportCard: renderReportCard,
+    setReportOpen: setReportOpen, reportOpen: reportOpen,
+    fetchReports: fetchReports, openReportForm: openReportForm,
+    _reportCache: function () { return _reportCache; },
+    _reportSide: function () { return _reportSide; } };
 }
 </script>
 </body>
