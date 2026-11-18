@@ -2332,6 +2332,14 @@ var FINES = {
    known (baked-in) street anchor. Same method as the build-time pipeline
    (build_data.py / build_data_street.py), ported to the page:
      1. Photon already named the street + house number (reverseGeocode).
+        If Photon named the street but no house number came back (the fix
+        sits between addresses, or on a stretch with none nearby), a
+        second Photon reverse lookup at the fix (limited list -- the
+        plain reverse returns only the road itself) supplies the
+        nearest house on that same street within 100 m as the
+        reference point instead -- a real address from the city's data,
+        never a guess. Beyond 100 m the lookup reports it cannot tell
+        which side, exactly as before.
      2. Overpass fetches the street's way geometry near the fix (the
         centreline) + the named ways sharing its nodes (cross streets).
         Retries on 502/503/504/429, up to 3 attempts, primary
@@ -2385,9 +2393,11 @@ var LIVE_PAID_DATEEXP_RID = "320262ae-0522-4188-8c08-2086c7666c4c";
 var LIVE_PAID_SOURCE = "Agence de mobilit\u00e9 durable \u2014 Stationnements municipaux tarif\u00e9s, sur rue et hors rue";
 var LIVE_OVERPASS_URLS = ["https://overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter"];
 var LIVE_PHOTON_SEARCH = "https://photon.komoot.io/api/?q=";
+var LIVE_PHOTON_REVERSE = "https://photon.komoot.io/reverse?lon="; /* same endpoint string as reverseGeocode in the template, so the build allowlist already covers it */
 var LIVE_BAND_MIN_M = 3, LIVE_BAND_MAX_M = 10;
 var LIVE_PAID_BAND_MIN_M = 1, LIVE_PAID_BAND_MAX_M = 10; /* place centres sit on the road, closer than sign poles */
 var LIVE_INTERSECTION_M = 20, LIVE_CONSENSUS = 1; /* city-data rule (Nov 18): 1 pole establishes — the build still uses >=2 */
+var LIVE_NEAREST_ADDRESS_MAX_M = 100; /* no-house-number fallback (Nov 18): the nearest address on the street is the reference point only if it is this close -- a farther address would put the segment on the wrong block, so beyond this the lookup still reports it cannot tell which side */
 var LIVE_CACHE_TTL_MS = 7 * 86400000;
 var LIVE_CACHE_PREFIX = "ticketSaver.live.v5."; /* v5: sides assembled under the 1-pole city-data rule (Nov 18) — v4 entries re-fetch once */
 var LIVE_RPA_KEY = "ticketSaver.rpa.v1";
@@ -3091,11 +3101,40 @@ function liveMaybeLookup(lat, lon, feature) {
   }
   if (liveIsBakedStreetName(h.street)) { liveSetIdle(); return; }
   if (!h.number) {
-    liveSetError("error-side", "Couldn't tell which side",
-      "No house number came back for this street, so no side could be placed. Read the sign where you park.");
-    return;
+    /* No house number came back for this street -- the lookup has no
+       reference point to place sides against. Without fetch there is
+       no way to search for one, so the honest error stands immediately
+       (this is also the no-network harness path). With fetch, fall back
+       to the nearest address on this street as the reference point; if
+       none is close by, the same honest error stands. */
+    if (typeof fetch === "undefined") {
+      liveSetError("error-side", "Couldn't tell which side",
+        "No house number came back for this street, so no side could be placed. Read the sign where you park.");
+      return;
+    }
+    /* The street is known now -- show it loading while the fallback
+       search runs, so the banner names this street instead of the old
+       one. liveRunLookup re-asserts loading when it starts. */
+    var gen = LIVE_GEN; /* a setStreet mid-search must drop this lookup */
+    LIVE = { status: "loading", streetName: h.street, streetSlug: liveSlug(h.street),
+      houseNumber: null, houseLat: null, houseLon: null,
+      sides: null, counts: null, segment: null, sideMethod: null, idTrc: null,
+      dataAsOf: null, errorTitle: null, errorDetail: null, geoDisagreement: false,
+      centreline: null, houseAlong: null, houseCt: null };
+    if (typeof renderAll === "function") renderAll();
+    return liveNearestAddressPoint(h.street, lat, lon).then(function (pt) {
+      if (gen !== LIVE_GEN) return null; /* the user picked a baked street mid-search */
+      if (typeof lastFix === "undefined" || !lastFix || lastFix.lat !== lat || lastFix.lon !== lon) return null; /* a newer fix arrived -- it owns the lookup */
+      if (!pt) {
+        liveSetError("error-side", "Couldn't tell which side",
+          "No house number came back for this street, so no side could be placed. Read the sign where you park.");
+        return null;
+      }
+      return liveRunLookup({ lat: lat, lon: lon, streetName: h.street, houseNumber: pt.number,
+        houseLat: pt.lat, houseLon: pt.lon, city: h.city || null });
+    });
   }
-  liveRunLookup({ lat: lat, lon: lon, streetName: h.street, houseNumber: h.number,
+  return liveRunLookup({ lat: lat, lon: lon, streetName: h.street, houseNumber: h.number,
     houseLat: h.point ? h.point.lat : null, houseLon: h.point ? h.point.lon : null,
     city: h.city || null });
 }
@@ -3192,6 +3231,60 @@ function liveHousePointViaSearch(number, streetName) {
       return null;
     })
     .catch(function () { return null; });
+}
+
+/* Distance in metres between two points, equirectangular -- the same
+   projection the snap code uses (111320 m/deg lon, 110540 m/deg lat). */
+function liveDistM(lat1, lon1, lat2, lon2) {
+  var coslat = Math.cos(lat1 * Math.PI / 180);
+  var dx = (lon2 - lon1) * 111320 * coslat, dy = (lat2 - lat1) * 110540;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+/* No-house-number fallback (Nov 18): Photon named the street but no house
+   number came back, so the lookup has no reference point to place sides
+   against. Re-run Photon reverse-geocode at the fix with a limit: the plain
+   reverse call returns only the single nearest feature, which on the road
+   is the road itself, but the limited list also holds the nearest houses.
+   Take the nearest house ON THIS STREET and use its number + coordinates
+   as the reference point -- a real address from the city's data, never a
+   guess. Only within LIVE_NEAREST_ADDRESS_MAX_M: a farther address would
+   put the segment on the wrong block. The limit is 20, not 10: the
+   nearest features can include the road itself and nearby POIs, so 20
+   gives the nearest house room to appear. Returns { number, lat, lon,
+   distM } or null (no house close by, no fetch, or the search failed --
+   the caller then keeps the honest error). */
+function liveNearestAddressPoint(streetName, lat, lon) {
+  if (typeof fetch === "undefined") return Promise.resolve(null);
+  var url = LIVE_PHOTON_REVERSE + lon.toFixed(6) + "&lat=" + lat.toFixed(6) + "&limit=20";
+  function norm(v) {
+    var s = String(v || "");
+    try { s = s.normalize("NFD").replace(/[\u0300-\u036f]/g, ""); } catch (e) { /* old engine */ }
+    return s.toLowerCase().replace(/^\s+|\s+$/g, "");
+  }
+  var wantN = norm(streetName);
+  try {
+    return liveFetchWithRetry(url, {}, 2)
+      .then(function (res) { return res.json(); })
+      .then(function (j) {
+        var best = null, bestD = Infinity;
+        ((j && j.features) || []).forEach(function (f) {
+          var p = (f && f.properties) || {};
+          var n = liveParseHouseNumber(p.housenumber);
+          if (n === null) return;
+          /* The house must be ON this street -- the reverse list also
+             holds houses on cross streets, and one of those would place
+             the house point on the wrong street. */
+          if (norm(p.street) !== wantN) return;
+          if (!f.geometry || f.geometry.type !== "Point" || !f.geometry.coordinates) return;
+          var alat = f.geometry.coordinates[1], alon = f.geometry.coordinates[0];
+          var d = liveDistM(lat, lon, alat, alon);
+          if (d < bestD) { bestD = d; best = { number: n, lat: alat, lon: alon, distM: d }; }
+        });
+        if (!best || bestD > LIVE_NEAREST_ADDRESS_MAX_M) return null;
+        return best;
+      })
+      .catch(function () { return null; });
+  } catch (e) { return Promise.resolve(null); }
 }
 
 /* ---- the lookup itself (async; returns the result object for tests) ---- */
@@ -4515,6 +4608,8 @@ if (typeof window !== "undefined") {
     liveDeriveSegment: liveDeriveSegment, liveAssembleSides: liveAssembleSides,
     liveNomVoieCandidate: liveNomVoieCandidate, liveParseHouseNumber: liveParseHouseNumber,
     liveHouseFromFeature: liveHouseFromFeature, liveCacheKey: liveCacheKey,
+    liveNearestAddressPoint: liveNearestAddressPoint, liveDistM: liveDistM,
+    LIVE_NEAREST_ADDRESS_MAX_M: LIVE_NEAREST_ADDRESS_MAX_M,
     liveSlug: liveSlug, liveMaybeLookup: liveMaybeLookup, liveRunLookup: liveRunLookup,
     liveWillSwitch: liveWillSwitch, liveNearestKnownStreetDist: liveNearestKnownStreetDist,
     liveSideKey: liveSideKey, liveDefaultSide: liveDefaultSide,
