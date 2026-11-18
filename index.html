@@ -78,19 +78,6 @@
   .warnrow:focus-visible { outline: none; }
   .paidstrip { margin-top: 10px; }
   .paidstrip svg { display: block; width: 100%; height: auto; }
-  /* Single page for Montreal (Nov 17): the street picker holds only the
-     GPS button — no street-name buttons (his call Nov 17: one template
-     for Montreal, the current street comes from GPS or a deep link). The
-     GPS button is full-width and reuses the side-button look. */
-  #streetPicker { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 10px; }
-  .streetbtn { display: block; flex: 1 1 30%; text-align: center; background: var(--card);
-             border: 2px solid var(--line); border-radius: 14px; padding: 12px 8px;
-             font-size: 18px; font-weight: 700; color: var(--ink); cursor: pointer;
-             font-family: inherit; line-height: 1.3; }
-  .streetbtn:hover, .streetbtn:focus-visible { transform: translateY(-2px); border-color: var(--accent);
-             box-shadow: 0 0 0 1px rgba(49,196,141,.35), 0 18px 50px rgba(49,196,141,.35), 0 8px 30px rgba(49,196,141,.25);
-             outline: none; }
-  .streetbtn.wide { flex: 1 1 100%; }
   .verdict { font-size: 18px; font-weight: 700; margin-top: 4px; }
   .planinputs { display: flex; gap: 10px; margin-top: 10px; }
   .planinputs input { flex: 1 1 0; min-width: 0; font-family: inherit; font-size: 18px;
@@ -177,20 +164,8 @@
   <div id="mainView">
   <h1 id="mainTitle" tabindex="-1">Ticket Saver</h1>
 
-  <div class="banner hidden" id="liveBanner"></div>
-
   <div id="parkedBanner" class="parked hidden"><span>Parked: <b id="parkedSide">—</b></span><button class="linkbtn change" id="clearSide" aria-label="Not parked here — clear">&#10005;</button></div>
 
-  <!-- Single page for Montreal (Nov 17): the street picker holds only the
-       GPS button — no street-name buttons (his call Nov 17: one template
-       for Montreal; the current street is shown by the GPS row, not by a
-       button). The GPS button re-runs checkGps with the manual-pick flag
-       cleared. -->
-  <div class="card" id="streetCard">
-    <div class="label">Street — Montreal</div>
-    <div id="streetPicker"></div>
-    <div id="streetPickerNote" class="note" style="margin-top:8px"></div>
-  </div>
 
   <div class="card hidden" id="heroCard">
     <div class="big" id="heroTitle">—</div>
@@ -251,6 +226,13 @@
   </div>
 
   <button class="gpsrow" id="gpsBtn"><span id="gpsStatus">&#128205; Checking location&hellip;</span><span class="gpsrefresh" aria-hidden="true"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg></span></button>
+  <!-- The live label lives here, under the GPS row (Nov 17): the picker card
+       is gone with its GPS button, so the live banner moved down
+       from the top of the page. One label, not two — the picker note's ready
+       text duplicated the banner; the banner carries all three states
+       (loading / ready / error) and the house number still shows in the GPS
+       row above. -->
+  <div class="banner hidden" id="liveBanner"></div>
   </div><!-- /mainView -->
 
   <div id="detailsView" class="hidden">
@@ -369,8 +351,8 @@ function applyStreetData() {
    choice — it wins over the GPS auto-switch for the rest of the session,
    or the auto-switch would bounce the user straight back to the street
    they just left. A new session (new tab) re-enables the auto-switch. The
-   "Find my street (GPS)" picker button clears the flag first, so an
-   explicit GPS request always decides. */
+   Tapping the GPS row clears the flag first, so an explicit GPS request
+   always decides. */
 var MANUAL_PICK_KEY = "ticketSaver.manualPick.v1";
 function getManualPick() {
   try { if (typeof sessionStorage !== "undefined") return sessionStorage.getItem(MANUAL_PICK_KEY); } catch (e) {}
@@ -412,20 +394,18 @@ function setStreet(slug, opts) {
   renderAll();
   return true;
 }
-/* The picker holds only the GPS button — no street-name buttons (his call
-   Nov 17: one template for Montreal; the current street is shown by the
-   GPS row, not by a button). The note names the live street while a live
-   lookup is active. */
-function renderStreetPicker() {
-  var c = el("streetPicker");
-  if (!c) return;
-  c.innerHTML = '<button class="streetbtn wide" data-gps="1">\uD83D\uDCCD Find my street (GPS)</button>';
-  var note = el("streetPickerNote");
-  if (note) {
-    if (liveMode() && typeof LIVE !== "undefined" && LIVE && LIVE.streetName) {
-      note.textContent = "Live lookup \u2014 " + LIVE.streetName + (LIVE.houseNumber ? ", " + LIVE.houseNumber : "") + ". City data, not a verified page.";
-    } else note.textContent = "";
-  }
+/* No picker anymore (his call Nov 17: GPS refreshes automatically — 90 s +
+   visibility — so no standalone GPS button). The GPS row is the only
+   street control: tapping it clears the manual pick (a ?street= deep link
+   pins the street for the session) and re-runs checkGps. The 90 s
+   auto-refresh and the visibility re-check call checkGps directly and must
+   NOT clear the pin. The live label is the banner under the GPS row
+   (liveRenderChrome); the picker note's ready text duplicated it, so the
+   note is gone — one label, all three states (loading / ready / error).
+   The house number still shows in the GPS row above. */
+function onGpsRowTap() {
+  setManualPick(null);
+  checkGps();
 }
 var DAY_NAMES = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
 var DAY_SHORT = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
@@ -1654,7 +1634,6 @@ function renderAll() {
     else { pn.innerHTML = ""; pn.classList.add("hidden"); }
   }
   renderPermitSetting();
-  renderStreetPicker();
   renderSideCards();
   renderHero();
   renderLimit();
@@ -1906,16 +1885,6 @@ function init() {
   var armed = maybeAutoArmLimit(Date.now());
   if (armed) saveLimitTimer(armed.parkedAt, armed.limitMin);
   renderAll();
-  /* Street picker (GPS button only): delegation — the button is rebuilt
-     on every renderAll, so the listener lives on the container. */
-  var sp = el("streetPicker");
-  if (sp) sp.addEventListener("click", function (e) {
-    var t = e.target || e.srcElement;
-    while (t && t !== sp) {
-      if (t.getAttribute && t.getAttribute("data-gps")) { setManualPick(null); checkGps(); return; }
-      t = t.parentNode;
-    }
-  });
   /* A running timer must not hide behind the collapsed tiles. */
   if (getLimitTimer()) setLimitOpen(true);
   try { if (localStorage.getItem(SWIPED_KEY) === "1") el("swipeHint").classList.add("hidden"); } catch (e) { /* private mode */ }
@@ -1925,7 +1894,7 @@ function init() {
   });
   el("clearSide").addEventListener("click", function () { setSelectedSide(null); });
   el("parkedToggle").addEventListener("click", function () { toggleParked(); });
-  el("gpsBtn").addEventListener("click", checkGps);
+  el("gpsBtn").addEventListener("click", onGpsRowTap);
   el("limitToggle").addEventListener("click", function () {
     setLimitOpen(el("limitBody").classList.contains("hidden"));
   });
@@ -3250,7 +3219,7 @@ if (typeof window !== "undefined") {
     shouldSwitchStreet: shouldSwitchStreet, currentSlug: currentSlug,
     setStreet: setStreet, streetSlugFromSearch: streetSlugFromSearch,
     getManualPick: getManualPick, setManualPick: setManualPick,
-    manualPickActive: manualPickActive, renderStreetPicker: renderStreetPicker,
+    manualPickActive: manualPickActive, onGpsRowTap: onGpsRowTap,
     applyStreetData: applyStreetData,
     STREET_DATA: STREET_DATA, STREET_REGISTRY: STREET_REGISTRY,
     INITIAL_STREET: INITIAL_STREET, syncStreetUrl: syncStreetUrl,
