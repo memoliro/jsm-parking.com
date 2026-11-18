@@ -1420,6 +1420,50 @@ function verdictForSideData(side, lim, evalMs, parkedAtMs, isFuture) {
   }
   return null; /* established side, but no next window could be computed — never guess */
 }
+/* ---- limit-only verdict (Nov 18, his call): a side whose cleaning is NOT
+   established but which carries a verified posted limit DOES say how long
+   you can stay — by the limit alone. The limit is a verified posted fact
+   (poles + hours in the data); the cleaning is still unknown, so every
+   caller that shows this verdict must also state that cleaning is not
+   established (mapDetailForSide's note, whereRowText's note) — never imply
+   the cleaning is known. General rule, not a one-street special-case: any
+   side with status "not_established" + a verified limit.
+   Gated on "not_established" specifically: an "ambiguous" side carries
+   CONFLICTING cleaning evidence, which is a stronger reason to withhold a
+   stay statement than missing evidence, so ambiguous sides stay
+   not-established. An exempted limit never binds, so it gives no stay
+   statement either (the side stays not-established, limit stated as a
+   fact). Deliberately NOT part of verdictForSideData: the hero and
+   plan-ahead keep saying "No verified window" for these sides (his Nov 18
+   scope: hero unchanged) — that contradiction is known, not a bug to fix
+   here. Only the map (mapCurbColor / mapDetailForSide) and where-to-move
+   call this, as a fallback when verdictForSideData returns null. */
+function limitOnlyVerdictForSideData(side, lim, evalMs, parkedAtMs) {
+  if (!side || side.status !== "not_established") return null;
+  if (!lim || typeof lim.minutes !== "number") return null;
+  if (limitExempted(lim)) return null; /* an exempted limit never binds */
+  var parked = (typeof parkedAtMs === "number") ? parkedAtMs : evalMs;
+  var limitExpiry = limitDeadlineMs(lim, parked);
+  if (limitExpiry === null) return null;
+  if (limitExpiry <= evalMs) {
+    return { kind: "limit_expired", limitOnly: true,
+             text: "Move now — your " + limitAdjective(lim.minutes) + " limit ended at "
+               + fmtTimeToronto(new Date(limitExpiry)) + ".",
+             fine: fineForKind("standard"),
+             deadlineMs: limitExpiry, binds: "limit" };
+  }
+  return { kind: "limit", limitOnly: true,
+           text: "Move by " + fmtDayTime(limitExpiry) + " — " + limitAdjective(lim.minutes)
+             + " limit.",
+           fine: fineForKind("standard"),
+           deadlineMs: limitExpiry, binds: "limit" };
+}
+/* The honest note for a limit-only side: the limit is stated as a posted
+   fact, cleaning as unknown. Shared by the map detail card's note line and
+   the where-to-move rows (one wording, not two). */
+function limitOnlyNote(lim) {
+  return "Posted " + limitAdjective(lim.minutes) + " limit — cleaning is not established here.";
+}
 function verdictForSide(key, evalMs, parkedAtMs, isFuture) {
   return verdictForSideData(liveActiveSides()[key], limitForSideKey(key), evalMs, parkedAtMs, isFuture);
 }
@@ -3691,9 +3735,14 @@ function curbColorForVerdict(v) {
 }
 /* The curb color for one side at a moment. Reuses the Phase 2 verdict —
    nothing here re-decides whether you can park. */
+/* The curb color for one side at a moment. Reuses the Phase 2 verdict —
+   nothing here re-decides whether you can park — plus the limit-only
+   fallback for sides with a verified limit but no established cleaning
+   rule (Nov 18 call). */
 function mapCurbColor(key, nowMs) {
   nowMs = nowMs || Date.now();
   var v = verdictForSide(key, nowMs, parkedAtForVerdict(key));
+  if (!v) v = limitOnlyVerdictForSideData(liveActiveSides()[key], limitForSideKey(key), nowMs, parkedAtForVerdict(key));
   return curbColorForVerdict(v);
 }
 function mapCurbColors(nowMs) {
@@ -3745,9 +3794,10 @@ function mapDetailForSide(key, nowMs) {
   var color = mapCurbColor(key, nowMs);
   var label = side.label || key;
   var v = verdictForSide(key, nowMs, parkedAtForVerdict(key));
+  if (!v) v = limitOnlyVerdictForSideData(side, limitForSideKey(key), nowMs, parkedAtForVerdict(key));
   if (!v) return { key: key, sideLabel: label, color: color,
     main: "No verified window for this side — the data doesn't say.",
-    allowedUntil: null, comingUp: null };
+    allowedUntil: null, comingUp: null, note: null };
   var allowedUntil = stayUntilTextFor(side, limitForSideKey(key), v, nowMs);
   var comingUp = null;
   var r = nextWindowForSide(key, new Date(nowMs));
@@ -3759,7 +3809,8 @@ function mapDetailForSide(key, nowMs) {
     }
   }
   return { key: key, sideLabel: label, color: color, main: v.text,
-           allowedUntil: allowedUntil, comingUp: comingUp };
+           allowedUntil: allowedUntil, comingUp: comingUp,
+           note: v.limitOnly ? "Cleaning is not established for this side — check the physical sign." : null };
 }
 function mapDetailHtml(key, nowMs) {
   var d = mapDetailForSide(key, nowMs);
@@ -3769,6 +3820,7 @@ function mapDetailHtml(key, nowMs) {
     + '<span class="mapsw" style="background:' + mapColorStroke(d.color) + '"></span>'
     + '<button class="linkbtn" data-map-close aria-label="Close detail">&#10005;</button></div>'
     + '<div style="margin-top:4px">' + esc(d.main) + '</div>';
+  if (d.note) s += '<div style="margin-top:4px">' + esc(d.note) + '</div>';
   if (d.allowedUntil) s += '<div style="margin-top:4px">' + esc(d.allowedUntil) + '</div>';
   if (d.comingUp) s += '<div style="margin-top:4px">' + esc(d.comingUp) + '</div>';
   s += '<div style="margin-top:8px"><button class="linkbtn" data-report-side="' + esc(d.key) + '">Report a sign here</button></div>';
@@ -3917,7 +3969,10 @@ function renderMap(nowMs) {
    you park there now (parkedAt = the eval time — this is "where CAN I
    park", not "where AM I parked", so a running limit timer never moves a
    curb). The ranking reuses the Phase 2 verdict exactly
-   (verdictForSideData): no second verdict, no forked priority.
+   (verdictForSideData), plus the limit-only fallback
+   (limitOnlyVerdictForSideData) for sides with a verified limit but no
+   established cleaning rule — no second cleaning verdict, no forked
+   priority.
    Ranking rule, longest stay first:
      1. No binding deadline: a permit-exempt curb (no deadline at all) first,
         then a season curb, whose stay runs to the next season start (a real
@@ -3934,14 +3989,16 @@ function renderMap(nowMs) {
      4. No verdict (not established / ambiguous / conflict): after the
         cannot-park group, shown plainly as "Not established", never with a
         guessed stay time.
-   LIMIT-ONLY CALL (open question — pending his word, do NOT silently
-   resolve): a side with a verified posted limit but no established
-   cleaning rule returns no verdict (the line-1308 gate: status not
-   established / no windows), so it lands in group 4. It is NOT ranked by
-   its limit alone — a limit cannot say you can stay, because cleaning may
-   be running unrecorded on that side. The verified limit IS stated as a
-   fact on its not-established row, never as a stay time. Whether such
-   sides should instead rank by their limit deadline is his call.
+   LIMIT-ONLY (his Nov 18 call — the old "never ranks" rule is
+   overturned): a side with a verified posted limit but no established
+   cleaning rule gets a limit-only verdict (limitOnlyVerdictForSideData)
+   and IS ranked by its limit deadline, in the deadline-bound group like
+   any other limit-bound curb. The limit is a verified posted fact; the
+   cleaning stays honestly not established — the row states the limit AND
+   that cleaning is not established (limitOnlyNote), never implying the
+   cleaning is known. An exempted limit gives no verdict (the side stays
+   not-established, limit stated as a fact). An ambiguous side never gets
+   a limit-only verdict (conflicting cleaning evidence).
    "Nearby" is every street with real data: the current street's two sides
    (live sides when a live lookup is showing) plus the other baked streets.
    A baked street that IS the live street (same block, inside the GPS
@@ -3961,10 +4018,11 @@ function whereToMoveEntries(nowMs) {
       if (!side) return;
       var lim = (lims && lims[key]) || null;
       var v = verdictForSideData(side, lim, nowMs, nowMs);
+      if (!v) v = limitOnlyVerdictForSideData(side, lim, nowMs, nowMs);
       var e = { streetSlug: slug, streetName: name, sideKey: key, side: side,
         sideLabel: side.label || key, isCurrent: !!isCurrent, verdict: v, lim: lim,
         color: curbColorForVerdict(v), stayMs: null, binds: null,
-        cannotPark: false, notEstablished: false, limitOnly: false, resumeMs: null };
+        cannotPark: false, notEstablished: false, limitOnly: !!(v && v.limitOnly), resumeMs: null };
       if (!v) {
         e.notEstablished = true;
         if (lim && typeof lim.minutes === "number") e.limitOnly = true;
@@ -4061,13 +4119,18 @@ function whereRowText(e, nowMs) {
         line: until ? "Cannot park here now — cleaning until " + until + "." : "Cannot park here now — cleaning is running.",
         note: "" };
     }
-    return { head: head, line: (e.verdict && e.verdict.text) || "Cannot park here.", note: "" };
+    return { head: head, line: (e.verdict && e.verdict.text) || "Cannot park here.",
+      note: e.limitOnly ? limitOnlyNote(e.lim) : "" };
   }
   if (e.verdict && e.verdict.kind === "permit_exempt") {
     return { head: head, line: e.verdict.text, note: permitNote };
   }
   var stay = stayUntilTextFor(e.side, e.lim, e.verdict, nowMs);
-  if (stay) return { head: head, line: stay, note: permitNote };
+  if (stay) {
+    var note = permitNote;
+    if (e.limitOnly) note = limitOnlyNote(e.lim) + (note ? " " + note : "");
+    return { head: head, line: stay, note: note };
+  }
   return { head: head, line: (e.verdict && e.verdict.text) || "No verified window for this side — the data doesn't say.", note: permitNote };
 }
 function whereRowHtml(e, nowMs) {
@@ -4371,6 +4434,7 @@ if (typeof window !== "undefined") {
     sideButtonEl: sideButtonEl, sideButtonElByIndex: sideButtonElByIndex, SIDE_KEYS: SIDE_KEYS,
     migrateLegacySideKey: migrateLegacySideKey, LEGACY_SIDE_KEY: LEGACY_SIDE_KEY,
     verdictForSide: verdictForSide, verdictForSideData: verdictForSideData,
+    limitOnlyVerdictForSideData: limitOnlyVerdictForSideData, limitOnlyNote: limitOnlyNote,
     fineForKind: fineForKind, fmtDollars: fmtDollars, fmtAsOfDate: fmtAsOfDate,
     translatePeriodText: translatePeriodText,
     paidUnknownHtml: paidUnknownHtml, paidWarnRowText: paidWarnRowText,
