@@ -88,6 +88,13 @@
      grey is neutral. Curbs are schematic — offset 6 m from the centreline
      so the two sides read apart — the centreline itself is real geometry. */
   .mapsvg svg { display: block; width: 100%; height: auto; }
+  /* Map fix (Nov 18): the small inline map — always visible on the main
+     screen, NOT behind the collapsed Street map row. One short strip
+     (180 px tall) centred on the position, the current street + the
+     surrounding streets from the nearby sweep, curbs coloured by the same
+     verdicts as the full map. It never replaces the full map. */
+  .minimap svg { display: block; width: 100%; height: 180px; }
+  .minimap .note { margin-top: 6px; }
   .maplayer { font-family: inherit; font-size: 16px; font-weight: 700; padding: 6px 14px;
              border-radius: 999px; border: 2px solid var(--line); background: var(--card);
              color: var(--muted); cursor: pointer; }
@@ -243,6 +250,14 @@
   <div class="card" id="pickCard">
     <button class="sidebtn" id="btnSide0"></button>
     <button class="sidebtn" id="btnSide1"></button>
+  </div>
+
+  <!-- Map fix (Nov 18): the small inline map — always visible on the main
+       screen, centred on your position, the current street plus the
+       surrounding streets coloured by their verdicts (same colours as the
+       full Street map). It does not replace the full map below. -->
+  <div class="card minimap" id="miniMapCard">
+    <div id="miniMapBody"></div>
   </div>
 
   <!-- Phase 5 (Nov 17): the colored map — an expandable row in the same
@@ -1899,6 +1914,7 @@ function renderAll() {
   renderSideCards();
   renderHero();
   renderMap();
+  renderMiniMap();
   renderWhereToMove();
   renderReportCard();
   renderLimit();
@@ -2313,6 +2329,7 @@ function init() {
   setInterval(function () {
     renderHero();
     try { renderMap(); } catch (e) { /* a map fault must never swallow the hero tick */ }
+    try { renderMiniMap(); } catch (e) { /* the inline map must never swallow the hero tick either */ }
     try { renderLimit(); } catch (e) { /* a timer fault must never swallow the hero tick */ }
     try { renderPlanAhead(); } catch (e) { /* a plan-ahead fault must never swallow the hero tick */ }
   }, 30000);
@@ -2446,6 +2463,25 @@ var LIVE_PAID_BAND_MIN_M = 1, LIVE_PAID_BAND_MAX_M = 10; /* place centres sit on
 var LIVE_INTERSECTION_M = 20, LIVE_CONSENSUS = 1; /* city-data rule (Nov 18): 1 pole establishes — the build still uses >=2 */
 var LIVE_NEAREST_ADDRESS_MAX_M = 100; /* no-house-number fallback (Nov 18): the nearest address on the street is the reference point only if it is this close -- a farther address would put the segment on the wrong block, so beyond this the lookup still reports it cannot tell which side */
 var LIVE_CACHE_TTL_MS = 7 * 86400000;
+var LIVE_CACHE_FRESH_MS = 2 * 3600000; /* map fix (Nov 18): a cached lookup
+  older than 2 h is STALE, not current — it may still be shown, but only
+  labelled "last known" while a fresh lookup re-runs (see liveRunLookupInner).
+  The 7-day TTL still bounds how long an entry survives at all; 2 h is the
+  freshness line, so a morning-saved entry (9.2 h old at 17:13) is never
+  served as if it were current. */
+/* Age / staleness of one cache entry (the object liveCacheRead returns).
+   An entry with no savedAt is stale — re-fetch, never trust it. */
+function liveCacheAgeMs(o) {
+  return (o && typeof o.savedAt === "number") ? Date.now() - o.savedAt : Infinity;
+}
+function liveCacheIsStale(o) { return liveCacheAgeMs(o) > LIVE_CACHE_FRESH_MS; }
+/* "8:00 AM" in America/Toronto — the "as of" label a stale entry carries. */
+function liveCacheSavedLabel(savedAt) {
+  try {
+    return new Date(savedAt).toLocaleTimeString("en-CA",
+      { timeZone: "America/Toronto", hour: "numeric", minute: "2-digit" });
+  } catch (e) { return ""; }
+}
 var LIVE_CACHE_PREFIX = "ticketSaver.live.v5."; /* v5: sides assembled under the 1-pole city-data rule (Nov 18) — v4 entries re-fetch once */
 var LIVE_RPA_KEY = "ticketSaver.rpa.v1";
 var LIVE_NEARBY_RADIUS_M = 500; /* nearby-streets lookup (Nov 18): where-to-move suggests the closest streets around the fix, from city data -- proximity filters the candidates, the listing logic ranks them */
@@ -2462,7 +2498,9 @@ var LIVE_CARRIAGEWAY = ["motorway", "trunk", "primary", "secondary", "tertiary",
 var LIVE = { status: "idle", streetName: null, streetSlug: null, houseNumber: null,
   houseLat: null, houseLon: null, sides: null, counts: null, segment: null,
   sideMethod: null, idTrc: null, dataAsOf: null, errorTitle: null, errorDetail: null,
-  geoDisagreement: false, centreline: null, houseAlong: null, houseCt: null };
+  geoDisagreement: false, centreline: null, houseAlong: null, houseCt: null,
+  cacheStale: null }; /* { savedAt, label } while a STALE cached frame is
+  shown labelled as last known and a fresh lookup re-runs; null otherwise */
 /* centreline / houseAlong / houseCt (Phase 5): the map needs the road the
    lookup already chained — the centreline points, the house's along-track
    position on them, and its cross-track sign. Retained from the lookup
@@ -3065,6 +3103,13 @@ function liveVerifyBannerHtml() {
   if (LIVE.status !== "ready") {
     return "<b>" + liveEsc(LIVE.errorTitle || "Live city-data lookup") + ".</b> " + liveEsc(LIVE.errorDetail || "");
   }
+  /* A stale cached frame is shown only with its age on it, and only while
+     the fresh lookup re-runs (liveRunLookupInner sets LIVE.cacheStale). */
+  if (LIVE.cacheStale) {
+    return "<b>Live city-data lookup \u2014 last known from " + liveEsc(LIVE.cacheStale.label || "") + ".</b> " +
+      "This is the saved lookup from this morning, not a fresh read — checking the city\u2019s signs now for " +
+      liveEsc(LIVE.streetName) + ". Always read the sign where you park.";
+  }
   return "<b>Live city-data lookup \u2014 not a verified page.</b> These windows come from the City of Montreal\u2019s open signage data for " +
     liveEsc(LIVE.streetName) + ", read live at your location. No photo of the physical signs has been checked. Always read the sign where you park.";
 }
@@ -3126,6 +3171,8 @@ function liveRenderChrome() {
     lb.classList.remove("hidden");
     if (LIVE.status === "loading") {
       lb.textContent = "Live lookup \u2014 " + (LIVE.streetName || "") + ". Reading the city\u2019s signs\u2026";
+    } else if (LIVE.cacheStale) {
+      lb.textContent = "Live lookup \u2014 " + LIVE.streetName + ". Last known from " + (LIVE.cacheStale.label || "") + " — checking the city\u2019s signs now.";
     } else if (LIVE.streetName) {
       lb.textContent = "Live lookup \u2014 " + LIVE.streetName + ". City data, not a verified page.";
     } else {
@@ -3652,10 +3699,21 @@ async function liveRunLookupInner(fix) {
     var paidOk = !paidAsOf || (cached && cached.paidAsOf === paidAsOf);
     if (cached && signsOk && paidOk) {
       if (gen !== LIVE_GEN) return { status: "abandoned" }; /* left live mode mid-lookup */
-      liveApplyResult(cached.result, dataAsOf);
-      liveNearbySweep(fix.lat, fix.lon, fix.streetName); /* the where-to-move card suggests the streets around this one — fire and forget, the sweep renders as each street lands */
-      liveJunctionLookup(fix, null); /* the map shows the junction when the house sits close to one — fire and forget, each neighbouring segment lands as it arrives */
-      return cached.result;
+      if (liveCacheIsStale(cached)) {
+        /* STALE cache hit (map fix, Nov 18): a morning-saved entry is never
+           served as current. Show it labelled as last known — the banner,
+           the map and where-to-move all carry the "as of" line while the
+           fresh lookup below re-runs — then fall through to the fresh
+           path, which overwrites the cache and clears the flag. */
+        liveApplyResult(cached.result, dataAsOf);
+        LIVE.cacheStale = { savedAt: cached.savedAt, label: liveCacheSavedLabel(cached.savedAt) };
+        if (typeof renderAll === "function") renderAll();
+      } else {
+        liveApplyResult(cached.result, dataAsOf);
+        liveNearbySweep(fix.lat, fix.lon, fix.streetName); /* the where-to-move card suggests the streets around this one — fire and forget, the sweep renders as each street lands */
+        liveJunctionLookup(fix, null); /* the map shows the junction when the house sits close to one — fire and forget, each neighbouring segment lands as it arrives */
+        return cached.result;
+      }
     }
     var houseLat = fix.houseLat, houseLon = fix.houseLon;
     if (houseLat === null || houseLon === null) {
@@ -3727,6 +3785,7 @@ function liveApplyResult(result, dataAsOf) {
   LIVE.segment = result.segment; LIVE.sideMethod = result.sideMethod;
   LIVE.idTrc = result.idTrc; LIVE.dataAsOf = dataAsOf || result.dataAsOf || null;
   LIVE.geoDisagreement = !!result.geoDisagreement;
+  LIVE.cacheStale = null; /* a freshly applied result is current, never last-known */
   LIVE.houseLat = result.houseLat || LIVE.houseLat; LIVE.houseLon = result.houseLon || LIVE.houseLon;
   /* Phase 5: retain the map geometry from the result (or null when an older
      cached entry has none — the map then says so plainly). */
@@ -3856,6 +3915,10 @@ async function liveNearbyLookupOne(fixLat, fixLon, cand, areaWays, dataAsOf, cac
       ? cacheKeyFn(slug, geoHit ? geoHit.idTrc : null, pt.number)
       : liveNearbyCacheKey(slug, geoHit ? geoHit.idTrc : null, pt.number);
     var cached = liveCacheRead(key);
+    /* A stale nearby entry (>2 h) is a miss, not a frame: the sweep
+       re-fetches it like a fresh candidate. The current street keeps its
+       labelled last-known frame instead, because it is the street shown. */
+    if (cached && liveCacheIsStale(cached)) cached = null;
     if (cached && cached.result && cached.result.sides && (!dataAsOf || cached.dataAsOf === dataAsOf)) {
       return { name: cand.name, slug: slug, distM: cand.distM, result: cached.result };
     }
@@ -3933,6 +3996,7 @@ async function liveNearbySweepInner(fixLat, fixLon, currentStreetName, key, gen)
         LIVE_NEARBY.streets[r.slug] = r;
         LIVE_NEARBY.status = "ready";
         if (typeof renderWhereToMove === "function") renderWhereToMove();
+        if (typeof renderMiniMap === "function") renderMiniMap(); /* the inline map draws each landed street as it arrives */
       }
     }
     if (LIVE_NEARBY.status === "loading") LIVE_NEARBY.status = "ready"; /* no candidate yielded a result — the list is just the current street */
@@ -3950,6 +4014,23 @@ function liveNearbyEntries() {
   Object.keys(LIVE_NEARBY.streets).forEach(function (slug) {
     var s = LIVE_NEARBY.streets[slug];
     if (s && s.result && s.result.sides) out.push({ slug: slug, name: s.name, distM: s.distM, sides: s.result.sides });
+  });
+  out.sort(function (a, b) { return a.distM - b.distM || (a.slug < b.slug ? -1 : 1); });
+  return out;
+}
+/* What the small inline map draws from the sweep (map fix, Nov 18): the
+   same landed streets, WITH their full results (centreline + segment +
+   houseAlong + sides) — the map needs the geometry where-to-move never
+   reads. Same data, same verdicts, no second verdict path. */
+function liveNearbyMapEntries() {
+  if (!LIVE_NEARBY || LIVE_NEARBY.status !== "ready") return [];
+  var out = [];
+  Object.keys(LIVE_NEARBY.streets).forEach(function (slug) {
+    var s = LIVE_NEARBY.streets[slug];
+    if (s && s.result && s.result.sides && s.result.centreline && s.result.centreline.length >= 2
+        && typeof s.result.houseAlong === "number" && s.result.segment) {
+      out.push({ slug: slug, name: s.name, distM: s.distM, result: s.result });
+    }
   });
   out.sort(function (a, b) { return a.distM - b.distM || (a.slug < b.slug ? -1 : 1); });
   return out;
@@ -3986,6 +4067,26 @@ function liveJunctionDetect(segment) {
       distanceM: Math.round(-segment.min * 10) / 10 });
   }
   if (segment.aboveName && segment.max <= LIVE_JUNCTION_CLOSE_M && segment.max > 0) {
+    cands.push({ side: "above", name: segment.aboveName, alongM: segment.max,
+      distanceM: Math.round(segment.max * 10) / 10 });
+  }
+  if (!cands.length) return null;
+  cands.sort(function (a, b) { return a.distanceM - b.distanceM; });
+  return cands[0];
+}
+/* The nearest NAMED segment end at ANY distance (map fix, Nov 18): the
+   junction display still only fires within 40 m (liveJunctionDetect), but
+   the map can now SAY which junction is nearest and how far it is, instead
+   of showing nothing. Never invented: an unnamed end is not a junction,
+   and the distance is the segment's own along-track end. */
+function liveNearestJunction(segment) {
+  if (!segment || typeof segment.min !== "number" || typeof segment.max !== "number") return null;
+  var cands = [];
+  if (segment.belowName && -segment.min > 0) {
+    cands.push({ side: "below", name: segment.belowName, alongM: segment.min,
+      distanceM: Math.round(-segment.min * 10) / 10 });
+  }
+  if (segment.aboveName && segment.max > 0) {
     cands.push({ side: "above", name: segment.aboveName, alongM: segment.max,
       distanceM: Math.round(segment.max * 10) / 10 });
   }
@@ -4676,7 +4777,34 @@ function mapGeometry() {
     vbW = vbH / MAP_MAX_ASPECT;
     vbX = (minX + maxX) / 2 - vbW / 2;
   }
+  /* Centring (map fix, Nov 18): the frame is centred ON THE HOUSE, not on
+     the drawn road's bbox. The bbox above is lopsided (the 2nd junction
+     each way sits 144 m past the segment one way, 42 m the other), so a
+     bbox-centred frame put the house 59.6 m off-centre live (30.1 m
+     baked). The house tick is the position the user reads the map from,
+     so the viewBox centre IS the house tick: vbX/vbY are re-anchored to
+     (home.x, -home.y) after the aspect cap. The drawn road may run off
+     one edge sooner than the other — that is the price of a centred
+     position, and the road is drawn past the segment either way. */
+  if (home) {
+    vbX = home.x - vbW / 2;
+    vbY = -home.y - vbH / 2;
+  }
   var vb = { x: vbX, y: vbY, w: vbW, h: vbH };
+  /* Does the road cross the horizontal line y inside [lo, hi] (with an
+     8 m margin for the road stroke)? The centred frame puts the road's
+     top end near the top band, so a wide centred line can sit ON the
+     road — the title/subtitle placement below dodges it. */
+  function mapRoadCrossesSpan(y, lo, hi) {
+    for (var ri = 0; ri < pts.length - 1; ri++) {
+      var y0 = -pts[ri].y, y1 = -pts[ri + 1].y;
+      if (y < Math.min(y0, y1) || y > Math.max(y0, y1)) continue;
+      var tt = (y1 === y0) ? 0 : (y - y0) / (y1 - y0);
+      var rx = pts[ri].x + (pts[ri + 1].x - pts[ri].x) * tt;
+      if (rx > lo - 8 && rx < hi + 8) return true;
+    }
+    return false;
+  }
   /* Font sizes are proportional to the final viewBox width, so the same
      name renders the same size on a short segment as on a long one (before:
      41.6 px on a short segment, 19.4 px on a long one for the same
@@ -4685,23 +4813,43 @@ function mapGeometry() {
   var subFs = Math.min(vbW / 34, 9);
   var homeFs = Math.min(vbW / 30, 12);
   var endFs = Math.min(vbW / 34, 10);
-  /* Title: the street name sits in the padding band at the top, centred on
-     the viewBox, horizontal — never on the road, never rotated. The old
+  /* Title: the street name sits in the top band, centred on the
+     viewBox, horizontal — never on the road, never rotated. The old
      mid-point name (horizontal on a diagonal road, longer than the segment)
-     is gone. */
+     is gone. Centring the frame on the house can pull the road's top end
+     into the top band, so a line that would sit on the road moves to the
+     bottom band instead (the bottom band is empty of road on a centred
+     frame — the road's ends sit at the frame's sides, not its bottom). */
   var title = null;
+  var titleTopY = vbY + nameFs + 2;
   if (src.streetName) {
-    var t = mapClampLabel(vbX + vbW / 2, vbY + nameFs + 2, src.streetName, nameFs, "middle", vb, true);
-    if (t) title = { x: t.x, y: t.y, fontSize: nameFs, text: src.streetName };
+    var tw = mapLabelWidth(src.streetName, nameFs, true);
+    var t = mapClampLabel(vbX + vbW / 2, titleTopY, src.streetName, nameFs, "middle", vb, true);
+    if (t) {
+      if (mapRoadCrossesSpan(t.y, t.x - tw / 2, t.x + tw / 2)) {
+        var tb = mapClampLabel(vbX + vbW / 2, vbY + vbH - 10, src.streetName, nameFs, "middle", vb, true);
+        if (tb) title = { x: tb.x, y: tb.y, fontSize: nameFs, text: src.streetName, atBottom: true };
+      } else title = { x: t.x, y: t.y, fontSize: nameFs, text: src.streetName };
+    }
   }
   /* Subtitle: the bracketing junctions, shown when the road is drawn past
      them (the map is extended) — they are the segment's ends, so they read
-     as the block the coloured curbs sit on. */
+     as the block the coloured curbs sit on. Same dodge as the title: a
+     wide subtitle crosses the diagonal road at the top, so it rides the
+     bottom band when it would sit on the road. */
   var subtitle = null;
   if (extended && (src.ends.low || src.ends.high)) {
     var subText = [src.ends.low, src.ends.high].filter(Boolean).join(" \u2013 ");
-    var st = mapClampLabel(vbX + vbW / 2, vbY + nameFs + 2 + subFs + 2, subText, subFs, "middle", vb, false);
-    if (st) subtitle = { x: st.x, y: st.y, fontSize: subFs, text: subText };
+    var sw = mapLabelWidth(subText, subFs, false);
+    var subTopY = (title && !title.atBottom) ? titleTopY + subFs + 2 : titleTopY;
+    var st = mapClampLabel(vbX + vbW / 2, subTopY, subText, subFs, "middle", vb, false);
+    if (st) {
+      if (mapRoadCrossesSpan(st.y, st.x - sw / 2, st.x + sw / 2)) {
+        var subBotY = (title && title.atBottom) ? vbY + vbH - 10 - nameFs - 4 : vbY + vbH - 10;
+        var sb = mapClampLabel(vbX + vbW / 2, subBotY, subText, subFs, "middle", vb, false);
+        if (sb) subtitle = { x: sb.x, y: sb.y, fontSize: subFs, text: subText };
+      } else subtitle = { x: st.x, y: st.y, fontSize: subFs, text: subText };
+    }
   }
   /* Labels, all clamped inside the viewBox: the junction at each drawn road
      end (12 m beyond it along the road — the OUTER junction when extended,
@@ -4769,10 +4917,19 @@ function mapGeometry() {
     if (drawMax > segMax && src.ends.high) addInnerLabel({ name: src.ends.high, along: segMax });
   }
   if (home) home.fontSize = homeFs;
+  /* Nearest junction at any distance (map fix, Nov 18): the 40 m junction
+     display still decides what is DRAWN, but the map can now name the
+     nearest junction even when it is too far to draw — see mapSvgHtml. */
+  var nearestJunction = null;
+  if (typeof liveNearestJunction === "function") {
+    nearestJunction = liveNearestJunction({ min: segMin, max: segMax,
+      belowName: src.ends.low, aboveName: src.ends.high });
+  }
   return { ok: true, streetName: src.streetName, segMin: segMin, segMax: segMax,
     drawMin: drawMin, drawMax: drawMax, extended: extended,
     ends: src.ends, signs: signs, road: pts, curbs: curbs, dots: dots, home: home,
     junctionRoads: junctionRoads, junction: junction,
+    nearestJunction: nearestJunction,
     title: title, subtitle: subtitle, labels: labels,
     viewBox: vbX.toFixed(1) + " " + vbY.toFixed(1) + " "
       + vbW.toFixed(1) + " " + vbH.toFixed(1) };
@@ -5018,6 +5175,21 @@ function mapSvgHtml(nowMs, geom, colors) {
     + ' &nbsp; <span class="mapsw" style="background:#b3beb6"></span>Not established';
   if (geom.dots.length) s += ' &nbsp; <span class="mapdotsw"></span>Metered spot';
   s += '</div>';
+  /* Stale-frame label (map fix, Nov 18): a cached frame shown while the
+     fresh lookup re-runs says so, on the map itself — never as current. */
+  if (liveMode() && LIVE.cacheStale) {
+    s += '<div class="note" style="margin-top:6px">Last known map — saved ' + esc(LIVE.cacheStale.label || "")
+      + ", checking the city\u2019s signs now.</div>";
+  }
+  /* No junction in range (map fix, Nov 18): the 40 m rule is unchanged —
+     the nearest junction here is 134.9 m away, so nothing is drawn — but
+     the map says plainly which junction is nearest and how far, instead
+     of showing nothing. When a junction IS drawn, this line stays off. */
+  if (!geom.junction && geom.nearestJunction) {
+    s += '<div class="note" style="margin-top:6px">No junction within 40 m — nearest: '
+      + esc(geom.nearestJunction.name) + ", " + Math.round(geom.nearestJunction.distanceM)
+      + " m away.</div>";
+  }
   s += '<div class="note" style="margin-top:6px">Schematic map — curbs drawn from the street&rsquo;s centreline. Tap a curb for its rule.</div>';
   if (_mapSelected) s += mapDetailHtml(_mapSelected, nowMs);
   return s;
@@ -5101,13 +5273,183 @@ function renderMap(nowMs) {
   });
   var jn = (typeof liveJunctionForMap === "function") ? liveJunctionForMap() : null;
   var jSig = jn ? ("j:" + (jn.sameStreet ? jn.sameStreet.status : "-") + "/" + (jn.crossStreet ? jn.crossStreet.status : "-")) : "j:-";
+  var staleSig = (liveMode() && LIVE.cacheStale) ? ("stale:" + LIVE.cacheStale.savedAt) : "fresh";
   var sig = (liveMode() ? "live:" + (LIVE.streetSlug || "") : "baked:" + currentSlug())
     + "|" + JSON.stringify(colors) + "|" + (MAP_LAYERS.paid ? "P" : "p") + (MAP_LAYERS.cleaning ? "C" : "c")
-    + "|" + paidSig + "|" + (_mapSelected || "-") + "|" + jSig + "|"
+    + "|" + paidSig + "|" + (_mapSelected || "-") + "|" + jSig + "|" + staleSig + "|"
     + (geom && geom.ok ? geom.viewBox : "nogeo:" + (geom && geom.reason || "?"));
   if (sig === _mapSig) return;
   _mapSig = sig;
   body.innerHTML = mapBodyHtml(nowMs, geom, colors);
+}
+
+/* ---- Map fix (Nov 18): the small inline map ----
+   Always visible on the main screen (never behind the collapsed Street map
+   row): a short strip (180 px tall, 560 x 280 m centred on the position)
+   showing the current street plus the surrounding streets from the nearby
+   sweep, each curb coloured by the SAME verdicts as the full map and
+   where-to-move — no second verdict path. The current street reuses the
+   full map's geometry (mapGeometry); a nearby street is projected into
+   the same local-metre frame from its own centreline + segment + house
+   position, which the sweep already landed. In baked mode there is no
+   sweep, so only the current street draws, with a plain line saying the
+   live lookup adds the streets around you. */
+var MINI_MAP_W_M = 560;
+var MINI_MAP_H_M = 280;
+var _miniMapHtml = "";
+/* A nearby street's curb colour: its own sides' verdicts, same rule as
+   where-to-move (verdict, then the limit-only fallback), same colours. */
+function miniMapNearbyColor(sides, key, nowMs) {
+  var side = sides && sides[key];
+  if (!side) return "grey";
+  var v = verdictForSideData(side, null, nowMs, null);
+  if (!v) v = limitOnlyVerdictForSideData(side, null, nowMs, null);
+  return curbColorForVerdict(v);
+}
+/* Which cross-track sign each side of a nearby street sits on: the
+   attributed signs' majority where they exist, else the reference
+   address — the same rule as mapSideCtSigns, but keyed even/odd (a
+   nearby street's sides are always even/odd, even on a baked page). */
+function miniMapSigns(result) {
+  var counts = {};
+  (result.attributed || []).forEach(function (s) {
+    if (!s || !s.side || typeof s.cross_track_m !== "number") return;
+    counts[s.side] = counts[s.side] || { pos: 0, neg: 0 };
+    if (s.cross_track_m >= 0) counts[s.side].pos++; else counts[s.side].neg++;
+  });
+  var homeKey = (typeof result.houseNumber === "number")
+    ? ((result.houseNumber % 2 === 0) ? "even" : "odd") : null;
+  var out = {};
+  ["even", "odd"].forEach(function (k) {
+    var c = counts[k];
+    if (c && c.pos !== c.neg) { out[k] = c.pos > c.neg ? 1 : -1; return; }
+    if (typeof result.houseCt === "number" && result.houseCt !== 0 && homeKey) {
+      var homeSign = result.houseCt > 0 ? 1 : -1;
+      out[k] = (k === homeKey) ? homeSign : -homeSign;
+      return;
+    }
+    out[k] = 0;
+  });
+  return out;
+}
+function miniMapNormal(list, j) {
+  var p = list[j], q = list[Math.min(j + 1, list.length - 1)], r = list[Math.max(j - 1, 0)];
+  var dx = q.x - r.x, dy = q.y - r.y, len = Math.sqrt(dx * dx + dy * dy) || 1;
+  return [-dy / len, dx / len];
+}
+/* One nearby street's centreline, projected into the current street's
+   local-metre frame and clipped to ITS segment (along-track metres from
+   its own reference house). Returns [{x, y, rel}] in local metres. */
+function miniMapStreetPts(result, refLat, refLon) {
+  var cl = result.centreline, cum = liveCumAlong(cl, refLat, refLon);
+  var houseAlong = result.houseAlong, smin = result.segment.min, smax = result.segment.max;
+  var pts = [];
+  for (var i = 0; i < cl.length - 1; i++) {
+    var a = mapXY(cl[i][0], cl[i][1], refLat, refLon);
+    var b = mapXY(cl[i + 1][0], cl[i + 1][1], refLat, refLon);
+    var ra = cum[i] - houseAlong, rb = cum[i + 1] - houseAlong;
+    var lo = Math.min(ra, rb), hi = Math.max(ra, rb);
+    if (hi < smin || lo > smax) continue;
+    var t0 = 0, t1 = 1;
+    if (ra < smin) t0 = Math.max(t0, (smin - ra) / (rb - ra));
+    if (ra > smax) t0 = Math.max(t0, (ra - smax) / (ra - rb));
+    if (rb < smin) t1 = Math.min(t1, (smin - ra) / (rb - ra));
+    if (rb > smax) t1 = Math.min(t1, (ra - smax) / (ra - rb));
+    if (t1 < t0) continue;
+    pts.push({ x: a[0] + (b[0] - a[0]) * t0, y: a[1] + (b[1] - a[1]) * t0, rel: ra + (rb - ra) * t0 });
+    pts.push({ x: a[0] + (b[0] - a[0]) * t1, y: a[1] + (b[1] - a[1]) * t1, rel: ra + (rb - ra) * t1 });
+  }
+  return pts;
+}
+function miniMapSvgHtml(nowMs, geom) {
+  nowMs = nowMs || Date.now();
+  if (!geom) geom = mapGeometry();
+  if (!geom.ok) return '<div class="note">' + esc(geom.message || "No street map here.") + '</div>';
+  var src = mapSource();
+  var refLat = src.refLat, refLon = src.refLon;
+  var hx = geom.home ? geom.home.x : 0, hy = geom.home ? -geom.home.y : 0;
+  var vbX = hx - MINI_MAP_W_M / 2, vbY = hy - MINI_MAP_H_M / 2;
+  var vb = vbX.toFixed(1) + " " + vbY.toFixed(1) + " " + MINI_MAP_W_M + " " + MINI_MAP_H_M;
+  var colors = mapCurbColors(nowMs, geom);
+  var s = '<svg viewBox="' + vb + '" role="img" aria-label="Small map of '
+    + esc(geom.streetName || "this street") + ' and the streets around it, coloured by parking rules">';
+  /* Surrounding streets first (under the current street), from the nearby
+     sweep's own results — same data, same verdicts as where-to-move. */
+  var nearby = (typeof liveNearbyMapEntries === "function") ? liveNearbyMapEntries() : [];
+  nearby.forEach(function (n) {
+    if (n.name === geom.streetName) return;
+    var pts = miniMapStreetPts(n.result, refLat, refLon);
+    if (pts.length < 2) return;
+    s += '<path d="' + mapPathD(pts) + '" fill="none" style="stroke:var(--line)" stroke-width="7" stroke-linecap="round"/>';
+    var signs = miniMapSigns(n.result);
+    ["even", "odd"].forEach(function (k) {
+      if (!signs[k]) return;
+      var curb = pts.map(function (p, j) {
+        var nn = miniMapNormal(pts, j);
+        return { x: p.x + nn[0] * MAP_CURB_M * signs[k], y: p.y + nn[1] * MAP_CURB_M * signs[k] };
+      });
+      s += '<path d="' + mapPathD(curb) + '" fill="none" style="stroke:'
+        + mapColorStroke(miniMapNearbyColor(n.result.sides, k, nowMs))
+        + '" stroke-width="4" stroke-linecap="round"/>';
+    });
+    /* The name rides at the point on that street CLOSEST to the position
+       (the segment midpoint can sit hundreds of metres away, off the
+       strip) — clamped inside the frame so it never runs off the edge. */
+    var closest = null, closestD = Infinity;
+    pts.forEach(function (p) {
+      var d = (p.x - hx) * (p.x - hx) + (p.y - (geom.home ? geom.home.y : 0)) * (p.y - (geom.home ? geom.home.y : 0));
+      if (d < closestD) { closestD = d; closest = p; }
+    });
+    if (closest) {
+      var lx = Math.max(vbX + 30, Math.min(vbX + MINI_MAP_W_M - 30, closest.x));
+      var ly = -closest.y - 8;
+      if (ly >= vbY + 14 && ly <= vbY + MINI_MAP_H_M - 8) {
+        s += '<text x="' + lx.toFixed(1) + '" y="' + ly.toFixed(1)
+          + '" font-size="11" style="fill:var(--muted)" text-anchor="middle">' + esc(n.name) + '</text>';
+      }
+    }
+  });
+  /* Current street on top, from the full map's geometry. */
+  s += '<path d="' + mapPathD(geom.road) + '" fill="none" style="stroke:var(--line)" stroke-width="9" stroke-linecap="round"/>';
+  Object.keys(geom.curbs).forEach(function (k) {
+    if (k.indexOf("next-") === 0 || k.indexOf("cross-") === 0) return; /* the strip shows this street only */
+    s += '<path d="' + mapPathD(geom.curbs[k]) + '" fill="none" style="stroke:'
+      + mapColorStroke(colors[k] || "grey") + '" stroke-width="4.5" stroke-linecap="round"/>';
+  });
+  if (geom.home) {
+    s += '<circle cx="' + hx.toFixed(1) + '" cy="' + hy.toFixed(1)
+      + '" r="7" fill="var(--accent)" stroke="#fff" stroke-width="2"/>';
+    if (geom.home.label) {
+      s += '<text x="' + hx.toFixed(1) + '" y="' + (hy - 12).toFixed(1)
+        + '" font-size="11" font-weight="bold" style="fill:var(--ink)" text-anchor="middle">' + esc(geom.home.label) + '</text>';
+    }
+  }
+  if (geom.streetName) {
+    s += '<text x="' + (vbX + 6).toFixed(1) + '" y="' + (vbY + 16).toFixed(1)
+      + '" font-size="12" font-weight="bold" style="fill:var(--ink)">' + esc(geom.streetName) + '</text>';
+  }
+  s += '</svg>';
+  s += '<div class="maplegend"><span class="mapsw" style="background:var(--accent)"></span>Stay until the deadline'
+    + ' &nbsp; <span class="mapsw" style="background:var(--fine-ink)"></span>Cannot park now'
+    + ' &nbsp; <span class="mapsw" style="background:#b3beb6"></span>Not established</div>';
+  if (liveMode() && LIVE.cacheStale) {
+    s += '<div class="note">Last known — saved ' + esc(LIVE.cacheStale.label || "")
+      + ", checking the city\u2019s signs now.</div>";
+  } else if (liveMode() && (!nearby.length)) {
+    s += '<div class="note">Nearby streets appear as the lookup lands.</div>';
+  } else if (!liveMode()) {
+    s += '<div class="note">Live lookup adds the streets around you.</div>';
+  }
+  return s;
+}
+function renderMiniMap(nowMs) {
+  var body = el("miniMapBody");
+  if (!body) return;
+  nowMs = nowMs || Date.now();
+  var html = miniMapSvgHtml(nowMs);
+  if (html === _miniMapHtml) return;
+  _miniMapHtml = html;
+  body.innerHTML = html;
 }
 
 /* ---- Phase 5 piece 2 (Nov 17): where to move / where can I park ----
@@ -5314,6 +5656,11 @@ function whereToMoveBodyHtml(nowMs, list) {
      only that the signs are still being read. */
   if (liveMode() && LIVE.status === "loading") {
     s += "<div>Reading the city's signs\u2026</div>";
+  } else if (liveMode() && LIVE.cacheStale) {
+    /* A stale cached frame, labelled: the rows below are last known,
+       from the saved time, while the fresh lookup re-runs. */
+    s += "<div>Last known — saved " + esc(LIVE.cacheStale.label || "")
+      + ", checking the city\u2019s signs now.</div>";
   } else if (!list.some(function (e) { return !e.notEstablished && !e.cannotPark; })) {
     /* No usable curb on this street (every curb not-established or
        cannot-park): say so honestly instead of showing nothing useful. */
@@ -5323,28 +5670,13 @@ function whereToMoveBodyHtml(nowMs, list) {
   s += '<div class="note" style="margin-top:8px">Only streets near you, from city data — never a guessed stay time.</div>';
   return s;
 }
-/* The collapsed row label carries the best stay, like the limit row carries
-   its countdown: "Where to move — <street> · <side> until <time>". A
-   season stay months out carries its date (a bare weekday would not say
-   which week); a permit-exempt best has no deadline to carry. */
+/* The collapsed row label is just "Where to move" (map fix, Nov 18): the
+   old label carried the best street + side + deadline in the title, which
+   named a street the user may not be on (the sweep's best curb is often a
+   nearby street). The rows themselves carry the street names, sides and
+   deadlines — the title names none of them. */
 function whereToMoveRowLabel(nowMs) {
-  nowMs = nowMs || Date.now();
-  var list = whereToMoveEntries(nowMs);
-  var best = null;
-  for (var i = 0; i < list.length; i++) {
-    if (!list[i].notEstablished && !list[i].cannotPark) { best = list[i]; break; }
-  }
-  if (!best) return "Where to move";
-  var head = best.streetName + " · " + best.sideLabel;
-  if (best.verdict && best.verdict.kind === "season" && best.stayMs) {
-    return "Where to move — " + head + " until "
-      + fmtDateShortToronto(new Date(best.stayMs)) + ", " + fmtTimeToronto(new Date(best.stayMs));
-  }
-  if (best.stayMs && isFinite(best.stayMs)) {
-    return "Where to move — " + head + " until " + fmtDayTime(best.stayMs);
-  }
-  if (best.stayMs === Infinity) return "Where to move — " + head + ", no deadline";
-  return "Where to move — " + head;
+  return "Where to move";
 }
 var _whereSig = "";
 function setWhereOpen(open) {
@@ -5380,8 +5712,10 @@ function renderWhereToMove(nowMs) {
   }).join("|");
   /* The waiting line (loading) and the empty-state line (failed lookup)
      both render from an empty list — the live status belongs in the
-     signature, or a failed lookup would leave the waiting line up. */
-  if (liveMode()) sig = LIVE.status + "|" + sig;
+     signature, or a failed lookup would leave the waiting line up. The
+     stale flag belongs there too, or a labelled last-known frame would
+     keep the unlabelled body. */
+  if (liveMode()) sig = LIVE.status + "|" + (LIVE.cacheStale ? "stale:" + LIVE.cacheStale.savedAt : "fresh") + "|" + sig;
   if (sig === _whereSig) return;
   _whereSig = sig;
   body.innerHTML = whereToMoveBodyHtml(nowMs, list);
@@ -5589,13 +5923,13 @@ if (typeof window !== "undefined") {
     liveHouseFromFeature: liveHouseFromFeature, liveCacheKey: liveCacheKey,
     liveNearestAddressPoint: liveNearestAddressPoint, liveDistM: liveDistM,
     LIVE_NEAREST_ADDRESS_MAX_M: LIVE_NEAREST_ADDRESS_MAX_M,
-    liveNearbySweep: liveNearbySweep, liveNearbyEntries: liveNearbyEntries,
+    liveNearbySweep: liveNearbySweep, liveNearbyEntries: liveNearbyEntries, liveNearbyMapEntries: liveNearbyMapEntries,
     liveNearbyCandidates: liveNearbyCandidates, liveNearbyClosestPoint: liveNearbyClosestPoint,
     liveNearbyAreaQuery: liveNearbyAreaQuery, liveNearbyLookupOne: liveNearbyLookupOne,
     liveNearbySetEnabled: function (b) { LIVE_NEARBY_ENABLED = !!b; },
     liveNearbyGetState: function () { return LIVE_NEARBY; },
     liveNearbySetState: function (s) { LIVE_NEARBY = s; },
-    liveJunctionDetect: liveJunctionDetect, livePointAtAlong: livePointAtAlong,
+    liveJunctionDetect: liveJunctionDetect, liveNearestJunction: liveNearestJunction, livePointAtAlong: livePointAtAlong,
     liveJunctionLookup: liveJunctionLookup, liveJunctionForMap: liveJunctionForMap,
     liveJunctionSameSegment: liveJunctionSameSegment,
     liveJunctionCrossAnchors: liveJunctionCrossAnchors, liveJunctionCrossTouches: liveJunctionCrossTouches,
@@ -5613,7 +5947,7 @@ if (typeof window !== "undefined") {
     liveWillSwitch: liveWillSwitch, liveNearestKnownStreetDist: liveNearestKnownStreetDist,
     liveSideKey: liveSideKey, liveDefaultSide: liveDefaultSide,
     liveMarkSideButtons: liveMarkSideButtons, liveRenderChrome: liveRenderChrome,
-    liveSideCardsHtml: liveSideCardsHtml, liveOverpassQuery: liveOverpassQuery,
+    liveSideCardsHtml: liveSideCardsHtml, liveVerifyBannerHtml: liveVerifyBannerHtml, liveOverpassQuery: liveOverpassQuery,
     liveCkanSignsSql: liveCkanSignsSql, liveRpaSql: liveRpaSql, liveGeobaseSql: liveGeobaseSql,
     liveGeobaseHit: liveGeobaseHit, liveSnap: liveSnap, liveCumAlong: liveCumAlong,
     livePaidCityNorm: livePaidCityNorm, livePaidSql: livePaidSql,
@@ -5621,6 +5955,8 @@ if (typeof window !== "undefined") {
     livePaidBuildPaid: livePaidBuildPaid, liveCkanPaidPackage: liveCkanPaidPackage,
     liveAlongFromSnap: liveAlongFromSnap,
     liveCacheRead: liveCacheRead, liveCacheSave: liveCacheSave,
+    liveCacheAgeMs: liveCacheAgeMs, liveCacheIsStale: liveCacheIsStale,
+    liveCacheSavedLabel: liveCacheSavedLabel, LIVE_CACHE_FRESH_MS: LIVE_CACHE_FRESH_MS,
     liveRpaCacheGet: liveRpaCacheGet, liveRpaCacheSave: liveRpaCacheSave,
     liveSetIdle: liveSetIdle, liveSetError: liveSetError,
     liveGetState: function () { return LIVE; },
@@ -5647,6 +5983,9 @@ if (typeof window !== "undefined") {
     mapCurbColor: mapCurbColor, mapCurbColors: mapCurbColors, mapColorStroke: mapColorStroke,
     mapDetailForSide: mapDetailForSide, mapDetailHtml: mapDetailHtml,
     mapSvgHtml: mapSvgHtml, mapBodyHtml: mapBodyHtml, renderMap: renderMap,
+    miniMapSvgHtml: miniMapSvgHtml, renderMiniMap: renderMiniMap,
+    miniMapSigns: miniMapSigns, miniMapStreetPts: miniMapStreetPts,
+    miniMapNearbyColor: miniMapNearbyColor, MINI_MAP_W_M: MINI_MAP_W_M, MINI_MAP_H_M: MINI_MAP_H_M,
     setMapOpen: setMapOpen, mapOpen: mapOpen, mapSelectCurb: mapSelectCurb,
     mapSelectedCurb: mapSelectedCurb, mapLayers: mapLayers, mapSetLayer: mapSetLayer,
     mapToggleLayer: mapToggleLayer, MAP_CURB_M: MAP_CURB_M,
