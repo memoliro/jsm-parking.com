@@ -1426,18 +1426,24 @@ function verdictForSideData(side, lim, evalMs, parkedAtMs, isFuture) {
    (poles + hours in the data); the cleaning is still unknown, so every
    caller that shows this verdict must also state that cleaning is not
    established (mapDetailForSide's note, whereRowText's note) — never imply
-   the cleaning is known. General rule, not a one-street special-case: any
+   the cleaning is known. The hero is the one exception: it states the
+   limit stay and nothing about cleaning (his Nov 18 ruling 1 — there is
+   no cleaning window to show); the explicit note lives on the map detail,
+   the where-to-move row and the Details side card. General rule, not a one-street special-case: any
    side with status "not_established" + a verified limit.
    Gated on "not_established" specifically: an "ambiguous" side carries
    CONFLICTING cleaning evidence, which is a stronger reason to withhold a
    stay statement than missing evidence, so ambiguous sides stay
    not-established. An exempted limit never binds, so it gives no stay
    statement either (the side stays not-established, limit stated as a
-   fact). Deliberately NOT part of verdictForSideData: the hero and
-   plan-ahead keep saying "No verified window" for these sides (his Nov 18
-   scope: hero unchanged) — that contradiction is known, not a bug to fix
-   here. Only the map (mapCurbColor / mapDetailForSide) and where-to-move
-   call this, as a fallback when verdictForSideData returns null. */
+   fact). Deliberately NOT part of verdictForSideData: plan-ahead keeps saying
+   "No verified window" for these sides (his Nov 18 scope: plan-ahead
+   unchanged) — that split with the parked hero is known, not a bug to
+   fix here. The map (mapCurbColor / mapDetailForSide), where-to-move,
+   the hero (when parked — renderHero falls back to this when its mode
+   is "limit") and the hero warning (heroWarningStateForData falls back
+   to this verdict's deadline) call this, as a fallback when
+   verdictForSideData returns null. */
 function limitOnlyVerdictForSideData(side, lim, evalMs, parkedAtMs) {
   if (!side || side.status !== "not_established") return null;
   if (!lim || typeof lim.minutes !== "number") return null;
@@ -1477,6 +1483,17 @@ function bindingDeadlineForSide(key, evalMs, parkedAtMs) {
    counter: his Nov 17 ruling stands). */
 function heroWarningStateForData(side, lim, nowMs, parkedAtMs) {
   var b = bindingDeadlineForSideData(side, lim, nowMs, parkedAtMs);
+  if (!b) {
+    /* A limit-only side has no binding deadline from the cleaning logic
+       (not established) — but its posted limit IS the binding deadline:
+       the sooner of nothing and the limit expiry is the limit expiry.
+       Same 30/15 thresholds, same "limit ends" detail, same fine gating
+       as any limit-bound curb — no special case for short limits. (His
+       Nov 18 ruling: a parked 15-minute warning firing at parking, with
+       the fine line showing right away, is fine.) */
+    var lv = limitOnlyVerdictForSideData(side, lim, nowMs, parkedAtMs);
+    if (lv && lv.deadlineMs !== null && lv.deadlineMs !== undefined) b = { deadlineMs: lv.deadlineMs, binds: "limit" };
+  }
   if (!b) return { level: "none", deadlineMs: null, binds: null, remainingMs: null };
   var rem = b.deadlineMs - nowMs;
   var level = rem <= 15 * 60000 ? "warn15" : (rem <= 30 * 60000 ? "warn30" : "none");
@@ -1496,8 +1513,21 @@ function parkedAtForVerdict(key) {
 
 /* Pure hero decision (exposed for tests): what the hero shows for a side at a time.
    Returns { mode, title, count, detail, showIcs, exception }.
-   mode: 'prompt' (no side) | 'no_window' | 'now' | 'next' | 'season_over' | 'error' */
-function heroState(key, now) {
+   mode: 'prompt' (no side) | 'no_window' | 'now' | 'next' | 'season_over' | 'error'
+   | 'limit' (parked on a limit-only side: the posted limit is the stay).
+   parkedAtMs (optional): when the car parked, from the running limit
+   timer — renderHero passes parkedAtForVerdict(key). It is what separates
+   "parked" from "merely tapped" for a limit-only side (his Nov 18
+   rulings): a limit-only side whose timer is running AND started
+   (parkedAt <= now) shows the limit stay; merely tapped (no timer, or a
+   timer that has not started yet) shows nothing about the side — the hero
+   stays in its default not-parked state. Established sides ignore
+   parkedAtMs here: their tap-to-preview (cleaning window when tapped)
+   is unchanged. A limit-only side has NO cleaning window — the hero never
+   shows one for it (ruling 1): no cleaning start/end, no cleaning
+   countdown. The explicit "cleaning is not established" note lives on
+   the map detail card, the where-to-move row and the Details side card. */
+function heroState(key, now, parkedAtMs) {
   if (liveMode()) {
     if (LIVE.status === "error-map" || LIVE.status === "error-data" || LIVE.status === "error-side" || LIVE.status === "error-street") {
       return { mode: "no_window", showIcs: false, title: LIVE.errorTitle || "No verified window",
@@ -1511,6 +1541,29 @@ function heroState(key, now) {
   }
   if (!key) return { mode: "prompt" };
   var s = liveActiveSides()[key];
+  if (s && s.status === "not_established") {
+    /* Limit-only side (Nov 18, his call): cleaning not established, but a
+       verified posted limit exists. Parked (timer running and started) ->
+       the hero shows the limit stay, from the same limit-only verdict the
+       map and where-to-move use. Merely tapped (no timer, or the timer
+       has not started yet — pre-window auto-arm) -> the hero says
+       nothing about the side: mode "prompt", the default not-parked
+       state. No limit, or an exempted limit, falls through to no_window
+       below — there is no stay to show. */
+    var lim = limitForSideKey(key);
+    if (lim && typeof lim.minutes === "number" && !limitExempted(lim)) {
+      var nowMs = +now;
+      var parked = (typeof parkedAtMs === "number") && parkedAtMs <= nowMs;
+      if (!parked) return { mode: "prompt", showIcs: false };
+      var lv = limitOnlyVerdictForSideData(s, lim, nowMs, parkedAtMs);
+      if (lv) {
+        return { mode: "limit", showIcs: false, limitOnly: true,
+                 title: limitAdjective(lim.minutes) + " limit",
+                 count: "ends " + fmtTimeToronto(new Date(lv.deadlineMs)),
+                 detail: "" };
+      }
+    }
+  }
   if (!s || s.status !== "established") {
     return { mode: "no_window", showIcs: false,
              title: "No verified window",
@@ -1573,9 +1626,44 @@ function renderHero() {
   }
   banner.classList.remove("hidden");
   el("parkedSide").textContent = sideLabel(key);
-  var st = heroState(key, new Date());
+  var st = heroState(key, new Date(), parkedAtForVerdict(key));
   var v = verdictForSide(key, Date.now(), parkedAtForVerdict(key));
   var warn = heroWarningState(key, Date.now(), parkedAtForVerdict(key));
+  if (st.mode === "prompt") {
+    /* Tapped a limit-only side without parking (no timer running): the
+       hero says nothing about it — no window line, no verdict, no
+       detail, no warning. The hero content matches the default
+       not-parked state exactly. The selection chrome is untouched: the
+       "Parked: <side>" banner stays (a side IS picked) and the toggle
+       stays "Parked" (tapping it still clears the side) — only the
+       hero's rule content stays quiet. Known tension, for his call:
+       the banner says "Parked: <side>" while this hero says "Not
+       parked". */
+    hero.classList.remove("hidden");
+    hero.classList.remove("now");
+    hero.classList.remove("next");
+    hero.classList.remove("warn30");
+    hero.classList.remove("warn15");
+    var hv0 = el("heroVerdict");
+    if (hv0) { hv0.textContent = ""; hv0.classList.add("hidden"); }
+    var hf0 = el("heroFine");
+    if (hf0) { hf0.textContent = ""; hf0.classList.add("hidden"); }
+    el("heroTitle").textContent = "Not parked";
+    var hc0 = el("heroCount");
+    hc0.textContent = "";
+    hc0.classList.add("hidden");
+    el("heroDetail").textContent = "";
+    tg.textContent = "Parked";
+    tg.classList.add("parked-on");
+    return;
+  }
+  if (st.mode === "limit") {
+    /* Parked on a limit-only side: the verdict line is the limit-only
+       verdict (same source as the map and where-to-move) — the Phase 2
+       verdict is null for these sides, so without this fallback the
+       hero would show a title with no verdict line. */
+    v = limitOnlyVerdictForSideData(liveActiveSides()[key], limitForSideKey(key), Date.now(), parkedAtForVerdict(key));
+  }
   hero.classList.remove("hidden");
   hero.classList.toggle("now", st.mode === "now");
   hero.classList.toggle("next", st.mode === "next");
