@@ -2408,9 +2408,9 @@ var FINES = {
         side mapping via the nearest address on that street as the
         reference point (the no-house-number fallback, at the street's
         closest point to the fix), 1-pole city-data rule, placement
-        guards, conflict/withhold -- until 5 have LANDED (Nov 18 cap
-        follow-up, his call: "keep trying farther streets"), with a
-        try-cap of 10 lookups per sweep so a neighbourhood where every
+        guards, conflict/withhold -- until 8 have LANDED (Nov 18 cap
+        raise, his call: "raise the caps"), with a
+        try-cap of 15 lookups per sweep so a neighbourhood where every
         street yields nothing stays bounded. A street whose lookup
         fails is skipped silently, never a guessed row, and never
         consumes a suggestion slot -- only a try. Baked streets never.
@@ -2449,8 +2449,8 @@ var LIVE_CACHE_TTL_MS = 7 * 86400000;
 var LIVE_CACHE_PREFIX = "ticketSaver.live.v5."; /* v5: sides assembled under the 1-pole city-data rule (Nov 18) — v4 entries re-fetch once */
 var LIVE_RPA_KEY = "ticketSaver.rpa.v1";
 var LIVE_NEARBY_RADIUS_M = 500; /* nearby-streets lookup (Nov 18): where-to-move suggests the closest streets around the fix, from city data -- proximity filters the candidates, the listing logic ranks them */
-var LIVE_NEARBY_MAX_STREETS = 5; /* landed cap (Nov 18 cap follow-up): the sweep suggests at most 5 nearby streets -- it keeps trying candidates in distance order until 5 have landed; each landed street costs a Photon + Geobase + signs round trip and a row in the list; 5 streets is 10 curbs, the ones you would actually walk or drive to */
-var LIVE_NEARBY_MAX_TRIES = 10; /* try-cap (Nov 18 cap follow-up): the sweep never attempts an 11th lookup -- a candidate that yields nothing (no house, no centreline, no signs, a fetch failure) consumes a try, never a suggestion slot, so a neighbourhood where every street yields nothing stays bounded */
+var LIVE_NEARBY_MAX_STREETS = 8; /* landed cap (Nov 18 cap raise): the sweep suggests at most 8 nearby streets -- it keeps trying candidates in distance order until 8 have landed; each landed street costs a Photon + Geobase + signs round trip and a row in the list; 8 streets is 16 curbs, the ones you would actually walk or drive to */
+var LIVE_NEARBY_MAX_TRIES = 15; /* try-cap (Nov 18 cap raise): the sweep never attempts a 16th lookup -- a candidate that yields nothing (no house, no centreline, no signs, a fetch failure) consumes a try, never a suggestion slot, so a neighbourhood where every street yields nothing stays bounded */
 var LIVE_NEARBY_CACHE_PREFIX = "ticketSaver.nearby.v1."; /* separate cache from the current-street lookup: a nearby result carries no paid data (the where-to-move rows never read it), so it must never be mistaken for a complete current-street entry */
 var LIVE_NEARBY_ENABLED = true; /* the live-repro suite disables the auto-sweep -- its Overpass fixture answers every area query with the des-pins ways, which would be wrong-fix candidates */
 var LIVE_JUNCTION_CLOSE_M = 40; /* junction display (Nov 18, his idea): the user is "close" to a junction when the reference house sits within 40 m of a segment end -- the Pierre-Dupaigne 8534 fix is 36.9 m from the Place Pierre-Dupaigne junction, so 30 m would miss the field case that prompted the idea; 40 m sits just beyond the 20 m junction-exclusion band, and a mid-segment fix (49.5 m from the nearest junction on the same street) stays quiet */
@@ -3890,8 +3890,8 @@ async function liveNearbyLookupOne(fixLat, fixLon, cand, areaWays, dataAsOf, cac
   }
 }
 /* The sweep: area query -> candidates -> one lookup each, in distance
-   order, each result landing as it arrives -- until 5 have LANDED or
-   10 have been TRIED, whichever comes first (Nov 18 cap follow-up).
+   order, each result landing as it arrives -- until 8 have LANDED or
+   15 have been TRIED, whichever comes first (Nov 18 cap raise).
    A candidate that yields nothing is skipped silently and never
    consumes a suggestion slot, only a try. Deduped by fix (same fix
    re-sweeps nothing) and abandoned when the generation moves on (the
