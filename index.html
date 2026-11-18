@@ -258,9 +258,11 @@
 
   <!-- Phase 5 piece 2 (Nov 17): where to move — an expandable row in the
        same collapsed-row pattern as the map / limit timer / plan ahead. It
-       ranks every curb we have verified data for by how long you can stay,
-       longest first. Curbs you cannot park on now and sides with no verified
-       rule are listed plainly at the end, never with a guessed stay time. -->
+       ranks this street's curbs by how long you can stay, longest first.
+       Curbs you cannot park on now and sides with no verified rule are
+       listed plainly at the end, never with a guessed stay time. While a
+       live lookup is still running it waits — it never falls back to the
+       previous street. -->
   <div class="card" id="whereCard">
     <button class="limitrow" id="whereToggle" aria-expanded="false"><span id="whereToggleText">Where to move</span><span class="chev" aria-hidden="true">&rsaquo;</span></button>
     <div id="whereBody" class="hidden"></div>
@@ -4090,7 +4092,10 @@ function renderMap(nowMs) {
    SCOPE (his Nov 18 call): ONLY the current street's two sides are listed
    (live sides when a live lookup is showing). No other street is ever
    listed — a street kilometres away is no place to move to, and a previous
-   street is not an answer. Only streets with verified data appear; no curb
+   street is not an answer. While a live lookup is running or has failed,
+   no street is current yet, so nothing is listed at all: the body waits
+   while loading and says so on error, instead of falling back to the
+   previous baked street. Only streets with verified data appear; no curb
    is invented. The permit is stated, never silently applied: when the
    posted limit would have bound but the held sector permit exempts it, the
    row says so (the limit does not bind, the cleaning deadline does). Fines
@@ -4132,9 +4137,13 @@ function whereToMoveEntries(nowMs) {
     });
   }
   /* Nov 18: this street only — never another street (a previous street
-     kilometres away is no place to move to). */
-  if (liveMode() && LIVE.status === "ready" && LIVE.sides) {
-    addStreet(LIVE.streetSlug || "live", LIVE.streetName || "This street", LIVE.sides, null, true);
+     kilometres away is no place to move to). While a live lookup is
+     running or has failed, no street is current yet, so nothing is
+     listed at all (the body waits while loading, says so on error). */
+  if (liveMode()) {
+    if (LIVE.status === "ready" && LIVE.sides) {
+      addStreet(LIVE.streetSlug || "live", LIVE.streetName || "This street", LIVE.sides, null, true);
+    }
   } else {
     var cur = currentSlug();
     var d = (STREET_DATA || {})[cur];
@@ -4226,9 +4235,14 @@ function whereToMoveBodyHtml(nowMs, list) {
   nowMs = nowMs || Date.now();
   if (!list) list = whereToMoveEntries(nowMs);
   var s = "";
-  /* No usable curb on this street (every curb not-established or
-     cannot-park): say so honestly instead of showing nothing useful. */
-  if (!list.some(function (e) { return !e.notEstablished && !e.cannotPark; })) {
+  /* While the live lookup is still running, wait for it: the street
+     being read is named above (GPS row + banner), so this line says
+     only that the signs are still being read. */
+  if (liveMode() && LIVE.status === "loading") {
+    s += "<div>Reading the city's signs\u2026</div>";
+  } else if (!list.some(function (e) { return !e.notEstablished && !e.cannotPark; })) {
+    /* No usable curb on this street (every curb not-established or
+       cannot-park): say so honestly instead of showing nothing useful. */
     s += '<div>No verified place to move to on this street — read the sign where you park.</div>';
   }
   list.forEach(function (e) { s += whereRowHtml(e, nowMs); });
@@ -4290,6 +4304,10 @@ function renderWhereToMove(nowMs) {
     return e.streetSlug + ":" + e.sideKey + ":" + (e.notEstablished ? "?" : e.cannotPark ? "x" : (e.stayMs === Infinity ? "inf" : e.stayMs))
       + ":" + (e.binds || "-") + ":" + e.color + ":" + ((e.lim && limitExempted(e.lim)) ? "P" : "-");
   }).join("|");
+  /* The waiting line (loading) and the empty-state line (failed lookup)
+     both render from an empty list — the live status belongs in the
+     signature, or a failed lookup would leave the waiting line up. */
+  if (liveMode()) sig = LIVE.status + "|" + sig;
   if (sig === _whereSig) return;
   _whereSig = sig;
   body.innerHTML = whereToMoveBodyHtml(nowMs, list);
