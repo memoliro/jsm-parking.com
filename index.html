@@ -2370,6 +2370,19 @@ var FINES = {
         cannot reproduce the baked streets (it drops Lacombe's -221.9 m
         pole and admits the +174 m cross-street pole on the home block), so the
         segment is genuinely derived, never assumed.
+     8. Nearby streets (Nov 18, his call: "suggest the closest places"
+        from city data, never the previously visited streets): once the
+        current street's lookup settles, an Overpass area query (~500 m)
+        finds the streets around the fix; the nearest 5 (baked streets
+        never) each run the same pipeline -- centreline + CKAN signs +
+        side mapping via the nearest address on that street as the
+        reference point (the no-house-number fallback, at the street's
+        closest point to the fix), 1-pole city-data rule, placement
+        guards, conflict/withhold. A street whose lookup fails is
+        skipped silently, never a guessed row. The results feed
+        where-to-move only -- never the hero, the map, or any verdict
+        for the street you are on. Live mode only: on a baked street
+        where-to-move lists that street alone, as before.
    The result is cached in localStorage keyed by street + segment and
    re-validated against the dataset's metadata_modified on every open.
    The limit timer stays manual-only on a live street (no limits in the
@@ -2401,6 +2414,10 @@ var LIVE_NEAREST_ADDRESS_MAX_M = 100; /* no-house-number fallback (Nov 18): the 
 var LIVE_CACHE_TTL_MS = 7 * 86400000;
 var LIVE_CACHE_PREFIX = "ticketSaver.live.v5."; /* v5: sides assembled under the 1-pole city-data rule (Nov 18) — v4 entries re-fetch once */
 var LIVE_RPA_KEY = "ticketSaver.rpa.v1";
+var LIVE_NEARBY_RADIUS_M = 500; /* nearby-streets lookup (Nov 18): where-to-move suggests the closest streets around the fix, from city data -- proximity filters the candidates, the listing logic ranks them */
+var LIVE_NEARBY_MAX_STREETS = 5; /* cap: the 5 nearest streets -- each extra street costs a Photon + Geobase + signs round trip and a row in the list; 5 streets is 10 curbs, the ones you would actually walk or drive to */
+var LIVE_NEARBY_CACHE_PREFIX = "ticketSaver.nearby.v1."; /* separate cache from the current-street lookup: a nearby result carries no paid data (the where-to-move rows never read it), so it must never be mistaken for a complete current-street entry */
+var LIVE_NEARBY_ENABLED = true; /* the live-repro suite disables the auto-sweep -- its Overpass fixture answers every area query with the des-pins ways, which would be wrong-fix candidates */
 var LIVE_CARRIAGEWAY = ["motorway", "trunk", "primary", "secondary", "tertiary",
   "unclassified", "residential", "living_street"];
 var LIVE = { status: "idle", streetName: null, streetSlug: null, houseNumber: null,
@@ -2413,6 +2430,11 @@ var LIVE = { status: "idle", streetName: null, streetSlug: null, houseNumber: nu
    result, never re-derived, never invented. */
 var LIVE_LOADING = null; /* { key, promise } — one lookup per street+house at a time */
 var LIVE_GEN = 0; /* bumped by liveSetIdle — a lookup from an older generation drops its result */
+var LIVE_NEARBY = { status: "idle", fixKey: null, fixLat: null, fixLon: null, streets: {} };
+/* streets[slug] = { name, slug, distM, result } — result is a liveBuildResult
+   output (sides + counts + segment), WITHOUT paid data. Only in live mode:
+   leaving live mode (liveSetIdle / liveSetError) clears it. */
+var LIVE_NEARBY_PROMISE = null; /* the in-flight sweep, for dedup by fix */
 
 /* ---- whitelist parser, ported from build_data.py (same grammar, same guards) ---- */
 var LIVE_WEEKDAYS_FULL = { LUNDI: 1, MARDI: 2, MERCREDI: 3, JEUDI: 4, VENDREDI: 5, SAMEDI: 6, DIMANCHE: 7 };
@@ -3070,6 +3092,7 @@ function liveWillSwitch(slug) {
 }
 function liveSetIdle() {
   LIVE_GEN++; /* any in-flight lookup belongs to the old generation now */
+  LIVE_NEARBY = { status: "idle", fixKey: null, fixLat: null, fixLon: null, streets: {} }; /* leaving live mode invalidates the nearby results */
   if (LIVE.status !== "idle") {
     LIVE = { status: "idle", streetName: null, streetSlug: null, houseNumber: null,
       houseLat: null, houseLon: null, sides: null, counts: null, segment: null,
@@ -3080,6 +3103,7 @@ function liveSetIdle() {
 }
 function liveSetError(status, title, detail) {
   LIVE.status = status; LIVE.errorTitle = title; LIVE.errorDetail = detail; LIVE.sides = null;
+  LIVE_NEARBY = { status: "idle", fixKey: null, fixLat: null, fixLon: null, streets: {} }; /* a failed lookup lists nothing — the nearby results with it */
   if (typeof renderAll === "function") renderAll();
 }
 function liveMaybeLookup(lat, lon, feature) {
@@ -3539,6 +3563,7 @@ async function liveRunLookupInner(fix) {
     if (cached && signsOk && paidOk) {
       if (gen !== LIVE_GEN) return { status: "abandoned" }; /* left live mode mid-lookup */
       liveApplyResult(cached.result, dataAsOf);
+      liveNearbySweep(fix.lat, fix.lon, fix.streetName); /* the where-to-move card suggests the streets around this one — fire and forget, the sweep renders as each street lands */
       return cached.result;
     }
     var houseLat = fix.houseLat, houseLon = fix.houseLon;
@@ -3593,6 +3618,7 @@ async function liveRunLookupInner(fix) {
       houseNumber: fix.houseNumber, dataAsOf: dataAsOf, paidAsOf: paidAsOf,
       savedAt: Date.now(), result: result });
     liveApplyResult(result, dataAsOf);
+    liveNearbySweep(fix.lat, fix.lon, fix.streetName); /* the where-to-move card suggests the streets around this one — fire and forget, the sweep renders as each street lands */
     return result;
   } catch (err) {
     if (gen !== LIVE_GEN) return { status: "abandoned" }; /* left live mode mid-lookup */
@@ -3616,6 +3642,214 @@ function liveApplyResult(result, dataAsOf) {
   LIVE.houseAlong = (typeof result.houseAlong === "number") ? result.houseAlong : null;
   LIVE.houseCt = (typeof result.houseCt === "number") ? result.houseCt : null;
   if (typeof renderAll === "function") renderAll();
+}
+
+/* ---- nearby streets for where-to-move (Nov 18, his call) ----
+   Once the current street's lookup settles, the streets around the fix
+   are looked up from city data and suggested alongside it, closest
+   first by the listing logic (proximity filters the candidates,
+   stay-length ranks them). The per-street pipeline is the SAME one the
+   current street runs -- centreline + CKAN signs + side mapping via
+   the nearest address on that street as the reference point (the
+   no-house-number fallback, at the street's closest point to the
+   fix), 1-pole city-data rule, placement guards, conflict/withhold --
+   minus the paid lookup (the where-to-move rows never read paid data,
+   and a nearby result must never be mistaken for a complete
+   current-street entry, so nearby results live in their own cache).
+   Baked streets are the previously visited streets and are never
+   suggested, even within 500 m. A
+   street whose lookup fails is skipped silently, never a guessed row.
+   Live mode only. One street at a time, each result landing as it
+   arrives -- the list fills in progressively instead of popping in
+   whole, and a slow street never blocks the nearer ones. */
+function liveNearbyFixKey(lat, lon) {
+  return lat.toFixed(3) + "," + lon.toFixed(3); /* ~111 m — the candidate set is stable within a block; re-sweeping on every 11 m move would churn the list */
+}
+function liveNearbyAreaQuery(lat, lon) {
+  var q = '[out:json][timeout:60];way[highway~"^(' + LIVE_CARRIAGEWAY.join("|") +
+    ')$"][name](around:' + LIVE_NEARBY_RADIUS_M + ',' +
+    lat.toFixed(6) + ',' + lon.toFixed(6) + ');out geom;';
+  var opts = { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: "data=" + encodeURIComponent(q) };
+  var urls = [LIVE_OVERPASS_URLS[0], LIVE_OVERPASS_URLS[1]];
+  var tries = [2, 1]; /* 3 attempts total: two on the primary, one on the fallback — same rotation as the named-street lookup */
+  var chain = Promise.resolve();
+  var result = null, lastErr = null;
+  urls.forEach(function (url, u) {
+    chain = chain.then(function () {
+      if (result) return;
+      return liveFetchWithRetry(url, opts, tries[u])
+        .then(function (res) { return res.json(); })
+        .then(function (j) {
+          if (j && j.elements && j.elements.length) {
+            result = { ways: j.elements.filter(function (e) { return e.type === "way"; }) };
+          } else { lastErr = new Error("empty Overpass response"); }
+        })
+        .catch(function (e) { lastErr = e; });
+    });
+  });
+  return chain.then(function () {
+    if (result) return result;
+    throw lastErr || new Error("Overpass area query failed");
+  });
+}
+/* Closest point on a way to the fix, as lat/lon + distance — liveSnap
+   returns the point in local metres, so the xy is projected back. */
+function liveNearbyClosestPoint(fixLat, fixLon, geometry) {
+  var sn = liveSnap(fixLat, fixLon, geometry, fixLat, fixLon);
+  if (!sn) return null;
+  var coslat = Math.cos(fixLat * Math.PI / 180);
+  return { lat: fixLat + sn.xy[1] / 110540, lon: fixLon + sn.xy[0] / (111320 * coslat), distM: sn.dist };
+}
+/* Pure candidate selection from an area-query way set: distinct named
+   carriageway streets, minus the current street and the baked streets,
+   within the radius, nearest first, capped. */
+function liveNearbyCandidates(ways, currentName, fixLat, fixLon) {
+  var byName = {}, order = [];
+  (ways || []).forEach(function (w) {
+    var t = w.tags || {};
+    var name = t.name || "";
+    if (!name) return;
+    if (LIVE_CARRIAGEWAY.indexOf(t.highway) < 0) return;
+    if (!w.geometry || w.geometry.length < 2) return;
+    var key = name.toLowerCase();
+    if (!byName[key]) { byName[key] = { name: name, ways: [] }; order.push(key); }
+    byName[key].ways.push(w);
+  });
+  var curSlug = liveSlug(currentName || ""); /* slug, so a spelling variant (hyphen vs space) cannot twin the current street */
+  var bakedSlugs = {};
+  if (typeof DATA !== "undefined" && DATA && DATA.streets) {
+    DATA.streets.forEach(function (st) { bakedSlugs[liveSlug(st.name)] = true; });
+  }
+  var out = [];
+  order.forEach(function (key) {
+    var c = byName[key];
+    if (liveSlug(c.name) === curSlug) return; /* the current street is already listed */
+    if (liveIsBakedStreetName(c.name) || bakedSlugs[liveSlug(c.name)]) return; /* baked streets are the previously visited streets — never suggestions */
+    var best = null;
+    c.ways.forEach(function (w) {
+      var geom = w.geometry.map(function (g) { return [g.lat, g.lon]; });
+      var p = liveNearbyClosestPoint(fixLat, fixLon, geom);
+      if (p && (!best || p.distM < best.distM)) best = p;
+    });
+    if (!best) return;
+    if (best.distM > LIVE_NEARBY_RADIUS_M) return; /* proximity filters the candidates */
+    out.push({ name: c.name, slug: liveSlug(c.name), distM: Math.round(best.distM * 10) / 10,
+      anchorLat: best.lat, anchorLon: best.lon });
+  });
+  out.sort(function (a, b) { return a.distM - b.distM || (a.slug < b.slug ? -1 : 1); });
+  return out.slice(0, LIVE_NEARBY_MAX_STREETS);
+}
+function liveNearbyCacheKey(slug, idTrc, houseNumber) {
+  return LIVE_NEARBY_CACHE_PREFIX + slug + "." + (idTrc || ("h" + houseNumber));
+}
+/* One nearby street through the same pipeline as the current street
+   (minus the paid lookup — where-to-move never reads it). Returns
+   { name, slug, distM, result } or null when the street must be skipped:
+   no house on it near its closest point, no centreline, no signs, a
+   build error, or any fetch failure. Never throws. */
+async function liveNearbyLookupOne(fixLat, fixLon, cand, areaWays, dataAsOf) {
+  try {
+    if (typeof fetch === "undefined") return null;
+    var pt = await liveNearestAddressPoint(cand.name, cand.anchorLat, cand.anchorLon);
+    if (!pt) return null; /* no house on this street near its closest point — skip silently */
+    var slug = cand.slug;
+    var geoRows = [];
+    try { geoRows = await liveCkanSql(liveGeobaseSql(liveNomVoieCandidate(cand.name))); } catch (e) { geoRows = []; }
+    var geoHit = liveGeobaseHit(geoRows, pt.number);
+    var key = liveNearbyCacheKey(slug, geoHit ? geoHit.idTrc : null, pt.number);
+    var cached = liveCacheRead(key);
+    if (cached && cached.result && cached.result.sides && (!dataAsOf || cached.dataAsOf === dataAsOf)) {
+      return { name: cand.name, slug: slug, distM: cand.distM, result: cached.result };
+    }
+    var chain = liveChainStreetWays(areaWays, cand.name, pt.lat, pt.lon);
+    if (!chain) return null;
+    var crossWays = areaWays.filter(function (w) {
+      var t = w.tags || {};
+      return !chain.streetWayIds[w.id] && (t.name || "").toLowerCase() !== cand.name.toLowerCase()
+        && ["footway", "path", "cycleway", "steps", "pedestrian"].indexOf(t.highway) < 0;
+    });
+    var signs = await liveCkanSql(liveCkanSignsSql(pt.lat, pt.lon));
+    var codes = [];
+    signs.forEach(function (s) { if (s.CODE_RPA && codes.indexOf(s.CODE_RPA) < 0) codes.push(s.CODE_RPA); });
+    var canon = liveRpaCacheGet(codes);
+    var missing = codes.filter(function (c) { return canon[c] === undefined; });
+    if (missing.length) {
+      try {
+        var rows = await liveCkanSql(liveRpaSql(missing));
+        rows.forEach(function (r) { canon[r.CODE_RPA] = r.DESCRIPTION_RPA; });
+        liveRpaCacheSave(canon);
+      } catch (e) { /* keep the cached subset — codes still missing stay ambiguous, honestly */ }
+    }
+    var result = liveBuildResult({ signs: signs, canonByCode: canon, chain: chain,
+      crossWays: crossWays, houseLat: pt.lat, houseLon: pt.lon,
+      houseNumber: pt.number, streetName: cand.name, dataAsOf: dataAsOf, geoHit: geoHit });
+    if (!result || result.status !== "ok") return null;
+    liveCacheSave(key, { streetName: cand.name, streetSlug: slug, houseNumber: pt.number,
+      dataAsOf: dataAsOf, paidAsOf: null, savedAt: Date.now(), result: result });
+    return { name: cand.name, slug: slug, distM: cand.distM, result: result };
+  } catch (e) {
+    return null; /* a nearby street whose lookup fails is skipped, never a guessed row */
+  }
+}
+/* The sweep: area query -> candidates -> one lookup each, in distance
+   order, each result landing as it arrives. Deduped by fix (same fix
+   re-sweeps nothing) and abandoned when the generation moves on (the
+   user picked a baked street or a new lookup started). Fire and forget:
+   callers never await it. */
+function liveNearbySweep(fixLat, fixLon, currentStreetName) {
+  if (!LIVE_NEARBY_ENABLED) return Promise.resolve(null);
+  if (typeof fetch === "undefined") return Promise.resolve(null);
+  var key = liveNearbyFixKey(fixLat, fixLon);
+  if (LIVE_NEARBY_PROMISE && LIVE_NEARBY.fixKey === key && LIVE_NEARBY.status !== "idle") return LIVE_NEARBY_PROMISE;
+  if (LIVE_NEARBY.fixKey === key && LIVE_NEARBY.status === "ready") return Promise.resolve(LIVE_NEARBY.streets); /* same block, results already landed — one area query per fix, not one per 90 s tick; a new fix re-sweeps */
+  var gen = (typeof LIVE_GEN !== "undefined") ? LIVE_GEN : 0;
+  LIVE_NEARBY = { status: "loading", fixKey: key, fixLat: fixLat, fixLon: fixLon, streets: {} };
+  var p = liveNearbySweepInner(fixLat, fixLon, currentStreetName, key, gen);
+  LIVE_NEARBY_PROMISE = p;
+  p.then(function () { if (LIVE_NEARBY_PROMISE === p) LIVE_NEARBY_PROMISE = null; },
+    function () { if (LIVE_NEARBY_PROMISE === p) LIVE_NEARBY_PROMISE = null; });
+  return p;
+}
+async function liveNearbySweepInner(fixLat, fixLon, currentStreetName, key, gen) {
+  try {
+    var area = await liveNearbyAreaQuery(fixLat, fixLon);
+    if (gen !== LIVE_GEN || LIVE_NEARBY.fixKey !== key) return null; /* abandoned — the user moved on */
+    var cands = liveNearbyCandidates(area.ways, currentStreetName, fixLat, fixLon);
+    var dataAsOf = null;
+    try {
+      var pkg = await liveCkanPackage();
+      dataAsOf = (pkg.metadata_modified || pkg.metadata_created || "").slice(0, 10) || null;
+    } catch (e) { dataAsOf = null; }
+    if (gen !== LIVE_GEN || LIVE_NEARBY.fixKey !== key) return null;
+    for (var i = 0; i < cands.length; i++) {
+      if (gen !== LIVE_GEN || LIVE_NEARBY.fixKey !== key) return null;
+      var r = await liveNearbyLookupOne(fixLat, fixLon, cands[i], area.ways, dataAsOf);
+      if (gen !== LIVE_GEN || LIVE_NEARBY.fixKey !== key) return null;
+      if (r && r.result && r.result.sides) {
+        LIVE_NEARBY.streets[r.slug] = r;
+        LIVE_NEARBY.status = "ready";
+        if (typeof renderWhereToMove === "function") renderWhereToMove();
+      }
+    }
+    if (LIVE_NEARBY.status === "loading") LIVE_NEARBY.status = "ready"; /* no candidate yielded a result — the list is just the current street */
+    return LIVE_NEARBY.streets;
+  } catch (e) {
+    if (LIVE_NEARBY.fixKey === key) LIVE_NEARBY.status = "idle"; /* no nearby data — the list is just the current street, nothing guessed */
+    return null;
+  }
+}
+/* What where-to-move lists from the sweep: ready nearby streets, nearest
+   first. The ranking itself (stay-length) lives in whereToMoveEntries. */
+function liveNearbyEntries() {
+  if (!LIVE_NEARBY || LIVE_NEARBY.status !== "ready") return [];
+  var out = [];
+  Object.keys(LIVE_NEARBY.streets).forEach(function (slug) {
+    var s = LIVE_NEARBY.streets[slug];
+    if (s && s.result && s.result.sides) out.push({ slug: slug, name: s.name, distM: s.distM, sides: s.result.sides });
+  });
+  out.sort(function (a, b) { return a.distM - b.distM || (a.slug < b.slug ? -1 : 1); });
+  return out;
 }
 
 
@@ -4186,17 +4420,25 @@ function renderMap(nowMs) {
    cleaning is known. An exempted limit gives no verdict (the side stays
    not-established, limit stated as a fact). An ambiguous side never gets
    a limit-only verdict (conflicting cleaning evidence).
-   SCOPE (his Nov 18 call): ONLY the current street's two sides are listed
-   (live sides when a live lookup is showing). No other street is ever
-   listed — a street kilometres away is no place to move to, and a previous
-   street is not an answer. While a live lookup is running or has failed,
-   no street is current yet, so nothing is listed at all: the body waits
-   while loading and says so on error, instead of falling back to the
-   previous baked street. Only streets with verified data appear; no curb
-   is invented. The permit is stated, never silently applied: when the
-   posted limit would have bound but the held sector permit exempts it, the
-   row says so (the limit does not bind, the cleaning deadline does). Fines
-   are not shown here — the verdicts already carry them where they apply. */
+   SCOPE (his Nov 18 calls): the current street's two sides are listed
+   (live sides when a live lookup is showing), PLUS the streets around
+   it from city data — the nearby-streets lookup (liveNearbySweep) runs when
+   the live lookup settles and suggests the closest streets (~500 m, the
+   5 nearest), each through the same live pipeline. Proximity filters
+   the candidates, stay-length ranks them; the ranking itself is
+   unchanged. The baked streets are the previously visited streets
+   and are never suggested, even within 500 m. A nearby street whose
+   lookup fails is skipped silently, never
+   a guessed row. On a baked street the sweep never runs, so only that
+   street is listed, as before. While a live lookup is running or has
+   failed, no street is current yet, so nothing is listed at all: the
+   body waits while loading and says so on error, instead of falling
+   back to the previous baked street. Only streets with verified data
+   appear; no curb is invented. The permit is stated, never silently
+   applied: when the posted limit would have bound but the held sector
+   permit exempts it, the row says so (the limit does not bind, the
+   cleaning deadline does). Fines are not shown here — the verdicts
+   already carry them where they apply. */
 function whereToMoveEntries(nowMs) {
   nowMs = nowMs || Date.now();
   var out = [];
@@ -4233,13 +4475,23 @@ function whereToMoveEntries(nowMs) {
       out.push(e);
     });
   }
-  /* Nov 18: this street only — never another street (a previous street
-     kilometres away is no place to move to). While a live lookup is
+  /* Nov 18: this street first, then the streets around it (nearby lookup).
+     A previous street kilometres away is no place to move to, so the
+     baked streets are never suggested — but the streets around this one
+     are, closest first by the listing logic. While a live lookup is
      running or has failed, no street is current yet, so nothing is
      listed at all (the body waits while loading, says so on error). */
   if (liveMode()) {
     if (LIVE.status === "ready" && LIVE.sides) {
       addStreet(LIVE.streetSlug || "live", LIVE.streetName || "This street", LIVE.sides, null, true);
+      /* Nearby streets, when the sweep has landed any: same verdicts,
+         same ranking, plain rows (they open no map — the map shows this
+         street only). */
+      if (typeof liveNearbyEntries === "function") {
+        liveNearbyEntries().forEach(function (n) {
+          addStreet(n.slug, n.name, n.sides, null, false);
+        });
+      }
     }
   } else {
     var cur = currentSlug();
@@ -4270,8 +4522,8 @@ function whereToMoveEntries(nowMs) {
   });
   return out;
 }
-/* Covered street names, from the ranked list itself — now at most the
-   current street's name, since only the current street is ever listed. */
+/* Covered street names, from the ranked list itself — the current street
+   plus any nearby streets the sweep landed. */
 function whereStreetNames(list) {
   if (!list) list = whereToMoveEntries(Date.now());
   var names = [];
@@ -4340,10 +4592,10 @@ function whereToMoveBodyHtml(nowMs, list) {
   } else if (!list.some(function (e) { return !e.notEstablished && !e.cannotPark; })) {
     /* No usable curb on this street (every curb not-established or
        cannot-park): say so honestly instead of showing nothing useful. */
-    s += '<div>No verified place to move to on this street — read the sign where you park.</div>';
+    s += '<div>No verified place to move to near here — read the sign where you park.</div>';
   }
   list.forEach(function (e) { s += whereRowHtml(e, nowMs); });
-  s += '<div class="note" style="margin-top:8px">Only this street is listed — never a guessed stay time.</div>';
+  s += '<div class="note" style="margin-top:8px">Only streets near you, from city data — never a guessed stay time.</div>';
   return s;
 }
 /* The collapsed row label carries the best stay, like the limit row carries
@@ -4610,6 +4862,14 @@ if (typeof window !== "undefined") {
     liveHouseFromFeature: liveHouseFromFeature, liveCacheKey: liveCacheKey,
     liveNearestAddressPoint: liveNearestAddressPoint, liveDistM: liveDistM,
     LIVE_NEAREST_ADDRESS_MAX_M: LIVE_NEAREST_ADDRESS_MAX_M,
+    liveNearbySweep: liveNearbySweep, liveNearbyEntries: liveNearbyEntries,
+    liveNearbyCandidates: liveNearbyCandidates, liveNearbyClosestPoint: liveNearbyClosestPoint,
+    liveNearbyAreaQuery: liveNearbyAreaQuery, liveNearbyLookupOne: liveNearbyLookupOne,
+    liveNearbySetEnabled: function (b) { LIVE_NEARBY_ENABLED = !!b; },
+    liveNearbyGetState: function () { return LIVE_NEARBY; },
+    liveNearbySetState: function (s) { LIVE_NEARBY = s; },
+    LIVE_NEARBY_RADIUS_M: LIVE_NEARBY_RADIUS_M, LIVE_NEARBY_MAX_STREETS: LIVE_NEARBY_MAX_STREETS,
+    LIVE_NEARBY_CACHE_PREFIX: LIVE_NEARBY_CACHE_PREFIX,
     liveSlug: liveSlug, liveMaybeLookup: liveMaybeLookup, liveRunLookup: liveRunLookup,
     liveWillSwitch: liveWillSwitch, liveNearestKnownStreetDist: liveNearestKnownStreetDist,
     liveSideKey: liveSideKey, liveDefaultSide: liveDefaultSide,
