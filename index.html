@@ -2351,9 +2351,11 @@ var FINES = {
         are queried (never LIMIT 5000); the code->text map is cached in
         localStorage and reused.
      6. The whitelist parser (parse_sign + helpers) is ported verbatim,
-        with the SAME consensus guards: >=2 distinct poles, any
-        ambiguous sign vetoes its side, two windows = conflict, no data
-        = not established. No nearest-sign fallback, ever.
+        with the city-data rule (Nov 18, his call: "take the city
+        information as correct unless reported different"): ONE attributed
+        pole establishes a window — the city's data is the source of truth
+        by default. Any ambiguous sign vetoes its side, two windows =
+        conflict, no data = not established. No nearest-sign fallback, ever.
      7. Segment = the intersections bracketing the house point (nodes
         shared with a differently-named highway way), 20 m exclusion at
         each end — the same rule the build used. A fixed-radius clip
@@ -2385,9 +2387,9 @@ var LIVE_OVERPASS_URLS = ["https://overpass-api.de/api/interpreter", "https://ov
 var LIVE_PHOTON_SEARCH = "https://photon.komoot.io/api/?q=";
 var LIVE_BAND_MIN_M = 3, LIVE_BAND_MAX_M = 10;
 var LIVE_PAID_BAND_MIN_M = 1, LIVE_PAID_BAND_MAX_M = 10; /* place centres sit on the road, closer than sign poles */
-var LIVE_INTERSECTION_M = 20, LIVE_CONSENSUS = 2;
+var LIVE_INTERSECTION_M = 20, LIVE_CONSENSUS = 1; /* city-data rule (Nov 18): 1 pole establishes — the build still uses >=2 */
 var LIVE_CACHE_TTL_MS = 7 * 86400000;
-var LIVE_CACHE_PREFIX = "ticketSaver.live.v4."; /* v4: the cached result retains the centreline (Phase 5 map) — v3 entries re-fetch once */
+var LIVE_CACHE_PREFIX = "ticketSaver.live.v5."; /* v5: sides assembled under the 1-pole city-data rule (Nov 18) — v4 entries re-fetch once */
 var LIVE_RPA_KEY = "ticketSaver.rpa.v1";
 var LIVE_CARRIAGEWAY = ["motorway", "trunk", "primary", "secondary", "tertiary",
   "unclassified", "residential", "living_street"];
@@ -2664,7 +2666,9 @@ function liveDeriveSegment(chain, crossWays, originAlong, cum) {
     crossings: crossings };
 }
 
-/* ---- per-side assembly: same veto/conflict/consensus rules as the build ---- */
+/* ---- per-side assembly: veto/conflict rules as the build, but the
+   establishment rule is the city-data rule (Nov 18, his call): ONE pole
+   establishes a window — the build still uses >=2 distinct poles. ---- */
 function liveExtend(base, extra) {
   var o = {}, k;
   for (k in base) o[k] = base[k];
@@ -2953,7 +2957,7 @@ function liveSegmentNoteHtml() {
     s += " (" + liveEsc(seg.belowName || "street end") + " to " + liveEsc(seg.aboveName || "street end") + ")";
   }
   if (LIVE.idTrc) s += ", street segment ID_TRC " + liveEsc(LIVE.idTrc);
-  s += "; a window counts as established only when two or more poles carry the identical sign. " +
+  s += "; a window counts as established when one pole carries the sign — the city's data is taken as correct unless reported different. " +
     "Season Apr 1 \u2013 Dec 1 <b>inclusive</b>. Arrow codes on the signs (FLECHE_PAN) are not decoded in the open data, " +
     "so no arrow is assumed to mean both directions. Centreline: OpenStreetMap contributors (ODbL). Times are America/Toronto.";
   if (LIVE.geoDisagreement) {
