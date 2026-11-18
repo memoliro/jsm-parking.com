@@ -4087,15 +4087,14 @@ function renderMap(nowMs) {
    cleaning is known. An exempted limit gives no verdict (the side stays
    not-established, limit stated as a fact). An ambiguous side never gets
    a limit-only verdict (conflicting cleaning evidence).
-   "Nearby" is every street with real data: the current street's two sides
-   (live sides when a live lookup is showing) plus the other baked streets.
-   A baked street that IS the live street (same block, inside the GPS
-   street-switch distance) is skipped, so it never appears twice. Only
-   streets with verified data appear; no curb is invented. The permit is
-   stated, never silently applied: when the posted limit would have bound
-   but the held sector permit exempts it, the row says so (the limit does
-   not bind, the cleaning deadline does). Fines are not shown here — the
-   verdicts already carry them where they apply. */
+   SCOPE (his Nov 18 call): ONLY the current street's two sides are listed
+   (live sides when a live lookup is showing). No other street is ever
+   listed — a street kilometres away is no place to move to, and a previous
+   street is not an answer. Only streets with verified data appear; no curb
+   is invented. The permit is stated, never silently applied: when the
+   posted limit would have bound but the held sector permit exempts it, the
+   row says so (the limit does not bind, the cleaning deadline does). Fines
+   are not shown here — the verdicts already carry them where they apply. */
 function whereToMoveEntries(nowMs) {
   nowMs = nowMs || Date.now();
   var out = [];
@@ -4132,22 +4131,14 @@ function whereToMoveEntries(nowMs) {
       out.push(e);
     });
   }
+  /* Nov 18: this street only — never another street (a previous street
+     kilometres away is no place to move to). */
   if (liveMode() && LIVE.status === "ready" && LIVE.sides) {
     addStreet(LIVE.streetSlug || "live", LIVE.streetName || "This street", LIVE.sides, null, true);
-    var switchM = (typeof DATA !== "undefined" && DATA && DATA.street_switch_m) || 300;
-    Object.keys(STREET_DATA || {}).forEach(function (slug) {
-      var reg = null;
-      (STREET_REGISTRY || []).forEach(function (r) { if (r.slug === slug) reg = r; });
-      if (reg && typeof LIVE.houseLat === "number" && typeof LIVE.houseLon === "number"
-          && streetDistM(LIVE.houseLat, LIVE.houseLon, reg) < switchM) return;
-      var d = STREET_DATA[slug].data;
-      addStreet(slug, d.street.short_name, d.sides, d.limits, false);
-    });
   } else {
-    Object.keys(STREET_DATA || {}).forEach(function (slug) {
-      var d = STREET_DATA[slug].data;
-      addStreet(slug, d.street.short_name, d.sides, d.limits, slug === currentSlug());
-    });
+    var cur = currentSlug();
+    var d = (STREET_DATA || {})[cur];
+    if (d) addStreet(cur, d.data.street.short_name, d.data.sides, d.data.limits, true);
   }
   function alpha(a, b) {
     if (a.streetSlug !== b.streetSlug) return a.streetSlug < b.streetSlug ? -1 : 1;
@@ -4173,9 +4164,8 @@ function whereToMoveEntries(nowMs) {
   });
   return out;
 }
-/* Covered street names, from the ranked list itself — the note names exactly
-   the streets whose curbs are shown (a baked street that IS the live street
-   is skipped from the list, so its name must not appear here either). */
+/* Covered street names, from the ranked list itself — now at most the
+   current street's name, since only the current street is ever listed. */
 function whereStreetNames(list) {
   if (!list) list = whereToMoveEntries(Date.now());
   var names = [];
@@ -4236,10 +4226,13 @@ function whereToMoveBodyHtml(nowMs, list) {
   nowMs = nowMs || Date.now();
   if (!list) list = whereToMoveEntries(nowMs);
   var s = "";
+  /* No usable curb on this street (every curb not-established or
+     cannot-park): say so honestly instead of showing nothing useful. */
+  if (!list.some(function (e) { return !e.notEstablished && !e.cannotPark; })) {
+    s += '<div>No verified place to move to on this street — read the sign where you park.</div>';
+  }
   list.forEach(function (e) { s += whereRowHtml(e, nowMs); });
-  var names = whereStreetNames(list);
-  s += '<div class="note" style="margin-top:8px">Only streets with verified data are listed'
-    + (names.length ? " — " + esc(names.join(", ")) : "") + ". No other curb is shown — never a guessed stay time.</div>";
+  s += '<div class="note" style="margin-top:8px">Only this street is listed — never a guessed stay time.</div>';
   return s;
 }
 /* The collapsed row label carries the best stay, like the limit row carries
