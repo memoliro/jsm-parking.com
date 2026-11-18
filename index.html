@@ -35,11 +35,14 @@
             color: var(--amber-ink); border-radius: 12px; padding: 12px 14px;
             font-size: 16px; margin-bottom: 10px; }
   .banner b { color: var(--amber-ink); }
-  .parked { background: var(--soft-green); border: 1px solid #bfe6cf; color: #14532d;
+  /* Parked banner (his call Nov 17): it takes the solid-green style the hero
+     toggle used to have — the two swap. The toggle takes the selected-side
+     colors when parked; the banner takes this button's solid green. */
+  .parked { background: var(--accent); border: 1px solid var(--accent); color: #fff;
             border-radius: 12px; padding: 12px 14px; font-size: 18px; margin-bottom: 10px;
             display: flex; justify-content: space-between; align-items: center; gap: 8px; }
   .parked span:first-child { flex: 1; text-align: center; }
-  .parked .change { font-size: 18px; font-weight: 700; text-decoration: none; padding: 2px 8px; }
+  .parked .change { color: #fff; font-size: 18px; font-weight: 700; text-decoration: none; padding: 2px 8px; }
   .label { color: var(--muted); font-size: 16px; }
   .big { font-size: 34px; font-weight: 800; line-height: 1.15; }
   .count { font-size: 44px; font-weight: 800; line-height: 1.1; font-variant-numeric: tabular-nums; }
@@ -105,6 +108,9 @@
              box-shadow: 0 0 0 1px rgba(49,196,141,.35), 0 18px 50px rgba(49,196,141,.35), 0 8px 30px rgba(49,196,141,.25);
              outline: none; }
   button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  /* Parked state of the hero toggle (his call Nov 17): it takes the selected
+     side button's colors — soft-green tint, accent border, dark text. */
+  button.action.parked-on { background: var(--soft-green); border-color: var(--accent); color: var(--ink); }
   .sign { background: #f7f8f7; border-left: 3px solid var(--accent); border-radius: 0 8px 8px 0;
           padding: 10px 12px; margin-top: 10px; font-size: 17px; }
   .sign .fr { font-style: italic; }
@@ -174,7 +180,7 @@
     <div id="heroVerdict" class="hidden"></div>
     <div id="heroFine" class="hidden"></div>
     <div style="margin-top:10px;text-align:center">
-      <button class="action primary" id="parkedToggle">Parked</button>
+      <button class="action primary" id="parkedToggle">Park</button>
     </div>
   </div>
 
@@ -330,7 +336,7 @@ function sideButtonElByIndex(i) { return el("btnSide" + i); }
 var HOME_LAT = DATA.street.home.lat, HOME_LON = DATA.street.home.lon;
 var TZ = "America/Toronto";
 var LS_KEY = "ticketSaver.side." + DATA.street.slug + ".v1";
-var PARKED_DEFAULT_SIDE = DATA.street.default_side || SIDE_KEYS[0]; /* the "Parked" tap parks on the street's default side (its reference address); the picker below switches sides */
+var PARKED_DEFAULT_SIDE = DATA.street.default_side || SIDE_KEYS[0]; /* the "Park" tap parks on the street's default side (its reference address); the picker below switches sides */
 
 /* ---- single-page street switching (Montreal, Nov 17) ----
    DATA / CENTERLINE / SIDE_KEYS / HOME_* / LS_KEY / PARKED_DEFAULT_SIDE
@@ -350,7 +356,7 @@ function applyStreetData() {
 /* Manual pick vs GPS auto-switch: a ?street= deep link is an explicit user
    choice — it wins over the GPS auto-switch for the rest of the session,
    or the auto-switch would bounce the user straight back to the street
-   they just left. A new session (new tab) re-enables the auto-switch. The
+   they just left. A new session (new tab) re-enables the auto-switch.
    Tapping the GPS row clears the flag first, so an explicit GPS request
    always decides. */
 var MANUAL_PICK_KEY = "ticketSaver.manualPick.v1";
@@ -822,10 +828,10 @@ function renderSideCards() {
 function getSelectedSide() {
   try { return localStorage.getItem(liveSideKey() || LS_KEY); } catch (e) { return null; }
 }
-/* Parking is a single tap: picking a side (or the Parked toggle) says "I parked
+/* Parking is a single tap: picking a side (or the Park toggle) says "I parked
    here" — it also arms the limit timer when the window opens later (no saved
    timer, pre-window only; maybeAutoArmLimit is a no-op otherwise). Clearing
-   the side ("Not Parked" / the ✕) says "I moved" — it clears the limit timer
+   the side ("Parked" / the ✕) says "I moved" — it clears the limit timer
    too, so nothing keeps counting for a car that left. nowMs is test-only;
    callers pass nothing and it defaults to now. */
 function setSelectedSide(key, nowMs) {
@@ -1412,7 +1418,7 @@ function renderHero() {
   renderPaidWarn();
   if (!key) {
     banner.classList.add("hidden");
-    /* Prompt mode: not parked yet — the hero is the one-tap "Parked" button. */
+    /* Prompt mode: not parked yet — the hero is the one-tap "Park" button. */
     hero.classList.remove("hidden");
     hero.classList.remove("now");
     hero.classList.remove("next");
@@ -1427,7 +1433,8 @@ function renderHero() {
     hc0.textContent = "";
     hc0.classList.add("hidden");
     el("heroDetail").textContent = "";
-    tg.textContent = "Parked";
+    tg.textContent = "Park";
+    tg.classList.remove("parked-on");
     return;
   }
   banner.classList.remove("hidden");
@@ -1467,7 +1474,8 @@ function renderHero() {
     hf.textContent = v ? (v.fine || "") : "";
     hf.classList.toggle("hidden", !v || !v.fine || (warn.level === "none" && v.kind !== "no_stop"));
   }
-  tg.textContent = "Not Parked";
+  tg.textContent = "Parked";
+  tg.classList.add("parked-on");
 }
 
 /* The limit card stays one row even while a timer runs: the row label carries
