@@ -2698,6 +2698,47 @@ function liveDeriveSegment(chain, crossWays, originAlong, cum) {
     crossings: crossings };
 }
 
+/* ---- map extent (map-card polish, Nov 18): the drawn map reaches at least
+   two junctions each way — the junction behind and the junction ahead of the
+   verdict segment — so the map shows the street in context. The VERDICT
+   segment (min/max/belowName/aboveName) is untouched: signs are attributed
+   only inside it, and the coloured curbs are drawn only inside it. The
+   neighbouring roads are drawn grey, with their junction names labelled.
+   Crossings arrive duplicated (a junction shares two nodes with the
+   centreline), so dedupe by name + along within 20 m before counting.
+   extMin/extMax are the along-track positions of the 2nd distinct junction
+   each way (the 1st when only one exists, the segment end when none);
+   innerBelow/innerAbove are the 1st junctions beyond the segment — the
+   interior labels. When the outer junction IS the 1st, the inner is null
+   (the subtitle already names the bracketing junctions). ---- */
+function liveDedupeCrossings(crossings) {
+  var out = [];
+  (crossings || []).forEach(function(c) {
+    var dup = out.some(function(o) {
+      return o.name === c.name && Math.abs(o.along - c.along) <= 20;
+    });
+    if (!dup) out.push({ name: c.name, along: c.along });
+  });
+  return out;
+}
+function liveMapExtent(seg) {
+  var dedup = liveDedupeCrossings(seg.crossings || []);
+  var below = dedup.filter(function(c) { return c.along < seg.min; })
+    .sort(function(a, b) { return b.along - a.along; });
+  var above = dedup.filter(function(c) { return c.along > seg.max; })
+    .sort(function(a, b) { return a.along - b.along; });
+  var extMin = below.length >= 2 ? below[1].along : (below.length === 1 ? below[0].along : seg.min);
+  var extMax = above.length >= 2 ? above[1].along : (above.length === 1 ? above[0].along : seg.max);
+  var innerBelow = (below.length >= 2 && below[0].along > extMin)
+    ? { name: below[0].name, along: below[0].along } : null;
+  var innerAbove = (above.length >= 2 && above[0].along < extMax)
+    ? { name: above[0].name, along: above[0].along } : null;
+  return { extMin: Math.round(extMin * 10) / 10, extMax: Math.round(extMax * 10) / 10,
+    extBelowName: below.length >= 2 ? below[1].name : (below.length === 1 ? below[0].name : null),
+    extAboveName: above.length >= 2 ? above[1].name : (above.length === 1 ? above[0].name : null),
+    innerBelow: innerBelow, innerAbove: innerAbove };
+}
+
 /* ---- per-side assembly: veto/conflict rules as the build, but the
    establishment rule is the city-data rule (Nov 18, his call): ONE pole
    establishes a window — the build still uses >=2 distinct poles. ---- */
@@ -2818,9 +2859,13 @@ function liveBuildResult(input) {
       along_track_from_home_block_m: Math.round(along * 10) / 10, parsed: parsed });
   });
   counts.attributed = attributed.length;
+  var mapExtent = liveMapExtent(seg);
   return { status: "ok", sides: liveAssembleSides(attributed), counts: counts,
     segment: { min: Math.round(seg.min * 10) / 10, max: Math.round(seg.max * 10) / 10,
-      belowName: seg.belowName, aboveName: seg.aboveName },
+      belowName: seg.belowName, aboveName: seg.aboveName,
+      extMin: mapExtent.extMin, extMax: mapExtent.extMax,
+      extBelowName: mapExtent.extBelowName, extAboveName: mapExtent.extAboveName,
+      innerBelow: mapExtent.innerBelow, innerAbove: mapExtent.innerAbove },
     houseSide: houseParity, sideMethod: sideMethod, geoDisagreement: geoDisagreement,
     idTrc: geo ? geo.idTrc : null, dataAsOf: input.dataAsOf || null,
     streetName: input.streetName, houseNumber: input.houseNumber, attributed: attributed,
@@ -3898,6 +3943,11 @@ function liveNearbyEntries() {
    centreline (an older cached entry) says so plainly instead of drawing
    something false. */
 var MAP_CURB_M = 6; /* schematic half-width: curbs sit 6 m off the centreline */
+var MAP_MAX_ASPECT = 1.15; /* the map frame is never taller than 1.15x its width */
+var MAP_EXTEND_M = 80; /* baked streets: the drawn road extends 80 m past each
+  segment end, capped at the centreline ends — the map shows the street in
+  context (the junctions either side) while the coloured curbs stay inside
+  the true segment */
 var MAP_LAYERS = { paid: true, cleaning: true };
 var _mapSelected = null; /* side key whose detail card is open, or null */
 var _mapSig = "";
@@ -3978,11 +4028,108 @@ function mapBakedEndLabels(extent) {
   }
   return { low: mapEndLabelFromBound(extent.lowBound), high: mapEndLabelFromBound(extent.highBound) };
 }
+/* The drawn road's extent (map-card polish, Nov 18): the road is drawn past
+   the verdict segment so the map covers at least two junctions each way.
+   Live: the lookup already computed the extent (liveMapExtent) — the 2nd
+   distinct junction each way, the 1st when only one exists, the segment end
+   when none. An older cached lookup has no ext fields: fall back to drawing
+   the verdict segment (no crash, no invented junction). Baked: extend the
+   segment 80 m each way; the road is capped at the centreline ends by the
+   clipping in mapGeometry. The verdict segment itself is never widened:
+   signs are attributed and curbs coloured only inside [seg.min, seg.max]. */
+function mapSegFromLiveSegment(segment) {
+  if (!segment || typeof segment.min !== "number" || typeof segment.max !== "number") return null;
+  if (typeof segment.extMin !== "number" || typeof segment.extMax !== "number") {
+    return { min: segment.min, max: segment.max,
+      extBelowName: segment.belowName || null, extAboveName: segment.aboveName || null,
+      innerBelow: null, innerAbove: null };
+  }
+  return { min: segment.extMin, max: segment.extMax,
+    extBelowName: segment.extBelowName || null, extAboveName: segment.extAboveName || null,
+    innerBelow: segment.innerBelow || null, innerAbove: segment.innerAbove || null };
+}
+function mapSegFromBakedSegment(extent) {
+  if (!extent || typeof extent.min !== "number" || typeof extent.max !== "number") return null;
+  /* No outer-junction names are known for baked streets (the crossings come
+     from the live lookup only) — the road ends are left unlabelled and the
+     bracketing junctions are named in the subtitle + as interior labels. */
+  return { min: extent.min - MAP_EXTEND_M, max: extent.max + MAP_EXTEND_M,
+    extBelowName: null, extAboveName: null, innerBelow: null, innerAbove: null };
+}
+/* Clip a list of {x, y, rel} points to [lo, hi] in rel, interpolating the
+   boundary points — the same clipping the road uses. Returns the clipped
+   list (possibly empty). */
+function mapClipRange(list, lo, hi) {
+  var out = [];
+  function push(x, y, rel) {
+    var last = out[out.length - 1];
+    if (last && Math.abs(last.x - x) < 0.01 && Math.abs(last.y - y) < 0.01) return;
+    out.push({ x: x, y: y, rel: rel });
+  }
+  for (var i = 0; i < list.length - 1; i++) {
+    var a = list[i], b = list[i + 1];
+    var ra = a.rel, rb = b.rel;
+    var l = Math.min(ra, rb), h = Math.max(ra, rb);
+    if (h < lo || l > hi) continue;
+    var t0 = 0, t1 = 1;
+    if (ra < lo) t0 = Math.max(t0, (lo - ra) / (rb - ra));
+    if (ra > hi) t0 = Math.max(t0, (ra - hi) / (ra - rb));
+    if (rb < lo) t1 = Math.min(t1, (lo - ra) / (rb - ra));
+    if (rb > hi) t1 = Math.min(t1, (ra - hi) / (ra - rb));
+    if (t1 < t0) continue;
+    push(a.x + (b.x - a.x) * t0, a.y + (b.y - a.y) * t0, ra + (rb - ra) * t0);
+    push(a.x + (b.x - a.x) * t1, a.y + (b.y - a.y) * t1, ra + (rb - ra) * t1);
+  }
+  return out;
+}
+/* Label width estimate (viewBox units): the same 0.52em/char (regular) and
+   0.56em/char (bold) the probe measured — a label is placed only where its
+   estimated box fits fully inside the viewBox. */
+function mapLabelWidth(text, fontSize, bold) {
+  return String(text).length * fontSize * (bold ? 0.56 : 0.52);
+}
+/* Clamp a HORIZONTAL label (x = anchor, y = baseline) into the viewBox.
+   The anchor flips start <-> end when the text cannot fit on its side, so a
+   long name never runs off the edge — it is anchored the other way instead.
+   Returns {x, anchor} or null when the text cannot fit at all. */
+function mapClampLabel(x, y, text, fontSize, anchor, vb, bold) {
+  var w = mapLabelWidth(text, fontSize, bold);
+  var lo = vb.x + 2, hi = vb.x + vb.w - 2;
+  if (w > hi - lo) return null;
+  if (anchor === "start") {
+    if (x + w > hi) return { x: hi, y: y, anchor: "end" };
+    if (x < lo) return { x: lo, y: y, anchor: "start" };
+    return { x: x, y: y, anchor: "start" };
+  }
+  if (anchor === "end") {
+    if (x - w < lo) return { x: lo, y: y, anchor: "start" };
+    if (x > hi) return { x: hi, y: y, anchor: "end" };
+    return { x: x, y: y, anchor: "end" };
+  }
+  /* middle: keep the centre inside, clamping the box to the viewBox */
+  var cx = Math.max(lo + w / 2, Math.min(hi - w / 2, x));
+  return { x: cx, y: y, anchor: "middle" };
+}
+/* Clamp a ROTATED label (x, y = anchor in SVG coords, angle in degrees) into
+   the viewBox: the label's axis-aligned bounding box must fit. Returns
+   {x, y} or null when it cannot fit at all. */
+function mapClampRotatedLabel(x, y, text, fontSize, angle, vb, bold) {
+  var w = mapLabelWidth(text, fontSize, bold), h = fontSize * 1.2;
+  var rad = Math.abs(angle) * Math.PI / 180;
+  var bw = w * Math.cos(rad) + h * Math.sin(rad);
+  var bh = w * Math.sin(rad) + h * Math.cos(rad);
+  var loX = vb.x + 2, hiX = vb.x + vb.w - 2, loY = vb.y + 2, hiY = vb.y + vb.h - 2;
+  if (bw > hiX - loX || bh > hiY - loY) return null;
+  var cx = Math.max(loX + bw / 2, Math.min(hiX - bw / 2, x));
+  var cy = Math.max(loY + bh / 2, Math.min(hiY - bh / 2, y));
+  return { x: cx, y: cy };
+}
 /* Where the map's geometry comes from, baked or live. Live needs a ready
    lookup WITH a retained centreline; anything else is an honest "no map". */
 function mapSource() {
   if (liveMode()) {
-    if (LIVE.status === "loading") return { error: "loading" };
+    if (LIVE.status === "loading") return { error: "loading",
+      message: "Reading the city\u2019s signs\u2026" };
     if (LIVE.status !== "ready") {
       return { error: "live-error",
                message: "No street map here — " + (LIVE.errorDetail || "the live lookup didn't produce a street map.") };
@@ -3998,6 +4145,7 @@ function mapSource() {
     return { kind: "live", centreline: LIVE.centreline, refLat: LIVE.houseLat, refLon: LIVE.houseLon,
              houseNumber: LIVE.houseNumber, houseCt: LIVE.houseCt,
              seg: { min: LIVE.segment.min, max: LIVE.segment.max },
+             mapSeg: mapSegFromLiveSegment(LIVE.segment),
              ends: { low: LIVE.segment.belowName || null, high: LIVE.segment.aboveName || null },
              attributed: null, streetName: LIVE.streetName };
   }
@@ -4010,7 +4158,8 @@ function mapSource() {
     ? parseInt(DATA.street.address_number, 10) : NaN;
   return { kind: "baked", centreline: CENTERLINE, refLat: HOME_LAT, refLon: HOME_LON,
            houseNumber: isNaN(houseNumber) ? null : houseNumber, houseCt: null,
-           seg: extent, ends: mapBakedEndLabels(extent),
+           seg: extent, mapSeg: mapSegFromBakedSegment(extent),
+           ends: mapBakedEndLabels(extent),
            attributed: (typeof DATA !== "undefined" && DATA) ? DATA.attributed_signs : null,
            streetName: (typeof DATA !== "undefined" && DATA && DATA.street) ? DATA.street.short_name : null };
 }
@@ -4031,7 +4180,15 @@ function mapGeometry() {
   var houseCt = (typeof src.houseCt === "number") ? src.houseCt : houseSnap.ct;
   var signs = mapSideCtSigns(src.attributed, src.houseNumber, houseCt);
   var segMin = src.seg.min, segMax = src.seg.max;
-  /* Clip the centreline to [segMin, segMax] in along-track metres from the
+  /* The DRAWN road reaches past the verdict segment: live streets draw to
+     the 2nd junction each way (src.mapSeg, from liveMapExtent), baked
+     streets 80 m past each segment end. The coloured curbs stay inside
+     [segMin, segMax] — see below. */
+  var mapSeg = src.mapSeg || null;
+  var drawMin = (mapSeg && typeof mapSeg.min === "number") ? mapSeg.min : segMin;
+  var drawMax = (mapSeg && typeof mapSeg.max === "number") ? mapSeg.max : segMax;
+  var extended = drawMin < segMin || drawMax > segMax;
+  /* Clip the centreline to [drawMin, drawMax] in along-track metres from the
      reference address, interpolating the boundary points. */
   var pts = [];
   function pushPt(x, y, rel) {
@@ -4044,20 +4201,20 @@ function mapGeometry() {
     var b = mapXY(cl[i + 1][0], cl[i + 1][1], refLat, refLon);
     var ra = cum[i] - homeAlong, rb = cum[i + 1] - homeAlong;
     var lo = Math.min(ra, rb), hi = Math.max(ra, rb);
-    if (hi < segMin || lo > segMax) continue;
+    if (hi < drawMin || lo > drawMax) continue;
     var t0 = 0, t1 = 1;
-    if (ra < segMin) t0 = Math.max(t0, (segMin - ra) / (rb - ra));
-    if (ra > segMax) t0 = Math.max(t0, (ra - segMax) / (ra - rb));
-    if (rb < segMin) t1 = Math.min(t1, (segMin - ra) / (rb - ra));
-    if (rb > segMax) t1 = Math.min(t1, (ra - segMax) / (ra - rb));
+    if (ra < drawMin) t0 = Math.max(t0, (drawMin - ra) / (rb - ra));
+    if (ra > drawMax) t0 = Math.max(t0, (ra - drawMax) / (ra - rb));
+    if (rb < drawMin) t1 = Math.min(t1, (drawMin - ra) / (rb - ra));
+    if (rb > drawMax) t1 = Math.min(t1, (ra - drawMax) / (ra - rb));
     if (t1 < t0) continue;
     pushPt(a[0] + (b[0] - a[0]) * t0, a[1] + (b[1] - a[1]) * t0, ra + (rb - ra) * t0);
     pushPt(a[0] + (b[0] - a[0]) * t1, a[1] + (b[1] - a[1]) * t1, ra + (rb - ra) * t1);
   }
   if (pts.length < 2) return { ok: false, reason: "no-snap",
     message: "No street map here — the street segment doesn't overlap the centreline." };
-  function normalAt(j) {
-    var p = pts[j], q = pts[Math.min(j + 1, pts.length - 1)], r = pts[Math.max(j - 1, 0)];
+  function normalOn(list, j) {
+    var p = list[j], q = list[Math.min(j + 1, list.length - 1)], r = list[Math.max(j - 1, 0)];
     var dx = q.x - r.x, dy = q.y - r.y, len = Math.sqrt(dx * dx + dy * dy) || 1;
     return [-dy / len, dx / len]; /* +normal is the +cross-track direction */
   }
@@ -4066,19 +4223,22 @@ function mapGeometry() {
       var r0 = pts[j].rel, r1 = pts[j + 1].rel;
       if ((rel >= r0 && rel <= r1) || (rel >= r1 && rel <= r0)) {
         var t = (r1 === r0) ? 0 : (rel - r0) / (r1 - r0);
-        var nx = normalAt(j);
+        var nx = normalOn(pts, j);
         return { x: pts[j].x + (pts[j + 1].x - pts[j].x) * t,
                  y: pts[j].y + (pts[j + 1].y - pts[j].y) * t, n: nx };
       }
     }
     return null;
   }
+  /* Coloured curbs stay inside the VERDICT segment [segMin, segMax] — the
+     road past it is drawn grey with no curb verdicts. */
+  var curbPts = mapClipRange(pts, segMin, segMax);
   var curbs = {};
   liveActiveSideKeys().forEach(function (k) {
     if (!signs[k]) return; /* unknown side: no curb is drawn, honestly */
-    curbs[k] = pts.map(function (p, j) {
-      var n = normalAt(j);
-      return { x: p.x + n[0] * MAP_CURB_M * signs[k], y: p.y + n[1] * MAP_CURB_M * signs[k] };
+    curbs[k] = curbPts.map(function (p, j) {
+      var n = normalOn(curbPts, j);
+      return { x: p.x + n[0] * MAP_CURB_M * signs[k], y: p.y + n[1] * MAP_CURB_M * signs[k], rel: p.rel };
     });
   });
   var dots = [];
@@ -4103,7 +4263,10 @@ function mapGeometry() {
         ? String(DATA.street.address_number)
         : (liveMode() && LIVE.houseNumber ? String(LIVE.houseNumber) : null) };
   }
-  /* Fit: everything in SVG coords (y flipped), padded for the labels. */
+  /* Fit: everything in SVG coords (y flipped). The frame is capped at
+     MAP_MAX_ASPECT (never taller than 1.15x its width): a steep road's
+     portrait bbox is widened around its centre instead of stretching the
+     card tall. PAD 34 leaves room for the title block + the labels. */
   var all = [];
   pts.forEach(function (p) { all.push([p.x, -p.y]); });
   Object.keys(curbs).forEach(function (k) {
@@ -4116,22 +4279,94 @@ function mapGeometry() {
     if (q[1] < minY) minY = q[1]; if (q[1] > maxY) maxY = q[1];
   });
   var PAD = 34;
-  var mid = pointAtRel((segMin + segMax) / 2);
-  var streetAngle = 0;
-  if (mid) {
-    var j0 = 0;
-    for (var j = 0; j < pts.length - 1; j++) {
-      if ((pts[j].rel <= (segMin + segMax) / 2 && pts[j + 1].rel >= (segMin + segMax) / 2)
-          || (pts[j].rel >= (segMin + segMax) / 2 && pts[j + 1].rel <= (segMin + segMax) / 2)) { j0 = j; break; }
-    }
-    var ang = Math.atan2(-(pts[j0 + 1].y - pts[j0].y), pts[j0 + 1].x - pts[j0].x) * 180 / Math.PI;
-    if (Math.abs(ang) <= 75) streetAngle = ang;
+  var vbX = minX - PAD, vbY = minY - PAD;
+  var vbW = maxX - minX + 2 * PAD, vbH = maxY - minY + 2 * PAD;
+  if (vbH > MAP_MAX_ASPECT * vbW) {
+    vbW = vbH / MAP_MAX_ASPECT;
+    vbX = (minX + maxX) / 2 - vbW / 2;
   }
+  var vb = { x: vbX, y: vbY, w: vbW, h: vbH };
+  /* Font sizes are proportional to the final viewBox width, so the same
+     name renders the same size on a short segment as on a long one (before:
+     41.6 px on a short segment, 19.4 px on a long one for the same
+     12-unit size). */
+  var nameFs = Math.min(vbW / 26, 14);
+  var subFs = Math.min(vbW / 34, 9);
+  var homeFs = Math.min(vbW / 30, 12);
+  var endFs = Math.min(vbW / 34, 10);
+  /* Title: the street name sits in the padding band at the top, centred on
+     the viewBox, horizontal — never on the road, never rotated. The old
+     mid-point name (horizontal on a diagonal road, longer than the segment)
+     is gone. */
+  var title = null;
+  if (src.streetName) {
+    var t = mapClampLabel(vbX + vbW / 2, vbY + nameFs + 2, src.streetName, nameFs, "middle", vb, true);
+    if (t) title = { x: t.x, y: t.y, fontSize: nameFs, text: src.streetName };
+  }
+  /* Subtitle: the bracketing junctions, shown when the road is drawn past
+     them (the map is extended) — they are the segment's ends, so they read
+     as the block the coloured curbs sit on. */
+  var subtitle = null;
+  if (extended && (src.ends.low || src.ends.high)) {
+    var subText = [src.ends.low, src.ends.high].filter(Boolean).join(" \u2013 ");
+    var st = mapClampLabel(vbX + vbW / 2, vbY + nameFs + 2 + subFs + 2, subText, subFs, "middle", vb, false);
+    if (st) subtitle = { x: st.x, y: st.y, fontSize: subFs, text: subText };
+  }
+  /* Labels, all clamped inside the viewBox: the junction at each drawn road
+     end (12 m beyond it along the road — the OUTER junction when extended,
+     the bracketing junction when not) + the 1st junction beyond the segment
+     on each side (rotated along the road, 12 m to the +normal side, with a
+     leader line). A label that cannot fit on its side flips its anchor
+     instead of running off the edge; one that cannot fit at all is dropped. */
+  var labels = [];
+  function addEndLabel(endRel, endName, isLow) {
+    if (!endName) return;
+    var p0 = isLow ? pts[0] : pts[pts.length - 1];
+    var p1 = isLow ? (pts[1] || pts[0]) : (pts[pts.length - 2] || pts[pts.length - 1]);
+    var ox = p0.x - p1.x, oy = -(p0.y - p1.y), ol = Math.sqrt(ox * ox + oy * oy) || 1;
+    var ax = p0.x + ox / ol * 12, ay = -p0.y + oy / ol * 12 - 6;
+    var anchor = ox < -0.3 * ol ? "end" : ox > 0.3 * ol ? "start" : "middle";
+    var c = mapClampLabel(ax, ay, endName, endFs, anchor, vb, false);
+    if (!c) return;
+    var cy = Math.max(vb.y + endFs, Math.min(vb.y + vb.h - 2, ay));
+    labels.push({ x: c.x, y: cy, anchor: c.anchor, fontSize: endFs, text: endName, angle: 0 });
+  }
+  if (drawMin < segMin) addEndLabel(drawMin, mapSeg.extBelowName, true);
+  else addEndLabel(drawMin, src.ends.low, true);
+  if (drawMax > segMax) addEndLabel(drawMax, mapSeg.extAboveName, false);
+  else addEndLabel(drawMax, src.ends.high, false);
+  function addInnerLabel(inner) {
+    if (!inner || !inner.name) return;
+    var at = pointAtRel(inner.along);
+    if (!at) return;
+    /* Road direction in SVG coords from the +cross-track normal:
+       local dir (n[1], -n[0]) -> SVG (n[1], n[0]). */
+    var ang = Math.atan2(at.n[0], at.n[1]) * 180 / Math.PI;
+    if (ang > 90) ang -= 180;
+    if (ang < -90) ang += 180;
+    var ax = at.x + at.n[0] * 12, ay = -at.y - at.n[1] * 12;
+    var c = mapClampRotatedLabel(ax, ay, inner.name, endFs, ang, vb, false);
+    if (!c) return;
+    labels.push({ x: c.x, y: c.y, anchor: "middle", fontSize: endFs, text: inner.name,
+      angle: ang, leader: { x1: at.x, y1: -at.y, x2: c.x, y2: c.y } });
+  }
+  if (mapSeg) {
+    addInnerLabel(mapSeg.innerBelow);
+    addInnerLabel(mapSeg.innerAbove);
+  }
+  if (src.kind === "baked") {
+    /* The bracketing junctions sit at the segment ends; the road extends
+       past them, so mark where the coloured curbs end. */
+    if (drawMin < segMin && src.ends.low) addInnerLabel({ name: src.ends.low, along: segMin });
+    if (drawMax > segMax && src.ends.high) addInnerLabel({ name: src.ends.high, along: segMax });
+  }
+  if (home) home.fontSize = homeFs;
   return { ok: true, streetName: src.streetName, segMin: segMin, segMax: segMax,
+    drawMin: drawMin, drawMax: drawMax, extended: extended,
     ends: src.ends, signs: signs, road: pts, curbs: curbs, dots: dots, home: home,
-    mid: mid ? { x: mid.x, y: -mid.y, angle: streetAngle } : null,
-    viewBox: (minX - PAD).toFixed(1) + " " + (minY - PAD).toFixed(1) + " "
-      + (maxX - minX + 2 * PAD).toFixed(1) + " " + (maxY - minY + 2 * PAD).toFixed(1) };
+    title: title, subtitle: subtitle, labels: labels,
+    viewBox: vbX.toFixed(1) + " " + vbY.toFixed(1) + " "
+      + vbW.toFixed(1) + " " + vbH.toFixed(1) };
 }
 function mapPathD(list) {
   var d = "";
@@ -4284,32 +4519,35 @@ function mapSvgHtml(nowMs, geom, colors) {
       + '" style="stroke:var(--ink)" stroke-width="2"/>';
     if (geom.home.label) {
       s += '<text x="' + hx.toFixed(1) + '" y="' + (hy + 20).toFixed(1)
-        + '" font-size="11" font-weight="bold" style="fill:var(--ink)" text-anchor="middle">' + esc(geom.home.label) + '</text>';
+        + '" font-size="' + (geom.home.fontSize || 11) + '" font-weight="bold" style="fill:var(--ink)" text-anchor="middle">' + esc(geom.home.label) + '</text>';
     }
   }
-  if (geom.mid && geom.streetName) {
-    s += '<text x="' + geom.mid.x.toFixed(1) + '" y="' + (geom.mid.y - 16).toFixed(1)
-      + '" font-size="12" font-weight="bold" style="fill:var(--ink)" text-anchor="middle"'
-      + (geom.mid.angle ? ' transform="rotate(' + geom.mid.angle.toFixed(1) + ' ' + geom.mid.x.toFixed(1) + ' ' + (geom.mid.y - 16).toFixed(1) + ')"' : '')
-      + '>' + esc(geom.streetName) + '</text>';
+  /* Title: the street name, centred in the top band — never on the road.
+     Subtitle: the bracketing junctions, when the road is drawn past them. */
+  if (geom.title) {
+    s += '<text x="' + geom.title.x.toFixed(1) + '" y="' + geom.title.y.toFixed(1)
+      + '" font-size="' + geom.title.fontSize + '" font-weight="bold" style="fill:var(--ink)" text-anchor="middle">'
+      + esc(geom.title.text) + '</text>';
   }
-  if (geom.ends) {
-    var road = geom.road;
-    if (geom.ends.low && road.length) {
-      var p0 = road[0], p1 = road[1] || road[0];
-      var ox = p0.x - p1.x, oy = -(p0.y - p1.y), ol = Math.sqrt(ox * ox + oy * oy) || 1;
-      s += '<text x="' + (p0.x + ox / ol * 12).toFixed(1) + '" y="' + (-p0.y + oy / ol * 12 - 6).toFixed(1)
-        + '" font-size="10" style="fill:var(--muted)" text-anchor="'
-        + (ox < -0.3 * ol ? "end" : ox > 0.3 * ol ? "start" : "middle") + '">' + esc(geom.ends.low) + '</text>';
-    }
-    if (geom.ends.high && road.length) {
-      var q0 = road[road.length - 1], q1 = road[road.length - 2] || q0;
-      var px = q0.x - q1.x, py = -(q0.y - q1.y), pl = Math.sqrt(px * px + py * py) || 1;
-      s += '<text x="' + (q0.x + px / pl * 12).toFixed(1) + '" y="' + (-q0.y + py / pl * 12 - 6).toFixed(1)
-        + '" font-size="10" style="fill:var(--muted)" text-anchor="'
-        + (px < -0.3 * pl ? "end" : px > 0.3 * pl ? "start" : "middle") + '">' + esc(geom.ends.high) + '</text>';
-    }
+  if (geom.subtitle) {
+    s += '<text x="' + geom.subtitle.x.toFixed(1) + '" y="' + geom.subtitle.y.toFixed(1)
+      + '" font-size="' + geom.subtitle.fontSize + '" style="fill:var(--muted)" text-anchor="middle">'
+      + esc(geom.subtitle.text) + '</text>';
   }
+  /* Every label was clamped into the viewBox by mapGeometry — render as
+     placed. Interior labels ride along the road (rotated, never
+     upside-down) with a leader line from the junction on the road. */
+  (geom.labels || []).forEach(function (lb) {
+    if (lb.leader) {
+      s += '<line x1="' + lb.leader.x1.toFixed(1) + '" y1="' + lb.leader.y1.toFixed(1)
+        + '" x2="' + lb.leader.x2.toFixed(1) + '" y2="' + lb.leader.y2.toFixed(1)
+        + '" style="stroke:var(--muted)" stroke-width="1"/>';
+    }
+    s += '<text x="' + lb.x.toFixed(1) + '" y="' + lb.y.toFixed(1)
+      + '" font-size="' + lb.fontSize + '" style="fill:var(--muted)" text-anchor="' + lb.anchor + '"'
+      + (lb.angle ? ' transform="rotate(' + lb.angle.toFixed(1) + ' ' + lb.x.toFixed(1) + ' ' + lb.y.toFixed(1) + ')"' : '')
+      + '>' + esc(lb.text) + '</text>';
+  });
   s += '</svg></div>';
   s += '<div class="maplegend"><span class="mapsw" style="background:var(--accent)"></span>You can stay until the deadline'
     + ' &nbsp; <span class="mapsw" style="background:var(--fine-ink)"></span>Cannot park / stay now'
@@ -4857,7 +5095,8 @@ if (typeof window !== "undefined") {
     renderGpsRow: renderGpsRow, reverseGeocode: reverseGeocode, liveMode: liveMode, liveResetChrome: liveResetChrome, liveActiveSides: liveActiveSides,
     liveActiveSideKeys: liveActiveSideKeys, liveParseSign: liveParseSign,
     liveBuildResult: liveBuildResult, liveChainStreetWays: liveChainStreetWays,
-    liveDeriveSegment: liveDeriveSegment, liveAssembleSides: liveAssembleSides,
+    liveDeriveSegment: liveDeriveSegment, liveMapExtent: liveMapExtent,
+    liveDedupeCrossings: liveDedupeCrossings, liveAssembleSides: liveAssembleSides,
     liveNomVoieCandidate: liveNomVoieCandidate, liveParseHouseNumber: liveParseHouseNumber,
     liveHouseFromFeature: liveHouseFromFeature, liveCacheKey: liveCacheKey,
     liveNearestAddressPoint: liveNearestAddressPoint, liveDistM: liveDistM,
@@ -4900,6 +5139,10 @@ if (typeof window !== "undefined") {
     renderPaidWarn: renderPaidWarn, setPaidWarnOpen: setPaidWarnOpen, FINES: FINES,
     mapGeometry: mapGeometry, mapSource: mapSource, mapSegmentExtent: mapSegmentExtent,
     mapEndLabelFromBound: mapEndLabelFromBound, mapBakedEndLabels: mapBakedEndLabels,
+    mapSegFromLiveSegment: mapSegFromLiveSegment, mapSegFromBakedSegment: mapSegFromBakedSegment,
+    mapClipRange: mapClipRange, mapLabelWidth: mapLabelWidth,
+    mapClampLabel: mapClampLabel, mapClampRotatedLabel: mapClampRotatedLabel,
+    MAP_MAX_ASPECT: MAP_MAX_ASPECT, MAP_EXTEND_M: MAP_EXTEND_M,
     mapSideCtSigns: mapSideCtSigns, mapHomeSideKey: mapHomeSideKey,
     mapCurbColor: mapCurbColor, mapCurbColors: mapCurbColors, mapColorStroke: mapColorStroke,
     mapDetailForSide: mapDetailForSide, mapDetailHtml: mapDetailHtml,
