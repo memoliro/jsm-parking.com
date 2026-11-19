@@ -6714,6 +6714,17 @@ function osmRefLatLon() {
   if (src && !src.error && typeof src.refLat === "number" && typeof src.refLon === "number") {
     return { lat: src.refLat, lon: src.refLon };
   }
+  /* A live lookup that has not produced geometry yet (loading, live-error,
+     no-centreline / no-segment / no-snap) still carries its house point —
+     set when the lookup starts and kept through an error — so the base
+     map centres on the looked-up address, not on the baked home street.
+     (Nov 19 map-loads fix: without this, an uncovered street's map would
+     centre ~10 km away on the wrong street.) */
+  if (typeof liveMode === "function" && liveMode()
+      && typeof LIVE !== "undefined" && LIVE
+      && typeof LIVE.houseLat === "number" && typeof LIVE.houseLon === "number") {
+    return { lat: LIVE.houseLat, lon: LIVE.houseLon };
+  }
   /* A ready live lookup always carries the house point; a fixture that
      omits it falls back to the baked street's home (the live fixture
      streets ARE the baked streets) — never a null centre, which would
@@ -7387,9 +7398,13 @@ function mapSvgHtml(nowMs, geom, colors) {
      live only in the Settings tab; both layers stay visible on the map
      whenever their Settings toggle is on, as before. */
   var s = "";
-  if (!geom.ok) {
-    return s + '<div class="note">' + esc(geom.message || "No street map here.") + '</div>';
-  }
+  /* Map-loads fix (Nov 19): the base map is decoupled from the verdict
+     geometry. When geom.ok is false (loading, live-error, no-centreline /
+     no-segment / no-snap) the tile layer + hint pill + controls +
+     attribution still render — the error/loading note moves to a
+     non-map surface below the map (like the stale-frame label), so a
+     failed rules lookup can never again blank the map. Only the
+     parking-rules overlay (curbs, dots, home tick) is absent, honestly. */
   var ref = osmRefLatLon();
   var refLat = ref.lat, refLon = ref.lon;
   /* Free rotation (Nov 18): tiles + overlay rotate together inside one
@@ -7409,12 +7424,18 @@ function mapSvgHtml(nowMs, geom, colors) {
     rotClose = "</div>";
   }
   var tiles = osmTilesForView(view.lat, view.lon, view.zoom, fsize.w, fsize.h);
+  /* The street name for the overlay label: the geometry's when it exists,
+     else the live lookup's street (loading / error / no-geometry states
+     have no geometry but do have a street name). */
+  var svgStreet = geom.streetName
+    || (typeof liveMode === "function" && liveMode() && typeof LIVE !== "undefined" && LIVE && LIVE.streetName)
+    || "this street";
   s += '<div class="osmmap" id="osmMap">' + rotOpen;
   tiles.forEach(function (t) {
     s += '<img class="osmtile" src="' + t.url + '" alt="" draggable="false" style="left:' + t.left.toFixed(0) + 'px;top:' + t.top.toFixed(0) + 'px">';
   });
   s += '<svg class="osmsvg" width="' + fsize.w + '" height="' + fsize.h + '" viewBox="0 0 ' + fsize.w + ' ' + fsize.h + '" role="img" aria-label="Map of '
-    + esc(geom.streetName || "this street") + ' with parking rules by side">';
+    + esc(svgStreet) + ' with parking rules by side">';
   /* Area streets first (under the current street): every street with
      fetched data in the VISIBLE AREA around the screen centre, in its
      verdict colours -- the same data, same verdicts as where-to-move,
@@ -7446,7 +7467,10 @@ function mapSvgHtml(nowMs, geom, colors) {
         + '" d="' + ad + '" fill="none" stroke="rgba(0,0,0,0)" stroke-width="18" stroke-linecap="round"/>';
     });
   });
-  /* Current street's curbs, coloured by the verdict in effect right now. */
+  /* Current street's curbs, coloured by the verdict in effect right now.
+     Only when geometry exists — without it there is honestly nothing to
+     draw, and the base map underneath still shows. */
+  if (geom.ok && geom.curbs) {
   Object.keys(geom.curbs).forEach(function (k) {
     var color = colors[k] || "grey";
     var d = osmPathD(geom.curbs[k], refLat, refLon, view, fsize);
@@ -7456,12 +7480,15 @@ function mapSvgHtml(nowMs, geom, colors) {
       + (color === "red" ? "cannot park here now" : color === "green" ? "parking allowed until the deadline" : "no verified rule")
       + '" d="' + d + '" fill="none" stroke="rgba(0,0,0,0)" stroke-width="18" stroke-linecap="round"/>';
   });
+  }
+  if (geom.ok && geom.dots) {
   geom.dots.forEach(function (dot) {
     var q = osmProjectLocal(dot.x, dot.y, refLat, refLon, view, fsize);
     s += '<circle cx="' + q[0].toFixed(1) + '" cy="' + q[1].toFixed(1)
       + '" r="4.5" fill="#d97706" stroke="#fff" stroke-width="1.5"/>';
   });
-  if (geom.home) {
+  }
+  if (geom.ok && geom.home) {
     var hq = osmProjectLocal(geom.home.x, geom.home.y, refLat, refLon, view, fsize);
     s += '<circle cx="' + hq[0].toFixed(1) + '" cy="' + hq[1].toFixed(1)
       + '" r="7" fill="var(--accent)" stroke="#fff" stroke-width="2"/>';
@@ -7517,6 +7544,13 @@ function mapSvgHtml(nowMs, geom, colors) {
     + '</div>';
   s += '<div class="osmattrib"><a href="' + OSM_ATTRIBUTION_URL + '">&copy; OpenStreetMap contributors</a></div>';
   s += '</div>';
+  /* The honest note for a missing geometry, on a non-map surface BELOW
+     the map — never in place of it (Nov 19 map-loads fix). The wording
+     is unchanged: it is honest about the rules, and the map underneath
+     still shows. */
+  if (!geom.ok) {
+    s += '<div class="note" style="margin-top:6px">' + esc(geom.message || "No street map here.") + '</div>';
+  }
   /* No legend under the map any more (Nov 18 map cleanup): the colour
      meanings moved into the (i) map-info sheet. */
   /* Stale-frame label (map fix, Nov 18): a cached frame shown while the
