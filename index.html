@@ -150,6 +150,13 @@
              box-shadow: 0 0 0 1px rgba(49,196,141,.35), 0 18px 50px rgba(49,196,141,.35), 0 8px 30px rgba(49,196,141,.25);
              outline: none; }
   button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  /* Red STOP square (Pin & Remind Me): ends the parking session — a square,
+     not a pill, so it reads as a stop control next to the Directions /
+     Find-my-car actions. Same red as the fine text (--fine-ink). */
+  button.stopbtn { width: 64px; height: 64px; flex: 0 0 auto; border-radius: 12px;
+             border: 2px solid var(--fine-ink); background: var(--fine-ink); color: #fff;
+             font-size: 15px; font-weight: 800; line-height: 1.15; cursor: pointer; font-family: inherit; }
+  button.stopbtn:hover, button.stopbtn:focus-visible { filter: brightness(1.1); outline: none; }
   /* Parked state of the hero toggle (his call Nov 17): it takes the selected
      side button's colors — soft-green tint, accent border, dark text. */
   .sign { background: #f7f8f7; border-left: 3px solid var(--accent); border-radius: 0 8px 8px 0;
@@ -254,11 +261,11 @@
      class (the suites read visibility off it) but is never display:none —
      the ID rule below beats .tabpanel.hidden and keeps it rendered
      off-screen, invisible — or the slide could not animate. */
-  #tab-move, #tab-park, #tab-destination, #tab-settings, #tab-info, #tab-curb { position: fixed; left: 0; right: 0; bottom: calc(76px + env(safe-area-inset-bottom)); max-height: calc(85dvh - 76px - env(safe-area-inset-bottom)); overflow-y: auto; overscroll-behavior: none; touch-action: pan-y; background: var(--card); border-top: 1px solid var(--line); border-radius: 24px 24px 0 0; padding: 20px 20px calc(20px + env(safe-area-inset-bottom)); z-index: 55; box-shadow: 0 -10px 40px rgba(0,0,0,.4); transform: translateY(102%); visibility: hidden; transition: transform .5s ease, visibility .5s; user-select: none; -webkit-user-select: none; }
+  #tab-move, #tab-park, #tab-destination, #tab-settings, #tab-info, #tab-curb, #tab-remind { position: fixed; left: 0; right: 0; bottom: calc(76px + env(safe-area-inset-bottom)); max-height: calc(85dvh - 76px - env(safe-area-inset-bottom)); overflow-y: auto; overscroll-behavior: none; touch-action: pan-y; background: var(--card); border-top: 1px solid var(--line); border-radius: 24px 24px 0 0; padding: 20px 20px calc(20px + env(safe-area-inset-bottom)); z-index: 55; box-shadow: 0 -10px 40px rgba(0,0,0,.4); transform: translateY(102%); visibility: hidden; transition: transform .5s ease, visibility .5s; user-select: none; -webkit-user-select: none; }
   #tab-move input, #tab-move textarea, #tab-park input, #tab-park textarea, #tab-destination input, #tab-destination textarea, #tab-settings input, #tab-settings textarea { user-select: text; -webkit-user-select: text; }
-  #tab-move.open, #tab-park.open, #tab-destination.open, #tab-settings.open, #tab-info.open, #tab-curb.open { transform: translateY(0); visibility: visible; }
-  #tab-move.hidden, #tab-park.hidden, #tab-destination.hidden, #tab-settings.hidden, #tab-info.hidden, #tab-curb.hidden { display: block; }
-  @media (prefers-reduced-motion: reduce) { #tab-move, #tab-park, #tab-destination, #tab-settings, #tab-info, #tab-curb, .tab-backdrop { transition: none; } }
+  #tab-move.open, #tab-park.open, #tab-destination.open, #tab-settings.open, #tab-info.open, #tab-curb.open, #tab-remind.open { transform: translateY(0); visibility: visible; }
+  #tab-move.hidden, #tab-park.hidden, #tab-destination.hidden, #tab-settings.hidden, #tab-info.hidden, #tab-curb.hidden, #tab-remind.hidden { display: block; }
+  @media (prefers-reduced-motion: reduce) { #tab-move, #tab-park, #tab-destination, #tab-settings, #tab-info, #tab-curb, #tab-remind, .tab-backdrop { transition: none; } }
   .tab-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 45; opacity: 0; visibility: hidden; transition: opacity .5s ease, visibility .5s; }
   .tab-backdrop.open { opacity: 1; visibility: visible; }
   /* Marked tap zone at the top of every sheet — Radio's .menu-grab pill
@@ -405,6 +412,12 @@
   </div>
   <div id="parkedBanner" class="parked hidden"><span>Parked: <b id="parkedSide">—</b></span><button class="linkbtn change" id="clearSide" aria-label="Not parked here — clear">&#10005;</button></div>
 
+  <!-- Pin & Remind Me (Nov 19): only meaningful while parked — hidden until
+       a side is picked, and hidden again once a reminder is set (the pin
+       card below carries the state then). Tapping it pins the parked spot
+       and opens the Remind-me sheet. -->
+  <button class="action primary hidden" id="pinBtn" type="button" style="width:100%;margin-top:10px">&#128205; Pin &amp; Remind Me</button>
+
   <div class="card hidden" id="heroCard">
     <div class="big" id="heroTitle">—</div>
     <div class="count" id="heroCount">—</div>
@@ -441,6 +454,68 @@
     </div>
   </div>
 
+  <!-- Pinned car (Nov 19): appears once a reminder is set. The countdown
+       ticks every second to the parking end (the binding deadline); STOP
+       ends the whole session (pin + reminder + parked side + timer).
+       Directions shows the route overview (you + the car); Find my car
+       centres the map on the pin. No external directions URL exists in
+       the build's allowlist, so both stay inside the app's own OSM map. -->
+  <div class="card hidden" id="pinCard">
+    <div class="label">Pinned car</div>
+    <div class="big" id="pinCount" style="margin-top:4px">—</div>
+    <div id="pinDetail" style="font-size:17px"></div>
+    <div id="pinReminderLine" style="font-size:17px"></div>
+    <div id="pinDistLine" style="font-size:17px"></div>
+    <div style="margin-top:10px;display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+      <button class="stopbtn" id="pinStop" type="button" aria-label="Stop — end this parking session">&#9632; STOP</button>
+      <button class="action" id="pinDirections" type="button">Directions</button>
+      <button class="action primary" id="pinFindCar" type="button">Find my car</button>
+      <button class="action" id="pinIcsBtn" type="button">Add to calendar (.ics)</button>
+    </div>
+  </div>
+
+  </section>
+
+  <!-- Remind-me sheet (Nov 19): opened from "Pin & Remind Me" in the Park
+       sheet. Three states, one visible at a time: the too-far check
+       ("You seem too far — park here?"), the reminder form (end time +
+       lead-time dropdown + green Remind me), and the plain no-deadline
+       message. Same sheet pattern as the other tabs (grab pill, title
+       row, ✕, drag/Escape/backdrop close). -->
+  <section id="tab-remind" class="tabpanel hidden" aria-label="Remind me">
+  <div class="sheet-top">
+    <div class="sheet-grab" aria-hidden="true"></div>
+    <div class="sheet-head">
+      <h2>Remind me</h2>
+      <button class="sheet-close" id="sheetClose-remind" type="button" aria-label="Close">&#10005;</button>
+    </div>
+  </div>
+  <div class="card hidden" id="remindFarCard">
+    <div class="label">Check the spot</div>
+    <div style="font-size:17px" id="remindFarText">You seem too far &mdash; park here?</div>
+    <div style="margin-top:10px;display:flex;gap:10px;flex-wrap:wrap">
+      <button class="action primary" id="remindFarYes" type="button">Yes, park here</button>
+      <button class="action" id="remindFarNo" type="button">Cancel</button>
+    </div>
+  </div>
+  <div class="card hidden" id="remindFormCard">
+    <div class="label">Parking ends</div>
+    <div style="font-size:21px;font-weight:700" id="remindEnds">&mdash;</div>
+    <div style="margin-top:12px;font-size:17px"><label for="remindLead">Reminder</label>
+      <select id="remindLead" style="font-size:18px;margin-left:8px" aria-label="Remind me how long before parking ends">
+        <option value="5">5 min</option>
+        <option value="10" selected>10 min</option>
+        <option value="15">15 min</option>
+        <option value="30">30 min</option>
+      </select>
+      <span> before</span></div>
+    <div style="margin-top:12px"><button class="action primary" id="remindSet" type="button">Remind me</button></div>
+    <div class="note" style="margin-top:8px">Your calendar will notify you &mdash; import the .ics file when it downloads. This page can&rsquo;t remind you on its own.</div>
+  </div>
+  <div class="card hidden" id="remindNoneCard">
+    <div class="label">No reminder to set</div>
+    <div style="font-size:17px" id="remindNoneText"></div>
+  </div>
   </section>
 
   <section id="tab-destination" class="tabpanel hidden" aria-label="Destination">
@@ -979,13 +1054,24 @@ function clearLimitTimer() {
   try { localStorage.removeItem(LIMIT_KEY); } catch (e) { /* private mode */ }
 }
 /* One-off .ics: a single event, parked-at -> parked-at + limit, with one VALARM
-   before expiry. No RRULE — this is a one-time timer, not the recurring cleaning export. */
-function buildLimitIcs(parkedAtMs, limitMin, nowMs, endMs) {
+   before expiry. No RRULE — this is a one-time timer, not the recurring cleaning export.
+   opts (optional, Pin & Remind Me only): { leadMin, summary, description, alarm, uid } —
+   the reminder reuses this one builder with its own lead time and wording, so the
+   alarm still comes from the same VEVENT shape. Without opts the output is byte-identical
+   to before (the limit-timer export is unchanged). */
+function buildLimitIcs(parkedAtMs, limitMin, nowMs, endMs, opts) {
   var start = new Date(parkedAtMs);
   var end = new Date((typeof endMs === "number") ? endMs : parkedAtMs + limitMin * 60000);
-  var lead = alarmLeadMin(limitMin);
+  var lead = (opts && typeof opts.leadMin === "number") ? opts.leadMin : alarmLeadMin(limitMin);
   var stamp = new Date(nowMs).toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
-  var uid = "ticket-saver-limit-" + limitMin + "-" + icsDateLocal(start) + "@jsm-parking.com";
+  var uid = (opts && opts.uid) ? opts.uid : "ticket-saver-limit-" + limitMin + "-" + icsDateLocal(start) + "@jsm-parking.com";
+  var summary = (opts && opts.summary) ? opts.summary
+    : "Ticket Saver — parking limit ends (" + LIMIT_LABELS[limitMin] + "), " + DATA.street.short_name;
+  var desc = (opts && opts.description) ? opts.description
+    : "Parking limit of " + LIMIT_LABELS[limitMin] + " on " + DATA.street.name + " ends at "
+      + fmtTimeToronto(end) + ". Move the car before then. One-time event from the Ticket Saver parking limit timer.";
+  var alarm = (opts && opts.alarm) ? opts.alarm
+    : "Move the car — your " + LIMIT_LABELS[limitMin] + " parking limit on " + DATA.street.short_name + " ends in " + lead + " minutes.";
   var lines = [
     "BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//JSM Tools//Ticket Saver 1.0//EN",
     "CALSCALE:GREGORIAN", "METHOD:PUBLISH", "X-WR-CALNAME:Ticket Saver — parking limit"
@@ -993,15 +1079,358 @@ function buildLimitIcs(parkedAtMs, limitMin, nowMs, endMs) {
     "BEGIN:VEVENT", "UID:" + uid, "DTSTAMP:" + stamp,
     "DTSTART;TZID=America/Toronto:" + icsDateLocal(start),
     "DTEND;TZID=America/Toronto:" + icsDateLocal(end),
-    "SUMMARY:Ticket Saver — parking limit ends (" + LIMIT_LABELS[limitMin] + "), " + DATA.street.short_name,
-    "DESCRIPTION:" + icsEscape("Parking limit of " + LIMIT_LABELS[limitMin] + " on " + DATA.street.name + " ends at "
-      + fmtTimeToronto(end) + ". Move the car before then. One-time event from the Ticket Saver parking limit timer."),
+    "SUMMARY:" + summary,
+    "DESCRIPTION:" + icsEscape(desc),
     "BEGIN:VALARM", "TRIGGER:-PT" + lead + "M", "ACTION:DISPLAY",
-    "DESCRIPTION:" + icsEscape("Move the car — your " + LIMIT_LABELS[limitMin] + " parking limit on " + DATA.street.short_name + " ends in " + lead + " minutes."),
+    "DESCRIPTION:" + icsEscape(alarm),
     "END:VALARM",
     "END:VEVENT", "END:VCALENDAR"
   ]);
   return lines.map(foldLine).join("\r\n") + "\r\n";
+}
+
+/* ---- Pin & Remind Me (Nov 19, ParkUsher's flow) ----
+   The pin is the parked spot: saved when the car is parked (setSelectedSide),
+   from the phone's GPS fix at park time snapped onto the street — or the
+   street's reference point when there is no usable fix. The reminder is the
+   binding deadline (bindingDeadlineForSideData: sooner of cleaning / limit,
+   tie → cleaning, with the limit-only fallback — the same deadline the hero
+   counts to), alarmed by a one-off .ics the phone's calendar delivers. No
+   native push, no server: the hero's 30/15-minute warnings cover the app-open
+   case, the .ics alarm covers the phone. */
+var PIN_KEY = "ticketSaver.pin.v1";
+/* "Far" is the app's own radius: the street auto-switch already uses 300 m
+   (street_switch_m default) — the same distance that says "you're not on
+   this street anymore" says "you're too far from the car to be sure". */
+var PIN_FAR_M = 300;
+/* A park-time fix farther than this from the street centreline is not the
+   car (he walked away, or the fix is rough) — the pin falls back to the
+   street's reference point instead of a clamped segment end. */
+var PIN_FIX_MAX_M = 300;
+/* Reminder lead times (the sheet's dropdown), minutes. Default 10. */
+var REMIND_LEAD_OPTIONS = [5, 10, 15, 30];
+var REMIND_LEAD_DEFAULT = 10;
+var _remindState = "form"; /* "far" | "form" | "none" — which card the remind sheet shows */
+var _remindFarDist = null; /* metres, for the too-far card's distance line */
+/* Seconds countdown, the pin card's format: "09 hr 02 min 33 sec" (days
+   first when the deadline is days out — "2 days, 09 hr 02 min 33 sec"). */
+function fmtCountdownSecs(ms) {
+  var s = Math.max(0, Math.floor(ms / 1000));
+  var days = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600),
+      m = Math.floor((s % 3600) / 60), sec = s % 60;
+  function p2(n) { return (n < 10 ? "0" : "") + n; }
+  var t = p2(h) + " hr " + p2(m) + " min " + p2(sec) + " sec";
+  if (days > 0) return days + (days === 1 ? " day, " : " days, ") + t;
+  return t;
+}
+/* "320 m" / "3.5 km" — the distance line on the too-far card and the pin card. */
+function fmtDistM(m) {
+  if (typeof m !== "number" || isNaN(m) || m < 0) return "—";
+  if (m < 1000) return Math.round(m) + " m";
+  return (m / 1000).toFixed(1) + " km";
+}
+/* "Today, 10:00 AM" when the deadline falls today (Toronto wall date), else
+   "Thu Nov 19, 10:00 AM" — the remind sheet's "Parking ends" line. */
+function fmtEndsLine(ms, nowMs) {
+  var p = tzParts(new Date(ms)), q = tzParts(new Date(nowMs));
+  var day = (p.y === q.y && p.mo === q.mo && p.d === q.d) ? "Today" : fmtDateShortToronto(new Date(ms));
+  return day + ", " + fmtTimeToronto(new Date(ms));
+}
+/* snap() with the point back: the snapped lat/lon on the centreline, not
+   just the distance. Same loop as snap(), so the two can never disagree. */
+function snapPoint(lat, lon) {
+  if (!CENTERLINE || CENTERLINE.length < 2) return null;
+  var p = toXY(lat, lon), best = null;
+  for (var i = 0; i < CENTERLINE.length - 1; i++) {
+    var a = toXY(CENTERLINE[i][0], CENTERLINE[i][1]);
+    var b = toXY(CENTERLINE[i + 1][0], CENTERLINE[i + 1][1]);
+    var dx = b[0] - a[0], dy = b[1] - a[1], len2 = dx * dx + dy * dy;
+    var t = len2 ? ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / len2 : 0;
+    t = Math.max(0, Math.min(1, t));
+    var cx = a[0] + t * dx, cy = a[1] + t * dy;
+    var ex = p[0] - cx, ey = p[1] - cy, dist = Math.sqrt(ex * ex + ey * ey);
+    if (!best || dist < best.dist) best = { x: cx, y: cy, dist: dist };
+  }
+  if (!best) return null;
+  return { lat: REF_LAT + best.y / 110540, lon: REF_LON + best.x / (111320 * COSLAT), dist: best.dist };
+}
+/* The pin record: { street, side, lat, lon, parkedAt, leadMin, setAt, confirmedFar }.
+   street is osmStreetKey() ("baked:<slug>" / "live:<slug>") — a pin from
+   another street never shows on this one. leadMin null = pinned, no reminder
+   yet. Reads validate strictly: a corrupt or foreign record is no pin. */
+function getPin() {
+  try {
+    var raw = localStorage.getItem(PIN_KEY);
+    if (!raw) return null;
+    var o = JSON.parse(raw);
+    if (!o || typeof o.side !== "string" || typeof o.lat !== "number" || typeof o.lon !== "number"
+        || typeof o.parkedAt !== "number" || !isFinite(o.lat) || !isFinite(o.lon)
+        || o.street !== osmStreetKey()) return null;
+    if (o.leadMin !== null && o.leadMin !== undefined && REMIND_LEAD_OPTIONS.indexOf(o.leadMin) < 0) return null;
+    return o;
+  } catch (e) { return null; }
+}
+function savePin(pin) {
+  try { localStorage.setItem(PIN_KEY, JSON.stringify(pin)); } catch (e) { /* private mode */ }
+  return pin;
+}
+function clearPin() {
+  try { localStorage.removeItem(PIN_KEY); } catch (e) { /* private mode */ }
+}
+/* The spot at park time: the phone's fix snapped onto the street when it is
+   close enough to be the car, else the street's reference point (the home
+   marker — on the street, never a clamped segment end). Never throws: a
+   pin failure must never break parking. */
+function pinSpotForPark(key, nowMs) {
+  var pt = null;
+  try {
+    if (typeof lastFix !== "undefined" && lastFix && typeof lastFix.lat === "number"
+        && typeof lastFix.lon === "number") {
+      var s = snapPoint(lastFix.lat, lastFix.lon);
+      if (s && s.dist <= PIN_FIX_MAX_M) pt = { lat: s.lat, lon: s.lon };
+    }
+  } catch (e) { pt = null; }
+  if (!pt) {
+    try { var h = osmHomeLatLon(); pt = { lat: h.lat, lon: h.lon }; }
+    catch (e2) { pt = { lat: HOME_LAT, lon: HOME_LON }; }
+  }
+  return { street: osmStreetKey(), side: key, lat: pt.lat, lon: pt.lon,
+           parkedAt: nowMs, leadMin: null, setAt: null, confirmedFar: false };
+}
+/* The pin's deadline: the binding deadline for the PIN's side (not the
+   currently picked side — a side switch mid-stay keeps the original stay,
+   same rule as the limit timer). Returns { deadlineMs, binds, reason } with
+   reason null when there is a deadline, else "no_stop" (cannot park here
+   at all), "expired" (the deadline already passed) or "none" (no limit
+   and no cleaning window — nothing to remind about). Mirrors
+   heroWarningStateForData's fallbacks (binding, then the limit-only verdict). */
+function pinDeadlineFor(pin, nowMs) {
+  if (!pin) return null;
+  var side = liveActiveSides()[pin.side];
+  if (!side) return { deadlineMs: null, binds: null, reason: "none" };
+  if (side.no_stopping_whole_side) return { deadlineMs: null, binds: null, reason: "no_stop" };
+  var parkedAt = pin.parkedAt;
+  if (pin.side === getSelectedSide()) {
+    var pa = parkedAtForVerdict(pin.side);
+    if (typeof pa === "number") parkedAt = pa;
+  }
+  var lim = limitForSideKey(pin.side);
+  var b = bindingDeadlineForSideData(side, lim, nowMs, parkedAt);
+  if (!b) {
+    var lv = limitOnlyVerdictForSideData(side, lim, nowMs, parkedAt);
+    if (lv && lv.deadlineMs !== null && lv.deadlineMs !== undefined) b = { deadlineMs: lv.deadlineMs, binds: "limit" };
+  }
+  if (!b) return { deadlineMs: null, binds: null, reason: "none" };
+  if (b.deadlineMs <= nowMs) return { deadlineMs: b.deadlineMs, binds: b.binds, reason: "expired" };
+  return { deadlineMs: b.deadlineMs, binds: b.binds, reason: null };
+}
+function pinDeadline(nowMs) {
+  var pin = getPin();
+  return pin ? pinDeadlineFor(pin, nowMs) : null;
+}
+/* Metres between the pin and a fix ({ lat, lon }); null without a fix. */
+function pinDistM(pin, fix) {
+  if (!pin || !fix || typeof fix.lat !== "number" || typeof fix.lon !== "number") return null;
+  return streetDistM(pin.lat, pin.lon, { lat: fix.lat, lon: fix.lon });
+}
+/* Pure too-far decision: the current fix vs the pinned spot. A vague fix
+   (accuracy worse than the radius, same rule as the street auto-switch)
+   never calls it far — a rough fix is not evidence the car is elsewhere. */
+function pinFarFrom(pin, fix) {
+  if (!pin || !fix || typeof fix.lat !== "number" || typeof fix.lon !== "number") return { far: false, distM: null, vague: false };
+  var d = pinDistM(pin, fix);
+  var vague = (typeof fix.accuracy === "number" && fix.accuracy > PIN_FAR_M);
+  return { far: !vague && d > PIN_FAR_M, distM: d, vague: vague };
+}
+/* Zoom that fits both the fix and the pin across ~60% of the map width
+   (Directions overview). Clamped to the map's own zoom range — at the
+   15 floor a stay over ~2 km still won't fit both points on screen, and
+   the user pans from the midpoint. */
+function pinFitZoom(distM, widthPx, lat) {
+  if (!(distM > 0) || !(widthPx > 0)) return OSM_ZOOM_DEFAULT;
+  var mpp = distM / (0.6 * widthPx);
+  var z = Math.log(156543.03392 * Math.cos(lat * Math.PI / 180) / mpp) / Math.log(2);
+  return Math.max(OSM_ZOOM_MIN, Math.min(OSM_ZOOM_MAX, Math.round(z)));
+}
+/* The reminder's .ics: the same one-off builder as the limit timer, with
+   the pin's lead time and the binding deadline as DTEND. DTSTART is the
+   parked-at the timer knows (anchored, like the limit export), else the
+   pin's park time. The alarm is the notification — the phone's calendar
+   pops it up leadMin before parking ends. */
+function buildPinReminderIcs(pin, deadlineMs, nowMs) {
+  var t = getLimitTimer();
+  var timed = (t && pin.side === getSelectedSide());
+  var parkedAt = timed ? t.parkedAt : pin.parkedAt;
+  var limitMin = timed ? t.limitMin : 60;
+  var lead = (typeof pin.leadMin === "number") ? pin.leadMin : REMIND_LEAD_DEFAULT;
+  var d = pinDeadlineFor(pin, nowMs);
+  var binds = d ? d.binds : null;
+  var what = binds === "cleaning" ? "street cleaning" : (binds === "limit" ? "parking limit" : "parking");
+  return buildLimitIcs(parkedAt, limitMin, nowMs, deadlineMs, {
+    leadMin: lead,
+    summary: "Ticket Saver — parking ends (" + what + "), " + DATA.street.short_name,
+    description: "Parking on " + DATA.street.name + " ends at " + fmtTimeToronto(new Date(deadlineMs))
+      + " (" + what + "). Move the car before then. One-time reminder from Ticket Saver.",
+    alarm: "Move the car — parking on " + DATA.street.short_name + " ends in " + lead + " minutes.",
+    uid: "ticket-saver-pin-" + pin.side.toLowerCase() + "-" + icsDateLocal(new Date(parkedAt)) + "@jsm-parking.com"
+  });
+}
+function exportPinReminderIcs(pin, deadlineMs) {
+  var ics = buildPinReminderIcs(pin, deadlineMs, Date.now());
+  if (!ics) return;
+  var blob = new Blob([ics], { type: "text/calendar;charset=utf-8" });
+  var a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "ticket-saver-parking-reminder.ics";
+  document.body.appendChild(a);
+  if (typeof a.click === "function") a.click();
+  setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+}
+/* ---- the remind sheet (state machine: far / form / none) ---- */
+function renderRemindSheet(d) {
+  var far = el("remindFarCard"), form = el("remindFormCard"), none = el("remindNoneCard");
+  if (far) far.classList.toggle("hidden", _remindState !== "far");
+  if (form) form.classList.toggle("hidden", _remindState !== "form");
+  if (none) none.classList.toggle("hidden", _remindState !== "none");
+  if (_remindState === "far") {
+    var ft = el("remindFarText");
+    if (ft) ft.textContent = "You seem too far — park here?"
+      + (_remindFarDist !== null ? " Your phone is " + fmtDistM(_remindFarDist) + " from where you parked." : "");
+  } else if (_remindState === "form") {
+    var ends = el("remindEnds");
+    if (ends && d && d.deadlineMs) ends.textContent = "Parking ends — " + fmtEndsLine(d.deadlineMs, Date.now());
+    var sel = el("remindLead");
+    if (sel) {
+      var pin = getPin();
+      sel.value = String((pin && typeof pin.leadMin === "number") ? pin.leadMin : REMIND_LEAD_DEFAULT);
+    }
+  } else {
+    var nt = el("remindNoneText");
+    if (nt) {
+      if (!d || d.reason === "none") nt.textContent = "This side has no parking limit and no cleaning window, so there is no deadline to remind you about.";
+      else if (d.reason === "no_stop") nt.textContent = "You can't park here at all — no stopping at any time. There is no deadline to remind you about.";
+      else if (d.reason === "expired") nt.textContent = "Parking already ended at " + fmtTimeToronto(new Date(d.deadlineMs)) + " — there is nothing left to remind you about.";
+      else nt.textContent = "There is no deadline to remind you about.";
+    }
+  }
+}
+function openRemindSheet() {
+  var pin = getPin();
+  if (!pin) { showTab("park"); return; }
+  var nowMs = Date.now();
+  var d = pinDeadlineFor(pin, nowMs);
+  if (!d || d.deadlineMs === null || d.reason) {
+    _remindState = "none"; _remindFarDist = null;
+    renderRemindSheet(d); showTab("remind"); return;
+  }
+  function decide(fix) {
+    var chk = fix ? pinFarFrom(pin, fix) : { far: false, distM: null };
+    if (chk.far && !pin.confirmedFar) {
+      _remindState = "far"; _remindFarDist = chk.distM;
+    } else {
+      _remindState = "form"; _remindFarDist = null;
+    }
+    renderRemindSheet(d); showTab("remind");
+  }
+  var fix = (typeof lastFix !== "undefined" && lastFix) ? lastFix : null;
+  if (fix) { decide(fix); return; }
+  if (typeof navigator !== "undefined" && navigator.geolocation && navigator.geolocation.getCurrentPosition) {
+    navigator.geolocation.getCurrentPosition(function (pos) {
+      decide({ lat: pos.coords.latitude, lon: pos.coords.longitude, accuracy: pos.coords.accuracy });
+    }, function () { decide(null); },
+    { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 });
+  } else { decide(null); }
+}
+/* "Yes, park here" — the pin stands (the car really is at the parked spot,
+   the phone just walked away). Remembered per pin, so the question is asked once. */
+function confirmPinFar() {
+  var pin = getPin();
+  if (pin) { pin.confirmedFar = true; savePin(pin); }
+  _remindState = "form"; _remindFarDist = null;
+  renderRemindSheet(pinDeadline(Date.now()));
+}
+/* Green "Remind me": save the lead time, export the .ics alarm, back to the
+   Park sheet where the pin card now counts down. The reminder is saved
+   BEFORE the download — a failed download never loses the reminder (the pin
+   card's "Add to calendar (.ics)" re-exports it). */
+function setPinReminder() {
+  var pin = getPin();
+  if (!pin) { closeSheet(); return; }
+  var nowMs = Date.now();
+  var d = pinDeadlineFor(pin, nowMs);
+  if (!d || d.deadlineMs === null || d.deadlineMs <= nowMs) {
+    _remindState = "none"; _remindFarDist = null;
+    renderRemindSheet(d); return;
+  }
+  var sel = el("remindLead");
+  var lead = sel ? +sel.value : REMIND_LEAD_DEFAULT;
+  if (REMIND_LEAD_OPTIONS.indexOf(lead) < 0) lead = REMIND_LEAD_DEFAULT;
+  pin.leadMin = lead; pin.setAt = nowMs; savePin(pin);
+  try { exportPinReminderIcs(pin, d.deadlineMs); } catch (e) { /* download failed — reminder still saved */ }
+  renderPin(nowMs);
+  showTab("park");
+}
+/* The pin card in the Park sheet: the button while parked with no reminder,
+   the countdown card once one is set, nothing at all while not parked (the
+   button must not offer a pin then). Runs on every renderAll and every
+   second (the seconds countdown ticks) — cheap and idempotent. */
+function renderPin(nowMs) {
+  nowMs = nowMs || Date.now();
+  var btn = el("pinBtn"), card = el("pinCard");
+  if (!btn || !card) return;
+  var pin = getPin();
+  if (!pin || !getSelectedSide()) { btn.classList.add("hidden"); card.classList.add("hidden"); return; }
+  if (pin.leadMin === null || pin.leadMin === undefined) {
+    btn.classList.remove("hidden"); card.classList.add("hidden"); return;
+  }
+  btn.classList.add("hidden"); card.classList.remove("hidden");
+  var d = pinDeadlineFor(pin, nowMs);
+  var count = el("pinCount"), det = el("pinDetail"), rem = el("pinReminderLine"), dist = el("pinDistLine");
+  if (!d || d.deadlineMs === null) {
+    if (count) count.textContent = "Parking time left: 00 hr 00 min 00 sec";
+    if (det) det.textContent = (d && d.reason === "expired")
+      ? "Parking ended " + fmtEndsLine(d.deadlineMs, nowMs) + ". Tap STOP when you've moved."
+      : "No deadline on this side.";
+  } else {
+    var left = d.deadlineMs - nowMs;
+    if (count) count.textContent = "Parking time left: " + fmtCountdownSecs(left);
+    if (det) det.textContent = left > 0
+      ? "Parking ends " + fmtEndsLine(d.deadlineMs, nowMs) + (d.binds === "cleaning" ? " — street cleaning." : d.binds === "limit" ? " — parking limit." : ".")
+      : "Parking ended " + fmtEndsLine(d.deadlineMs, nowMs) + ". Tap STOP when you've moved.";
+  }
+  if (rem) rem.textContent = "Reminder set " + pin.leadMin + " min before";
+  if (dist) {
+    var fix = (typeof lastFix !== "undefined" && lastFix) ? lastFix : null;
+    var dm = pinDistM(pin, fix);
+    dist.textContent = (dm === null) ? "" : fmtDistM(dm) + " away";
+  }
+}
+/* Red STOP: ends the whole session — the pin, the reminder, the parked side
+   and the limit timer all go (the same path as the banner ✕ / toggle-off). */
+function stopPinSession() {
+  setSelectedSide(null);
+}
+/* Find my car: centre the OSM map on the pin at street level and show the map. */
+function findMyCar() {
+  var pin = getPin();
+  if (!pin) return osmView();
+  osmSetView(pin.lat, pin.lon, Math.max(osmView().zoom, OSM_ZOOM_DEFAULT));
+  showTab("map");
+  return osmView();
+}
+/* Directions: the route overview — the midpoint of you and the car, zoomed
+   out to fit both. No external directions URL is in the build's allowlist,
+   so this stays inside the app's own OSM map, like Find my car. */
+function directionsToCar() {
+  var pin = getPin();
+  if (!pin) return osmView();
+  var fix = (typeof lastFix !== "undefined" && lastFix) ? lastFix : null;
+  if (!fix) return findMyCar();
+  var dist = pinDistM(pin, fix);
+  var size = osmMapSize();
+  osmSetView((pin.lat + fix.lat) / 2, (pin.lon + fix.lon) / 2, pinFitZoom(dist, size.w, pin.lat));
+  showTab("map");
+  return osmView();
 }
 
 /* ---- centreline snap (same math as the GPS test page) ---- */
@@ -1130,8 +1559,23 @@ function setSelectedSide(key, nowMs) {
     var sk = liveSideKey() || LS_KEY;
     if (key) localStorage.setItem(sk, key); else localStorage.removeItem(sk);
   } catch (e) { /* private mode — selection just won't persist */ }
-  if (!key) { clearLimitTimer(); }
-  else { startLimitTimerForSide(key, nowMs); }
+  if (!key) { clearLimitTimer(); clearPin(); /* leaving the spot clears the pin too (banner ✕ / toggle-off / red STOP) */ }
+  else {
+    /* Parking pins the spot (the pin carries the park-time fix, or the
+       reference point). A reminder that is already set keeps its pin:
+       a re-tap or side switch mid-stay never restarts the stay — the
+       pin, the parked-at and the deadline stay put, exactly like the
+       limit timer. Only an expired (or deadline-less) pin starts fresh. */
+    try {
+      var _existingPin = getPin(), _keepPin = false;
+      if (_existingPin && _existingPin.leadMin !== null && _existingPin.leadMin !== undefined) {
+        var _d0 = pinDeadlineFor(_existingPin, nowMs);
+        _keepPin = !!(_d0 && _d0.deadlineMs !== null && _d0.deadlineMs > nowMs);
+      }
+      if (!_keepPin) savePin(pinSpotForPark(key, nowMs));
+    } catch (e) { /* a pin failure must never break parking */ }
+    startLimitTimerForSide(key, nowMs);
+  }
   renderAll();
 }
 /* Park starts the timer (his call Nov 18): the limit timer starts at the
@@ -2149,6 +2593,7 @@ function renderAll() {
   renderWhereToMove();
   renderReportCard();
   renderLimit();
+  renderPin();
   renderPlanAhead();
   destRender();
   liveRenderChrome();
@@ -2410,7 +2855,7 @@ function currentTab() { return tab; }
    never display:none, or the slide could not animate: the ID rule in the
    stylesheet beats .tabpanel.hidden and keeps it rendered off-screen,
    invisible. Closing a sheet returns to Map via showTab("map"). */
-var SHEET_TABS = ["move", "park", "destination", "settings", "info", "curb"];
+var SHEET_TABS = ["move", "park", "destination", "settings", "info", "curb", "remind"];
 function sheetIsOpen(name) {
   var p = el("tab-" + name);
   return !!p && p.classList.contains("open");
@@ -2561,6 +3006,19 @@ function init() {
     if (b) b.addEventListener("click", function () { setSelectedSide(key); });
   });
   el("clearSide").addEventListener("click", function () { setSelectedSide(null); });
+  el("pinBtn").addEventListener("click", function () { openRemindSheet(); });
+  el("remindFarYes").addEventListener("click", function () { confirmPinFar(); });
+  el("remindFarNo").addEventListener("click", function () { closeSheet(); });
+  el("remindSet").addEventListener("click", function () { setPinReminder(); });
+  el("pinStop").addEventListener("click", function () { stopPinSession(); });
+  el("pinFindCar").addEventListener("click", function () { findMyCar(); });
+  el("pinDirections").addEventListener("click", function () { directionsToCar(); });
+  el("pinIcsBtn").addEventListener("click", function () {
+    var pin = getPin();
+    if (!pin) return;
+    var d = pinDeadlineFor(pin, Date.now());
+    if (d && d.deadlineMs !== null) { try { exportPinReminderIcs(pin, d.deadlineMs); } catch (e) { /* download failed */ } }
+  });
   el("limitToggle").addEventListener("click", function () {
     setLimitOpen(el("limitBody").classList.contains("hidden"));
   });
@@ -2775,6 +3233,11 @@ function init() {
     try { renderPlanAhead(); } catch (e) { /* a plan-ahead fault must never swallow the hero tick */ }
     try { destRender(); } catch (e) { /* a destination fault must never swallow the hero tick */ }
   }, 30000);
+  /* The pin countdown ticks in seconds (the hero/limit counters are
+     minute-resolution, so they stay on the 30 s tick). */
+  setInterval(function () {
+    try { renderPin(); } catch (e) { /* a pin fault must never swallow the hero tick */ }
+  }, 1000);
 }
 
 if (typeof document !== "undefined" && document.addEventListener) {
@@ -6494,6 +6957,22 @@ function mapSvgHtml(nowMs, geom, colors) {
         + '" font-size="11" font-weight="bold" style="fill:var(--ink)" text-anchor="middle">' + esc(geom.home.label) + '</text>';
     }
   }
+  /* The pinned car (Nov 19): a blue teardrop at the pin's lat/lon, drawn as
+     a <path> — not a <circle> — so the overlay's circle count (4 metered
+     dots + the home marker) is unchanged. Only when a pin is saved. */
+  var pinM = null;
+  try { pinM = getPin(); } catch (e) { pinM = null; }
+  if (pinM) {
+    var pp = toXY(pinM.lat, pinM.lon);
+    var pq = osmProjectLocal(pp[0], pp[1], refLat, refLon, view, fsize);
+    var px = pq[0], py = pq[1];
+    s += '<path d="M ' + px.toFixed(1) + ' ' + (py + 12).toFixed(1)
+      + ' L ' + (px - 9).toFixed(1) + ' ' + (py - 2).toFixed(1)
+      + ' A 9 9 0 1 1 ' + (px + 9).toFixed(1) + ' ' + (py - 2).toFixed(1)
+      + ' Z" fill="#2563eb" stroke="#fff" stroke-width="1.5"/>';
+    s += '<text x="' + px.toFixed(1) + '" y="' + (py + 26).toFixed(1)
+      + '" font-size="11" font-weight="bold" style="fill:var(--ink)" text-anchor="middle">Your car</text>';
+  }
   s += '</svg>' + rotClose;
   /* Hint pill (top centre) + the three controls (right side, near the
      bottom, North / Info / GPS-centre top-to-bottom — Nov 18 map cleanup).
@@ -7666,6 +8145,17 @@ if (typeof window !== "undefined") {
     permitSectors: permitSectors, renderPermitSetting: renderPermitSetting,
     onPermitToggle: onPermitToggle, PERMITS_KEY: PERMITS_KEY,
     renderLimit: renderLimit, exportLimitIcs: exportLimitIcs,
+    PIN_KEY: PIN_KEY, PIN_FAR_M: PIN_FAR_M, PIN_FIX_MAX_M: PIN_FIX_MAX_M,
+    REMIND_LEAD_OPTIONS: REMIND_LEAD_OPTIONS, REMIND_LEAD_DEFAULT: REMIND_LEAD_DEFAULT,
+    fmtCountdownSecs: fmtCountdownSecs, fmtDistM: fmtDistM, fmtEndsLine: fmtEndsLine,
+    snapPoint: snapPoint, getPin: getPin, savePin: savePin, clearPin: clearPin,
+    pinSpotForPark: pinSpotForPark, pinDeadlineFor: pinDeadlineFor, pinDeadline: pinDeadline,
+    pinDistM: pinDistM, pinFarFrom: pinFarFrom, pinFitZoom: pinFitZoom,
+    buildPinReminderIcs: buildPinReminderIcs, exportPinReminderIcs: exportPinReminderIcs,
+    openRemindSheet: openRemindSheet, renderRemindSheet: renderRemindSheet,
+    confirmPinFar: confirmPinFar, setPinReminder: setPinReminder, renderPin: renderPin,
+    stopPinSession: stopPinSession, findMyCar: findMyCar, directionsToCar: directionsToCar,
+    remindState: function () { return _remindState; },
     renderHero: renderHero,
     REPORTS_URL: REPORTS_URL, reportsEnabled: reportsEnabled,
     setReportsUrl: function (u) { REPORTS_URL = u; },
