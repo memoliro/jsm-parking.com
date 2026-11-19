@@ -67,18 +67,10 @@
      explicit call); the floor stands for every other line on the page. */
   #heroFine { font-size: 13px; color: var(--fine-ink); margin-top: 6px; }
   .fine { font-size: 13px; color: var(--fine-ink); margin-top: 4px; }
-  /* Phase 4 fix: the paid-zone warning row + strip map. The row is a
-     limitrow-shaped toggle (same chevron); the strip is a small SVG of the
+  /* Phase 4 fix: the paid strip map. The strip is a small SVG of the
      block (centreline + verified metered spots + your address), drawn from
-     the paid block's real along-track positions — never guessed. */
-  .warnrow { display: flex; justify-content: space-between; align-items: center; gap: 10px;
-             width: 100%; background: none; border: 0; padding: 0; font-size: 18px; font-weight: 700;
-             color: var(--ink); cursor: pointer; font-family: inherit; }
-  .warnrow #paidWarnText { flex: 1; text-align: center; }
-  .warnrow .chev { color: var(--muted); font-size: 20px; display: inline-block; }
-  .warnrow.open .chev { transform: rotate(90deg); }
-  .warnrow:hover .chev, .warnrow:focus-visible .chev { color: var(--accent); }
-  .warnrow:focus-visible { outline: none; }
+     the paid block's real along-track positions — never guessed. The
+     warning row itself was removed Nov 18 (paid data + map dots stay). */
   .paidstrip { margin-top: 10px; }
   .paidstrip svg { display: block; width: 100%; height: auto; }
   /* Phase 5 (Nov 17): the colored map. An SVG of the current street drawn
@@ -120,12 +112,6 @@
   .mapcurb-hit { cursor: pointer; }
   .mapcurb-hit:focus-visible { outline: none; }
   .verdict { font-size: 18px; font-weight: 700; margin-top: 4px; }
-  .planinputs { display: flex; gap: 10px; margin-top: 10px; }
-  .planinputs input { flex: 1 1 0; min-width: 0; font-family: inherit; font-size: 18px;
-             padding: 12px 8px; border: 2px solid var(--line); border-radius: 12px;
-             background: var(--card); color: var(--ink); text-align: center; }
-  .planinputs input:focus-visible { outline: none; border-color: var(--accent);
-             box-shadow: 0 0 0 1px rgba(49,196,141,.35), 0 18px 50px rgba(49,196,141,.35), 0 8px 30px rgba(49,196,141,.25); }
   .sidebtn { display: block; width: 100%; text-align: center; background: var(--card);
              border: 2px solid var(--line); border-radius: 14px; padding: 14px;
              font-size: 20px; font-weight: 700; color: var(--ink); cursor: pointer;
@@ -148,7 +134,6 @@
   button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
   /* Parked state of the hero toggle (his call Nov 17): it takes the selected
      side button's colors — soft-green tint, accent border, dark text. */
-  button.action.parked-on { background: var(--soft-green); border-color: var(--accent); color: var(--ink); }
   .sign { background: #f7f8f7; border-left: 3px solid var(--accent); border-radius: 0 8px 8px 0;
           padding: 10px 12px; margin-top: 10px; font-size: 17px; }
   .sign .fr { font-style: italic; }
@@ -175,7 +160,6 @@
              width: 100%; background: none; border: 0; padding: 0; font-size: 18px; font-weight: 700;
              color: var(--ink); cursor: pointer; font-family: inherit; }
   .limitrow #limitToggleText { flex: 1; text-align: center; }
-  .limitrow #planToggleText { flex: 1; text-align: center; }
   .limitrow #whereToggleText { flex: 1; text-align: center; }
   .limitrow #reportToggleText { flex: 1; text-align: center; }
   /* Phase 5 piece 3 (Nov 18): sign reports — free-text textarea + the list
@@ -210,7 +194,6 @@
   .gpsrow { display: flex; justify-content: space-between; align-items: center; gap: 10px;
            width: 100%; background: none; border: 0; padding: 8px 4px; font-size: 17px;
            color: var(--muted); cursor: pointer; font-family: inherit; }
-  .gpsrow #gpsStatus { flex: 1; text-align: center; }
   .gpsrow #gpsStatusSettings { flex: 1; text-align: center; }
   .gpsrow:hover, .gpsrow:focus-visible { background: var(--soft-green); color: var(--ink);
            border-radius: 8px; outline: none; }
@@ -219,15 +202,6 @@
      such glyph and renders a missing-glyph box, so the icon is an inline SVG
      (Feather rotate-cw), which renders on any font. */
   .gpsrefresh svg { display: block; }
-  #dotsNav { display: flex; justify-content: center; align-items: center; gap: 10px;
-             margin-top: auto; padding-top: 10px; }
-  .dot { width: 28px; height: 28px; border: 0; background: none; cursor: pointer;
-         padding: 0; position: relative; }
-  .dot::after { content: ""; position: absolute; left: 50%; top: 50%; width: 10px; height: 10px;
-                margin: -5px 0 0 -5px; border-radius: 50%; background: #c9d4cc; }
-  .dot.active::after { background: var(--accent); }
-  .dot:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 50%; }
-  #swipeHint { font-size: 15px; color: var(--muted); }
   /* Bottom tab bar (Nov 18 homescreen restructure): fixed nav like
      Deeniy's — five tabs, icon + label, the active tab highlighted.
      Content pads for it (body padding-bottom above) so the bar never
@@ -261,11 +235,11 @@
      class (the suites read visibility off it) but is never display:none —
      the ID rule below beats .tabpanel.hidden and keeps it rendered
      off-screen, invisible — or the slide could not animate. */
-  #tab-move, #tab-timer, #tab-destination, #tab-settings { position: fixed; left: 0; right: 0; bottom: calc(76px + env(safe-area-inset-bottom)); max-height: calc(85dvh - 76px - env(safe-area-inset-bottom)); overflow-y: auto; overscroll-behavior: none; touch-action: pan-y; background: var(--card); border-top: 1px solid var(--line); border-radius: 24px 24px 0 0; padding: 20px 20px calc(20px + env(safe-area-inset-bottom)); z-index: 55; box-shadow: 0 -10px 40px rgba(0,0,0,.4); transform: translateY(102%); visibility: hidden; transition: transform .5s ease, visibility .5s; user-select: none; -webkit-user-select: none; }
-  #tab-move input, #tab-move textarea, #tab-timer input, #tab-timer textarea, #tab-destination input, #tab-destination textarea, #tab-settings input, #tab-settings textarea { user-select: text; -webkit-user-select: text; }
-  #tab-move.open, #tab-timer.open, #tab-destination.open, #tab-settings.open { transform: translateY(0); visibility: visible; }
-  #tab-move.hidden, #tab-timer.hidden, #tab-destination.hidden, #tab-settings.hidden { display: block; }
-  @media (prefers-reduced-motion: reduce) { #tab-move, #tab-timer, #tab-destination, #tab-settings, .tab-backdrop { transition: none; } }
+  #tab-move, #tab-park, #tab-destination, #tab-settings { position: fixed; left: 0; right: 0; bottom: calc(76px + env(safe-area-inset-bottom)); max-height: calc(85dvh - 76px - env(safe-area-inset-bottom)); overflow-y: auto; overscroll-behavior: none; touch-action: pan-y; background: var(--card); border-top: 1px solid var(--line); border-radius: 24px 24px 0 0; padding: 20px 20px calc(20px + env(safe-area-inset-bottom)); z-index: 55; box-shadow: 0 -10px 40px rgba(0,0,0,.4); transform: translateY(102%); visibility: hidden; transition: transform .5s ease, visibility .5s; user-select: none; -webkit-user-select: none; }
+  #tab-move input, #tab-move textarea, #tab-park input, #tab-park textarea, #tab-destination input, #tab-destination textarea, #tab-settings input, #tab-settings textarea { user-select: text; -webkit-user-select: text; }
+  #tab-move.open, #tab-park.open, #tab-destination.open, #tab-settings.open { transform: translateY(0); visibility: visible; }
+  #tab-move.hidden, #tab-park.hidden, #tab-destination.hidden, #tab-settings.hidden { display: block; }
+  @media (prefers-reduced-motion: reduce) { #tab-move, #tab-park, #tab-destination, #tab-settings, .tab-backdrop { transition: none; } }
   .tab-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 45; opacity: 0; visibility: hidden; transition: opacity .5s ease, visibility .5s; }
   .tab-backdrop.open { opacity: 1; visibility: visible; }
   /* Marked tap zone at the top of every sheet — Radio's .menu-grab pill
@@ -310,44 +284,15 @@
     <div id="mapBody"></div>
   </div>
 
-  <div id="parkedBanner" class="parked hidden"><span>Parked: <b id="parkedSide">—</b></span><button class="linkbtn change" id="clearSide" aria-label="Not parked here — clear">&#10005;</button></div>
 
 
-  <div class="card hidden" id="heroCard">
-    <div class="big" id="heroTitle">—</div>
-    <div class="count" id="heroCount">—</div>
-    <div id="heroDetail" style="font-size:17px"></div>
-    <div id="heroVerdict" class="hidden"></div>
-    <div id="heroFine" class="hidden"></div>
-    <div style="margin-top:10px;text-align:center">
-      <button class="action primary" id="parkedToggle">Park</button>
-    </div>
-  </div>
-
-  <!-- Phase 4 fix (Nov 17): the paid-zone warning — one compact row that
-       expands to the strip map. Paid sides only; free/unknown sides never
-       show this card (see renderPaidWarn). -->
-  <div class="card hidden" id="paidWarnCard">
-    <button class="warnrow" id="paidWarnToggle" aria-expanded="false"><span id="paidWarnText"></span><span class="chev" aria-hidden="true">&rsaquo;</span></button>
-    <div id="paidWarnBody" class="hidden"></div>
-  </div>
-
-  <div class="card" id="pickCard">
-    <button class="sidebtn" id="btnSide0"></button>
-    <button class="sidebtn" id="btnSide1"></button>
-  </div>
 
 
-  <div class="card" id="planCard">
-    <button class="limitrow" id="planToggle" aria-expanded="false"><span id="planToggleText">Plan ahead &mdash; check a future day &amp; time</span><span class="chev" aria-hidden="true">&rsaquo;</span></button>
-    <div id="planBody" class="hidden">
-      <div class="planinputs">
-        <input type="date" id="planDate" aria-label="Day">
-        <input type="time" id="planTime" aria-label="Time">
-      </div>
-      <div id="planResult" style="font-size:18px;margin-top:10px"></div>
-    </div>
-  </div>
+
+
+
+
+
 
   </section>
 
@@ -360,7 +305,7 @@
     </div>
   </div>
   <!-- Phase 5 piece 2 (Nov 17): where to move — an expandable row in the
-       same collapsed-row pattern as the map / limit timer / plan ahead. It
+       same collapsed-row pattern as the map / limit timer. It
        ranks this street's curbs by how long you can stay, longest first.
        Curbs you cannot park on now and sides with no verified rule are
        listed plainly at the end, never with a guessed stay time. While a
@@ -423,14 +368,29 @@
   </div>
   </section>
 
-  <section id="tab-timer" class="tabpanel hidden" aria-label="Timer">
+  <section id="tab-park" class="tabpanel hidden" aria-label="Park">
   <div class="sheet-top">
     <div class="sheet-grab" aria-hidden="true"></div>
     <div class="sheet-head">
-      <h2>Timer</h2>
-      <button class="sheet-close" id="sheetClose-timer" type="button" aria-label="Close">&#10005;</button>
+      <h2>Park</h2>
+      <button class="sheet-close" id="sheetClose-park" type="button" aria-label="Close">&#10005;</button>
     </div>
   </div>
+  <div id="parkedBanner" class="parked hidden"><span>Parked: <b id="parkedSide">—</b></span><button class="linkbtn change" id="clearSide" aria-label="Not parked here — clear">&#10005;</button></div>
+
+  <div class="card hidden" id="heroCard">
+    <div class="big" id="heroTitle">—</div>
+    <div class="count" id="heroCount">—</div>
+    <div id="heroDetail" style="font-size:17px"></div>
+    <div id="heroVerdict" class="hidden"></div>
+    <div id="heroFine" class="hidden"></div>
+  </div>
+
+  <div class="card" id="pickCard">
+    <button class="sidebtn" id="btnSide0"></button>
+    <button class="sidebtn" id="btnSide1"></button>
+  </div>
+
   <div class="card" id="limitCard">
     <button class="limitrow" id="limitToggle" aria-expanded="false"><span id="limitToggleText">Parking limit timer</span><span class="chev" aria-hidden="true">&rsaquo;</span></button>
     <div id="limitBody" class="hidden">
@@ -482,7 +442,6 @@
        it on Details. A tap closes the sheet back to Map. -->
   <div class="tab-backdrop" id="tabBackdrop" aria-hidden="true"></div>
 
-  <button class="gpsrow" id="gpsBtn"><span id="gpsStatus">&#128205; Checking location&hellip;</span><span class="gpsrefresh" aria-hidden="true"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg></span></button>
   <!-- The live label lives here, under the GPS row (Nov 17): the picker card
        is gone with its GPS button, so the live banner moved down
        from the top of the page. One label, not two — the picker note's ready
@@ -526,22 +485,17 @@
   </div>
   </div><!-- /detailsView -->
 
-  <nav id="dotsNav" aria-label="Screens">
-    <button class="dot active" id="dotMain" aria-label="Back to main"></button>
-    <button class="dot" id="dotDetails" aria-label="Go to Details"></button>
-    <span id="swipeHint">Swipe &larr; for details</span>
-  </nav>
 </div>
 
   <!-- Bottom tab bar (Nov 18 homescreen restructure): five tabs, icon +
        label, no page reload. Map is the home screen and stays underneath;
        the other four open as bottom sheets over it. Settings is right-most.
-       Details stays reachable by swipe / dots, as before. -->
+       Details stays reachable by swipe / arrow keys, as before. -->
   <nav id="tabBar" aria-label="Sections">
     <div class="tabbar-inner">
       <button class="tabbtn active" id="tabbtn-map" data-tab="map" aria-selected="true"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6"></polygon><line x1="8" y1="2" x2="8" y2="18"></line><line x1="16" y1="6" x2="16" y2="22"></line></svg>Map</button>
       <button class="tabbtn" id="tabbtn-move" data-tab="move" aria-selected="false"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="3 11 22 2 13 21 11 13 3 11"></polygon></svg>Move</button>
-      <button class="tabbtn" id="tabbtn-timer" data-tab="timer" aria-selected="false"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>Timer</button>
+      <button class="tabbtn" id="tabbtn-park" data-tab="park" aria-selected="false"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="4"></rect><path d="M9.5 17V7h3a2.75 2.75 0 0 1 0 5.5H9.5"></path></svg>Park</button>
       <button class="tabbtn" id="tabbtn-destination" data-tab="destination" aria-selected="false"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"></path><circle cx="12" cy="10" r="3"></circle></svg>Destination</button>
       <button class="tabbtn" id="tabbtn-settings" data-tab="settings" aria-selected="false"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>Settings</button>
     </div>
@@ -1094,11 +1048,11 @@ function renderSideCards() {
 function getSelectedSide() {
   try { return localStorage.getItem(liveSideKey() || LS_KEY); } catch (e) { return null; }
 }
-/* Parking is a single tap: picking a side (or the Park toggle) says "I parked
+/* Parking is a single tap: picking a side says "I parked
    here" — and Park starts the limit timer right away (his call Nov 18):
    the stay starts at the tap, so the hero shows it immediately instead of
    saying "Not parked" while the banner says "Parked". Clearing the side
-   ("Parked" / the ✕) says "I moved" — it clears the limit timer too, so
+   (the banner ✕) says "I moved" — it clears the limit timer too, so
    nothing keeps counting for a car that left. nowMs is test-only; callers
    pass nothing and it defaults to now. */
 function setSelectedSide(key, nowMs) {
@@ -1822,11 +1776,10 @@ function renderHero() {
   var key = getSelectedSide();
   var hero = el("heroCard"), banner = el("parkedBanner");
   liveMarkSideButtons(key);
-  var tg = el("parkedToggle");
   renderPaidWarn();
   if (!key) {
     banner.classList.add("hidden");
-    /* Prompt mode: not parked yet — the hero is the one-tap "Park" button. */
+    /* Prompt mode: not parked yet — tapping a side parks you. */
     hero.classList.remove("hidden");
     hero.classList.remove("now");
     hero.classList.remove("next");
@@ -1841,8 +1794,6 @@ function renderHero() {
     hc0.textContent = "";
     hc0.classList.add("hidden");
     el("heroDetail").textContent = "";
-    tg.textContent = "Park";
-    tg.classList.remove("parked-on");
     return;
   }
   banner.classList.remove("hidden");
@@ -1855,8 +1806,7 @@ function renderHero() {
        about it — no window line, no verdict, no detail, no warning. The
        hero content matches the default not-parked state exactly. The
        selection chrome is untouched: the "Parked: <side>" banner stays
-       (a side IS picked) and the toggle stays "Parked" (tapping it still
-       clears the side) — only the hero's rule content stays quiet. This
+       (a side IS picked) — only the hero's rule content stays quiet. This
        is now only the pre-window wait (the timer is anchored to a future
        window start) or a side restored without a timer: Park starts the
        timer (his call Nov 18), so a tap no longer lands here mid-day —
@@ -1875,8 +1825,6 @@ function renderHero() {
     hc0.textContent = "";
     hc0.classList.add("hidden");
     el("heroDetail").textContent = "";
-    tg.textContent = "Parked";
-    tg.classList.add("parked-on");
     return;
   }
   if (st.mode === "limit" && !v) {
@@ -1920,8 +1868,6 @@ function renderHero() {
     hf.textContent = v ? (v.fine || "") : "";
     hf.classList.toggle("hidden", !v || !v.fine || (warn.level === "none" && v.kind !== "no_stop"));
   }
-  tg.textContent = "Parked";
-  tg.classList.add("parked-on");
 }
 
 /* The limit card stays one row even while a timer runs: the row label carries
@@ -2331,10 +2277,10 @@ function updateDots() {
    Five tabs, no page reload. Map is the home screen and stays underneath;
    the other four open as JSM Radio-style bottom sheets sliding up over the
    map (Nov 18, his call). Entering Move opens the where-to-move list and
-   entering Timer opens the limit timer, so the tab always shows its
+   entering Park opens the limit timer, so the tab always shows its
    content — the collapsed rows stay collapsed in the HTML for the suites. */
 var tab = "map";
-var TABS = ["map", "move", "timer", "destination", "settings"];
+var TABS = ["map", "move", "park", "destination", "settings"];
 function currentTab() { return tab; }
 /* Bottom sheets (Nov 18 — Radio's .menu-sheet pattern, copied literally):
    a sheet is position:fixed at the bottom with translateY(102%) closed and
@@ -2347,7 +2293,7 @@ function currentTab() { return tab; }
    never display:none, or the slide could not animate: the ID rule in the
    stylesheet beats .tabpanel.hidden and keeps it rendered off-screen,
    invisible. Closing a sheet returns to Map via showTab("map"). */
-var SHEET_TABS = ["move", "timer", "destination", "settings"];
+var SHEET_TABS = ["move", "park", "destination", "settings"];
 function sheetIsOpen(name) {
   var p = el("tab-" + name);
   return !!p && p.classList.contains("open");
@@ -2386,7 +2332,7 @@ function showTab(name) {
   var bd = el("tabBackdrop");
   if (bd) bd.classList.toggle("open", name !== "map");
   if (name === "move") setWhereOpen(true);
-  else if (name === "timer") setLimitOpen(true);
+  else if (name === "park") setLimitOpen(true);
   else if (name === "map") { try { renderMap(); } catch (e) { /* sizing only */ } }
   else if (name === "destination") destRender();
   else if (name === "settings") renderSettingsLayers();
@@ -2482,22 +2428,13 @@ function init() {
   try { renderMap(); } catch (e) { /* sizing only — the first render ran on an empty map body */ }
   /* A running timer must not hide behind the collapsed tiles. */
   if (getLimitTimer()) setLimitOpen(true);
-  try { if (localStorage.getItem(SWIPED_KEY) === "1") el("swipeHint").classList.add("hidden"); } catch (e) { /* private mode */ }
   SIDE_KEYS.forEach(function (key, i) {
     var b = el("btnSide" + i);
     if (b) b.addEventListener("click", function () { setSelectedSide(key); });
   });
   el("clearSide").addEventListener("click", function () { setSelectedSide(null); });
-  el("parkedToggle").addEventListener("click", function () { toggleParked(); });
-  el("gpsBtn").addEventListener("click", onGpsRowTap);
   el("limitToggle").addEventListener("click", function () {
     setLimitOpen(el("limitBody").classList.contains("hidden"));
-  });
-  el("planToggle").addEventListener("click", function () {
-    setPlanOpen(el("planBody").classList.contains("hidden"));
-  });
-  el("paidWarnToggle").addEventListener("click", function () {
-    setPaidWarnOpen(el("paidWarnBody").classList.contains("hidden"));
   });
 
   el("whereToggle").addEventListener("click", function () {
@@ -2582,10 +2519,6 @@ function init() {
     mapBodyEl.addEventListener("wheel", osmOnWheel, { passive: false });
     mapBodyEl.addEventListener("dblclick", osmOnDblClick);
   }
-  ["planDate", "planTime"].forEach(function (id) {
-    var n = el(id);
-    if (n) n.addEventListener("input", function () { renderPlanAhead(); });
-  });
   var po = el("permitOptions");
   if (po) po.addEventListener("change", function (e) {
     var t = e.target || e.srcElement;
@@ -2642,9 +2575,6 @@ function init() {
   });
   el("limitClear").addEventListener("click", function () { clearLimitTimer(); renderLimit(); });
   el("limitIcsBtn").addEventListener("click", exportLimitIcs);
-  /* Dots are real buttons: the fallback path for everyone who never swipes. */
-  el("dotMain").addEventListener("click", showMain);
-  el("dotDetails").addEventListener("click", showDetails);
   /* Swipe (touch) + drag (mouse): one gesture recogniser, threshold + vertical
      tolerance so taps and vertical scrolls never flip screens. A drag that
      starts on a button must not also click it — the capture-phase click
