@@ -2924,7 +2924,94 @@ function liveCacheSavedLabel(savedAt) {
       { timeZone: "America/Toronto", hour: "numeric", minute: "2-digit" });
   } catch (e) { return ""; }
 }
-var LIVE_CACHE_PREFIX = "ticketSaver.live.v5."; /* v5: sides assembled under the 1-pole city-data rule (Nov 18) — v4 entries re-fetch once */
+var LIVE_CACHE_PREFIX = "ticketSaver.live.v5.";
+/* ---- background city-data cache (Nov 19): LRU cap on the live.v5 entries ----
+   The prefetch (liveNearbyLookupOne with prefetchLive, livePrefetchAround)
+   saves full current-street entries into the SAME live.v5 cache the
+   on-demand lookup reads, so a street the user walks onto is already
+   there. Without a cap that cache would grow one entry per street ever
+   visited. The cap is 20 live.v5 entries: one entry is a few KB (signs
+   + sides + centreline), so 20 stays far under the ~5 MB localStorage
+   quota while covering a day of wandering around a neighbourhood. ONLY
+   live.v5 entries count: the nearby (v1) and junction (v1) caches are
+   separate, keep their own semantics, and are NOT counted here. The
+   order lives in its own key, ticketSaver.live.v5.index - a JSON array
+   of live.v5 cache keys, least-recently-used FIRST, most-recently-used
+   LAST - because the entries themselves carry no ordering. The index is
+   metadata only: it never changes what a live.v5 entry means, and a
+   missing or corrupt index just rebuilds empty (entries still read
+   fine; the cap re-applies on the next save). Eviction: when a save
+   would take the count past 20, the least-recently-used entry is
+   removed from localStorage (and the index) first. A read of a live.v5
+   entry also marks it most-recently-used. */
+var LIVE_CACHE_MAX_ENTRIES = 20;
+var LIVE_CACHE_INDEX_KEY = "ticketSaver.live.v5.index";
+function liveCacheIndexRead() {
+  try {
+    var o = JSON.parse(localStorage.getItem(LIVE_CACHE_INDEX_KEY) || "[]");
+    if (!o || typeof o.length !== "number") return [];
+    var out = [];
+    for (var i = 0; i < o.length; i++) {
+      if (typeof o[i] === "string" && o[i].indexOf(LIVE_CACHE_PREFIX) === 0 && out.indexOf(o[i]) < 0) out.push(o[i]);
+    }
+    return out;
+  } catch (e) { return []; }
+}
+function liveCacheIndexWrite(list) {
+  try { localStorage.setItem(LIVE_CACHE_INDEX_KEY, JSON.stringify(list)); } catch (e) { /* private mode */ }
+}
+/* Prune index keys whose entry is gone (TTL expiry, a cleared cache) so
+   dead keys never hold a cap slot. Returns the pruned list. */
+function liveCacheIndexPrune(list) {
+  var out = [];
+  for (var i = 0; i < list.length; i++) {
+    try { if (localStorage.getItem(list[i]) !== null) out.push(list[i]); } catch (e) { /* unreadable counts as gone */ }
+  }
+  return out;
+}
+/* Mark a live.v5 entry most-recently-used. Non-live.v5 keys are ignored
+   (nearby/junction entries are not counted). Never throws. */
+function liveCacheTouch(key) {
+  if (!key || key.indexOf(LIVE_CACHE_PREFIX) !== 0) return;
+  try {
+    var list = liveCacheIndexPrune(liveCacheIndexRead());
+    var at = list.indexOf(key);
+    if (at >= 0) list.splice(at, 1);
+    list.push(key);
+    liveCacheIndexWrite(list);
+  } catch (e) { /* the index is best-effort; the entry itself is unaffected */ }
+}
+/* Save a live.v5 entry under the cap: the entry is stored, marked
+   most-recent, and while the count is over LIVE_CACHE_MAX_ENTRIES the
+   least-recently-used entry is evicted (removed from localStorage and
+   the index). If the store is full (quota), the oldest entry is evicted
+   and the save retried once; if it still fails the entry is dropped
+   silently - a missed prefetch never surfaces as an error. */
+function liveCacheSaveEntry(key, value) {
+  if (!key || key.indexOf(LIVE_CACHE_PREFIX) !== 0) { liveCacheSave(key, value); return; }
+  try {
+    var list = liveCacheIndexPrune(liveCacheIndexRead());
+    var at = list.indexOf(key);
+    if (at >= 0) list.splice(at, 1);
+    list.push(key);
+    while (list.length > LIVE_CACHE_MAX_ENTRIES) {
+      var old = list.shift();
+      try { localStorage.removeItem(old); } catch (e) { /* already gone */ }
+    }
+    liveCacheIndexWrite(list);
+    try {
+      localStorage.setItem(key, JSON.stringify(value));
+    } catch (e) {
+      /* quota: evict the oldest and retry once */
+      if (list.length > 1) {
+        var old2 = list.shift();
+        try { localStorage.removeItem(old2); } catch (e2) { /* already gone */ }
+        liveCacheIndexWrite(list);
+        try { localStorage.setItem(key, JSON.stringify(value)); } catch (e3) { /* drop silently */ }
+      }
+    }
+  } catch (e) { liveCacheSave(key, value); /* fall back to the plain save */ }
+} /* v5: sides assembled under the 1-pole city-data rule (Nov 18) — v4 entries re-fetch once */
 var LIVE_RPA_KEY = "ticketSaver.rpa.v1";
 var LIVE_NEARBY_RADIUS_M = 500; /* nearby-streets lookup (Nov 18): where-to-move suggests the closest streets around the fix, from city data -- proximity filters the candidates, the listing logic ranks them */
 var LIVE_NEARBY_MAX_STREETS = 8; /* landed cap (Nov 18 cap raise): the sweep suggests at most 8 nearby streets -- it keeps trying candidates in distance order until 8 have landed; each landed street costs a Photon + Geobase + signs round trip and a row in the list; 8 streets is 16 curbs, the ones you would actually walk or drive to */
@@ -4219,6 +4306,7 @@ async function liveRunLookupInner(fix) {
     var paidOk = !paidAsOf || (cached && cached.paidAsOf === paidAsOf);
     if (cached && signsOk && paidOk) {
       if (gen !== LIVE_GEN) return { status: "abandoned" }; /* left live mode mid-lookup */
+      liveCacheTouch(cacheKey); /* a hit is a use - most-recently-used */
       if (liveCacheIsStale(cached)) {
         /* STALE cache hit (map fix, Nov 18): a morning-saved entry is never
            served as current. Show it labelled as last known — the banner,
@@ -4230,7 +4318,7 @@ async function liveRunLookupInner(fix) {
         if (typeof renderAll === "function") renderAll();
       } else {
         liveApplyResult(cached.result, dataAsOf);
-        liveNearbySweep(fix.lat, fix.lon, fix.streetName); /* the where-to-move card suggests the streets around this one — fire and forget, the sweep renders as each street lands */
+        liveNearbySweep(fix.lat, fix.lon, fix.streetName, fix.city); /* the where-to-move card suggests the streets around this one — fire and forget, the sweep renders as each street lands */
         liveJunctionLookup(fix, null); /* the map shows the junction when the house sits close to one — fire and forget, each neighbouring segment lands as it arrives */
         return cached.result;
       }
@@ -4283,11 +4371,11 @@ async function liveRunLookupInner(fix) {
     result.sides.even.paid = paid.even;
     result.sides.odd.paid = paid.odd;
     if (gen !== LIVE_GEN) return { status: "abandoned" }; /* left live mode mid-lookup */
-    liveCacheSave(cacheKey, { streetName: fix.streetName, streetSlug: slug,
+    liveCacheSaveEntry(cacheKey, { streetName: fix.streetName, streetSlug: slug,
       houseNumber: fix.houseNumber, dataAsOf: dataAsOf, paidAsOf: paidAsOf,
       savedAt: Date.now(), result: result });
     liveApplyResult(result, dataAsOf);
-    liveNearbySweep(fix.lat, fix.lon, fix.streetName); /* the where-to-move card suggests the streets around this one — fire and forget, the sweep renders as each street lands */
+    liveNearbySweep(fix.lat, fix.lon, fix.streetName, fix.city); /* the where-to-move card suggests the streets around this one — fire and forget, the sweep renders as each street lands */
     liveJunctionLookup(fix, over.ways); /* the map shows the junction when the house sits close to one — the cross street's ways are already in the .c set, so no extra Overpass query */
     return result;
   } catch (err) {
@@ -4417,12 +4505,21 @@ function liveNearbyCandidates(ways, currentName, fixLat, fixLon) {
 function liveNearbyCacheKey(slug, idTrc, houseNumber) {
   return LIVE_NEARBY_CACHE_PREFIX + slug + "." + (idTrc || ("h" + houseNumber));
 }
-/* One nearby street through the same pipeline as the current street
-   (minus the paid lookup — where-to-move never reads it). Returns
-   { name, slug, distM, result } or null when the street must be skipped:
-   no house on it near its closest point, no centreline, no signs, a
-   build error, or any fetch failure. Never throws. */
-async function liveNearbyLookupOne(fixLat, fixLon, cand, areaWays, dataAsOf, cacheKeyFn) {
+/* One nearby street through the same pipeline as the current street.
+   Returns { name, slug, distM, result } or null when the street must be
+   skipped: no house on it near its closest point, no centreline, no
+   signs, a build error, or any fetch failure. Never throws.
+   Background city-data cache (Nov 19): with opts.prefetchLive the SAME
+   result - plus its paid lookup, which the where-to-move rows never
+   read - is also saved as a live.v5 current-street entry, under the
+   LRU cap, so the rules are already there when the user turns onto
+   that street. The pipeline is identical (same parser, same guards);
+   only the cache key differs (live.v5, not nearby.v1). The junction
+   lookup calls this without opts, so its neighbouring segments never
+   enter the current-street cache. opts.paidAsOf is the paid package
+   date fetched once per sweep (null when unknown - the entry is still
+   saved, and the on-demand revalidation re-fetches it, honestly). */
+async function liveNearbyLookupOne(fixLat, fixLon, cand, areaWays, dataAsOf, cacheKeyFn, opts) {
   try {
     if (typeof fetch === "undefined") return null;
     var pt = await liveNearestAddressPoint(cand.name, cand.anchorLat, cand.anchorLon);
@@ -4440,7 +4537,18 @@ async function liveNearbyLookupOne(fixLat, fixLon, cand, areaWays, dataAsOf, cac
        labelled last-known frame instead, because it is the street shown. */
     if (cached && liveCacheIsStale(cached)) cached = null;
     if (cached && cached.result && cached.result.sides && (!dataAsOf || cached.dataAsOf === dataAsOf)) {
-      return { name: cand.name, slug: slug, distM: cand.distM, result: cached.result };
+      if (opts && opts.prefetchLive) {
+        var liveKey = liveCacheKey(slug, geoHit ? geoHit.idTrc : null, pt.number);
+        var liveCached = liveCacheRead(liveKey);
+        if (liveCached && !liveCacheIsStale(liveCached)
+            && (!dataAsOf || liveCached.dataAsOf === dataAsOf)
+            && (!opts.paidAsOf || liveCached.paidAsOf === opts.paidAsOf)) {
+          return { name: cand.name, slug: slug, distM: cand.distM, result: cached.result };
+        }
+        /* else: fall through - the pipeline below rebuilds and saves both entries */
+      } else {
+        return { name: cand.name, slug: slug, distM: cand.distM, result: cached.result };
+      }
     }
     var chain = liveChainStreetWays(areaWays, cand.name, pt.lat, pt.lon);
     if (!chain) return null;
@@ -4467,6 +4575,22 @@ async function liveNearbyLookupOne(fixLat, fixLon, cand, areaWays, dataAsOf, cac
     if (!result || result.status !== "ok") return null;
     liveCacheSave(key, { streetName: cand.name, streetSlug: slug, houseNumber: pt.number,
       dataAsOf: dataAsOf, paidAsOf: null, savedAt: Date.now(), result: result });
+    if (opts && opts.prefetchLive) {
+      /* The paid lookup never throws (a failure returns "unknown" for
+         both sides), so this cannot lose the nearby result above. The
+         nearby save serialised first, so it stays paid-less by design;
+         the live.v5 entry below carries the paid result, exactly like
+         an on-demand entry. */
+      var paid = await livePaidLookup({ lat: pt.lat, lon: pt.lon, city: (opts && opts.city) || null }, result,
+        { chain: chain, houseLat: pt.lat, houseLon: pt.lon,
+          houseNumber: pt.number, streetName: cand.name }, opts.paidAsOf || null);
+      result.sides.even.paid = paid.even;
+      result.sides.odd.paid = paid.odd;
+      liveCacheSaveEntry(liveCacheKey(slug, geoHit ? geoHit.idTrc : null, pt.number),
+        { streetName: cand.name, streetSlug: slug, houseNumber: pt.number,
+          dataAsOf: dataAsOf, paidAsOf: opts.paidAsOf || null,
+          savedAt: Date.now(), result: result });
+    }
     return { name: cand.name, slug: slug, distM: cand.distM, result: result };
   } catch (e) {
     return null; /* a nearby street whose lookup fails is skipped, never a guessed row */
@@ -4480,7 +4604,12 @@ async function liveNearbyLookupOne(fixLat, fixLon, cand, areaWays, dataAsOf, cac
    re-sweeps nothing) and abandoned when the generation moves on (the
    user picked a baked street or a new lookup started). Fire and forget:
    callers never await it. */
-function liveNearbySweep(fixLat, fixLon, currentStreetName) {
+function liveNearbySweep(fixLat, fixLon, currentStreetName, city) {
+  /* city: the current fix's municipality, threaded to the prefetch's paid
+     lookup - livePaidBuildPaid reads fix.city, so a prefetched entry
+     must see the same city the on-demand lookup would, or its paid
+     verdict would differ. Optional: without it the paid lookup falls
+     back to unknown, honestly. */
   if (!LIVE_NEARBY_ENABLED) return Promise.resolve(null);
   if (typeof fetch === "undefined") return Promise.resolve(null);
   var key = liveNearbyFixKey(fixLat, fixLon);
@@ -4488,41 +4617,130 @@ function liveNearbySweep(fixLat, fixLon, currentStreetName) {
   if (LIVE_NEARBY.fixKey === key && LIVE_NEARBY.status === "ready") return Promise.resolve(LIVE_NEARBY.streets); /* same block, results already landed — one area query per fix, not one per 90 s tick; a new fix re-sweeps */
   var gen = (typeof LIVE_GEN !== "undefined") ? LIVE_GEN : 0;
   LIVE_NEARBY = { status: "loading", fixKey: key, fixLat: fixLat, fixLon: fixLon, streets: {} };
-  var p = liveNearbySweepInner(fixLat, fixLon, currentStreetName, key, gen);
+  var p = liveNearbySweepInner(fixLat, fixLon, currentStreetName, key, gen, city || null);
   LIVE_NEARBY_PROMISE = p;
   p.then(function () { if (LIVE_NEARBY_PROMISE === p) LIVE_NEARBY_PROMISE = null; },
     function () { if (LIVE_NEARBY_PROMISE === p) LIVE_NEARBY_PROMISE = null; });
   return p;
 }
-async function liveNearbySweepInner(fixLat, fixLon, currentStreetName, key, gen) {
+/* The candidate loop shared by the nearby sweep and the background
+   prefetch (livePrefetchAround): candidates in distance order, one
+   liveNearbyLookupOne each, until LIVE_NEARBY_MAX_STREETS have LANDED or
+   LIVE_NEARBY_MAX_TRIES have been TRIED. stillValid() abandons the loop
+   when the user moved on; onLand(r) is called for each landed result
+   (the sweep records it into LIVE_NEARBY and renders; the prefetch
+   passes null - the live.v5 save already happened inside
+   liveNearbyLookupOne). Returns { landed, tried }. Never throws. */
+async function liveNearbySweepLoop(fixLat, fixLon, currentStreetName, areaWays, dataAsOf, opts, stillValid, onLand) {
+  var cands = liveNearbyCandidates(areaWays, currentStreetName, fixLat, fixLon);
+  var landed = 0, tried = 0;
+  for (var i = 0; i < cands.length && landed < LIVE_NEARBY_MAX_STREETS && tried < LIVE_NEARBY_MAX_TRIES; i++) {
+    if (typeof stillValid === "function" && !stillValid()) return { landed: landed, tried: tried };
+    tried++;
+    var r = await liveNearbyLookupOne(fixLat, fixLon, cands[i], areaWays, dataAsOf, null, opts);
+    if (typeof stillValid === "function" && !stillValid()) return { landed: landed, tried: tried };
+    if (r && r.result && r.result.sides) {
+      landed++;
+      if (typeof onLand === "function") onLand(r);
+    }
+  }
+  return { landed: landed, tried: tried };
+}
+async function liveNearbySweepInner(fixLat, fixLon, currentStreetName, key, gen, city) {
   try {
     var area = await liveNearbyAreaQuery(fixLat, fixLon);
     if (gen !== LIVE_GEN || LIVE_NEARBY.fixKey !== key) return null; /* abandoned — the user moved on */
-    var cands = liveNearbyCandidates(area.ways, currentStreetName, fixLat, fixLon);
     var dataAsOf = null;
     try {
       var pkg = await liveCkanPackage();
       dataAsOf = (pkg.metadata_modified || pkg.metadata_created || "").slice(0, 10) || null;
     } catch (e) { dataAsOf = null; }
+    var paidAsOf = null;
+    try {
+      var ppkg = await liveCkanPaidPackage();
+      paidAsOf = (ppkg.metadata_modified || ppkg.metadata_created || "").slice(0, 10) || null;
+    } catch (e) { paidAsOf = null; }
     if (gen !== LIVE_GEN || LIVE_NEARBY.fixKey !== key) return null;
-    var landed = 0, tried = 0;
-    for (var i = 0; i < cands.length && landed < LIVE_NEARBY_MAX_STREETS && tried < LIVE_NEARBY_MAX_TRIES; i++) {
-      if (gen !== LIVE_GEN || LIVE_NEARBY.fixKey !== key) return null;
-      tried++;
-      var r = await liveNearbyLookupOne(fixLat, fixLon, cands[i], area.ways, dataAsOf);
-      if (gen !== LIVE_GEN || LIVE_NEARBY.fixKey !== key) return null;
-      if (r && r.result && r.result.sides) {
-        landed++;
+    /* The sweep IS the GPS-path prefetch (Nov 19): each landed street's
+       full slice - signs + centreline + Geobase side + paid places -
+       is saved as a live.v5 entry (prefetchLive), so the rules are
+       already there when the user turns onto that street. The sweep
+       itself stays fire-and-forget from the current street's lookup:
+       it never blocks the street shown, and a failure here never
+       touches the current street. */
+    await liveNearbySweepLoop(fixLat, fixLon, currentStreetName, area.ways, dataAsOf,
+      { paidAsOf: paidAsOf, prefetchLive: true, city: city || null },
+      function () { return gen === LIVE_GEN && LIVE_NEARBY.fixKey === key; },
+      function (r) {
         LIVE_NEARBY.streets[r.slug] = r;
         LIVE_NEARBY.status = "ready";
         if (typeof renderWhereToMove === "function") renderWhereToMove();
         if (typeof renderMap === "function") renderMap(); /* the OSM map draws each landed street as it arrives */
-      }
-    }
+      });
+    if (gen !== LIVE_GEN || LIVE_NEARBY.fixKey !== key) return null; /* abandoned mid-loop - the user moved on */
     if (LIVE_NEARBY.status === "loading") LIVE_NEARBY.status = "ready"; /* no candidate yielded a result — the list is just the current street */
     return LIVE_NEARBY.streets;
   } catch (e) {
     if (LIVE_NEARBY.fixKey === key) LIVE_NEARBY.status = "idle"; /* no nearby data — the list is just the current street, nothing guessed */
+    return null;
+  }
+}
+/* ---- background prefetch around a destination (Nov 19) ----
+   Trigger (b): when the user searches a destination, the streets around
+   it are prefetched the same way the GPS path's sweep prefetches the
+   streets around the current fix - same area query, same candidates,
+   same pipeline (liveNearbyLookupOne with prefetchLive), same landed/try
+   caps - but the results go ONLY to the live.v5 cache. Nothing is
+   written to LIVE_NEARBY (the where-to-move list belongs to the street
+   the user is on, not the destination), nothing renders, and the call
+   is fire-and-forget from destRunLookup: the destination's own result
+   is applied before this starts, so the prefetch can never delay it.
+   Deduped by fix (the same destination re-searches nothing); abandoned
+   when a new destination search starts (DEST_GEN). Never throws, never
+   touches LIVE or DEST. A baked destination does not prefetch: its own
+   data needed no network, and its neighbours are prefetched by the GPS
+   sweep when the user actually arrives there. */
+var LIVE_PREFETCH = { status: "idle", fixKey: null, promise: null };
+function livePrefetchAround(lat, lon, streetName, city) {
+  /* city: see liveNearbySweep - the destination fix's municipality, so the
+     prefetched paid verdict matches an on-demand lookup there. */
+  if (typeof fetch === "undefined") return Promise.resolve(null);
+  if (lat === null || lat === undefined || lon === null || lon === undefined) return Promise.resolve(null);
+  var key = liveNearbyFixKey(lat, lon) + "|" + liveSlug(streetName || "");
+  if (LIVE_PREFETCH.promise && LIVE_PREFETCH.fixKey === key && LIVE_PREFETCH.status !== "idle") return LIVE_PREFETCH.promise;
+  if (LIVE_PREFETCH.fixKey === key && LIVE_PREFETCH.status === "ready") return Promise.resolve(null);
+  var gen = (typeof DEST_GEN !== "undefined") ? DEST_GEN : 0;
+  LIVE_PREFETCH = { status: "loading", fixKey: key, promise: null };
+  var p = livePrefetchAroundInner(lat, lon, streetName, key, gen, city || null);
+  LIVE_PREFETCH.promise = p;
+  p.then(function () { if (LIVE_PREFETCH.promise === p) LIVE_PREFETCH.promise = null; },
+    function () { if (LIVE_PREFETCH.promise === p) LIVE_PREFETCH.promise = null; });
+  return p;
+}
+async function livePrefetchAroundInner(lat, lon, streetName, key, gen, city) {
+  try {
+    var area = await liveNearbyAreaQuery(lat, lon);
+    if (gen !== DEST_GEN || LIVE_PREFETCH.fixKey !== key) return null;
+    var dataAsOf = null;
+    try {
+      var pkg = await liveCkanPackage();
+      dataAsOf = (pkg.metadata_modified || pkg.metadata_created || "").slice(0, 10) || null;
+    } catch (e) { dataAsOf = null; }
+    var paidAsOf = null;
+    try {
+      var ppkg = await liveCkanPaidPackage();
+      paidAsOf = (ppkg.metadata_modified || ppkg.metadata_created || "").slice(0, 10) || null;
+    } catch (e) { paidAsOf = null; }
+    if (gen !== DEST_GEN || LIVE_PREFETCH.fixKey !== key) return null;
+    var loop = await liveNearbySweepLoop(lat, lon, streetName, area.ways, dataAsOf,
+      { paidAsOf: paidAsOf, prefetchLive: true, city: city || null },
+      function () { return gen === DEST_GEN && LIVE_PREFETCH.fixKey === key; },
+      null);
+    if (gen !== DEST_GEN || LIVE_PREFETCH.fixKey !== key) return null;
+    LIVE_PREFETCH.status = "ready";
+    return loop;
+  } catch (e) {
+    if (LIVE_PREFETCH.fixKey === key) LIVE_PREFETCH.status = "idle";
     return null;
   }
 }
@@ -6719,12 +6937,14 @@ async function destRunLookup(fix) {
     var paidOk = !paidAsOf || (cached && cached.paidAsOf === paidAsOf);
     if (cached && signsOk && paidOk) {
       if (gen !== DEST_GEN) return { status: "abandoned" };
+      liveCacheTouch(cacheKey); /* a hit is a use - most-recently-used */
       if (liveCacheIsStale(cached)) {
         destApplyResult(cached.result, dataAsOf);
         DEST.cacheStale = { savedAt: cached.savedAt, label: liveCacheSavedLabel(cached.savedAt) };
         destRender();
       } else {
         destApplyResult(cached.result, dataAsOf);
+        livePrefetchAround(fix.lat, fix.lon, fix.streetName, fix.city); /* background: the streets around the destination are prefetched into the live.v5 cache - fire and forget, never delays this result */
         return cached.result;
       }
     }
@@ -6773,10 +6993,11 @@ async function destRunLookup(fix) {
     result.sides.even.paid = paid.even;
     result.sides.odd.paid = paid.odd;
     if (gen !== DEST_GEN) return { status: "abandoned" };
-    liveCacheSave(cacheKey, { streetName: fix.streetName, streetSlug: slug,
+    liveCacheSaveEntry(cacheKey, { streetName: fix.streetName, streetSlug: slug,
       houseNumber: fix.houseNumber, dataAsOf: dataAsOf, paidAsOf: paidAsOf,
       savedAt: Date.now(), result: result });
     destApplyResult(result, dataAsOf);
+    livePrefetchAround(fix.lat, fix.lon, fix.streetName, fix.city); /* background: the streets around the destination are prefetched into the live.v5 cache - fire and forget, never delays this result */
     return result;
   } catch (err) {
     if (gen !== DEST_GEN) return { status: "abandoned" };
@@ -7049,6 +7270,10 @@ if (typeof window !== "undefined") {
     liveNearbySweep: liveNearbySweep, liveNearbyEntries: liveNearbyEntries, liveNearbyMapEntries: liveNearbyMapEntries,
     liveNearbyCandidates: liveNearbyCandidates, liveNearbyClosestPoint: liveNearbyClosestPoint,
     liveNearbyAreaQuery: liveNearbyAreaQuery, liveNearbyLookupOne: liveNearbyLookupOne,
+    liveNearbySweepLoop: liveNearbySweepLoop,
+    livePrefetchAround: livePrefetchAround,
+    livePrefetchGetState: function () { return LIVE_PREFETCH; },
+    livePrefetchSetState: function (s) { LIVE_PREFETCH = s; },
     liveNearbySetEnabled: function (b) { LIVE_NEARBY_ENABLED = !!b; },
     liveNearbyGetState: function () { return LIVE_NEARBY; },
     liveNearbySetState: function (s) { LIVE_NEARBY = s; },
@@ -7078,6 +7303,9 @@ if (typeof window !== "undefined") {
     livePaidBuildPaid: livePaidBuildPaid, liveCkanPaidPackage: liveCkanPaidPackage,
     liveAlongFromSnap: liveAlongFromSnap,
     liveCacheRead: liveCacheRead, liveCacheSave: liveCacheSave,
+    liveCacheSaveEntry: liveCacheSaveEntry, liveCacheTouch: liveCacheTouch,
+    liveCacheIndexRead: liveCacheIndexRead, LIVE_CACHE_MAX_ENTRIES: LIVE_CACHE_MAX_ENTRIES,
+    LIVE_CACHE_INDEX_KEY: LIVE_CACHE_INDEX_KEY,
     liveCacheAgeMs: liveCacheAgeMs, liveCacheIsStale: liveCacheIsStale,
     liveCacheSavedLabel: liveCacheSavedLabel, LIVE_CACHE_FRESH_MS: LIVE_CACHE_FRESH_MS,
     liveRpaCacheGet: liveRpaCacheGet, liveRpaCacheSave: liveRpaCacheSave,
