@@ -87,14 +87,24 @@
      Red is the fine-ink (the only red in the palette); green is the accent;
      grey is neutral. Curbs are schematic — offset 6 m from the centreline
      so the two sides read apart — the centreline itself is real geometry. */
-  .mapsvg svg { display: block; width: 100%; height: auto; }
-  /* Map fix (Nov 18): the small inline map — always visible on the main
-     screen, NOT behind the collapsed Street map row. One short strip
-     (180 px tall) centred on the position, the current street + the
-     surrounding streets from the nearby sweep, curbs coloured by the same
-     verdicts as the full map. It never replaces the full map. */
-  .minimap svg { display: block; width: 100%; height: 180px; }
-  .minimap .note { margin-top: 6px; }
+  /* OSM map (Nov 18): the home screen — a real OpenStreetMap tile base
+     with the verdict-coloured curb overlay drawn on top of it. The map
+     is the dominant view: 400 px tall, pannable and zoomable, centred on
+     the position. Tiles are a map fetch, not a data upload; the overlay
+     (curbs, dots, marker) is drawn from the same centreline + verdict
+     data as the old schematic map, so no verdict logic moved. */
+  .osmmap { position: relative; height: 400px; overflow: hidden; border-radius: 12px;
+            background: #e8eef0; touch-action: none; }
+  .osmtile { position: absolute; width: 256px; height: 256px; }
+  .osmsvg { position: absolute; left: 0; top: 0; }
+  .osmzoom { position: absolute; right: 10px; top: 10px; display: flex; flex-direction: column; gap: 6px; }
+  .osmzoom button { width: 36px; height: 36px; border-radius: 8px; border: 1px solid var(--line);
+            background: var(--card); font-size: 20px; font-weight: 700; color: var(--ink);
+            cursor: pointer; font-family: inherit; line-height: 1; }
+  .osmzoom button.wide { width: auto; padding: 0 10px; font-size: 15px; }
+  .osmattrib { position: absolute; right: 0; bottom: 0; background: rgba(255,255,255,.85);
+            font-size: 15px; color: var(--muted); padding: 2px 6px; border-radius: 6px 0 0 0; }
+  .osmattrib a { color: inherit; }
   .maplayer { font-family: inherit; font-size: 16px; font-weight: 700; padding: 6px 14px;
              border-radius: 999px; border: 2px solid var(--line); background: var(--card);
              color: var(--muted); cursor: pointer; }
@@ -225,6 +235,17 @@
   <div id="mainView">
   <h1 id="mainTitle" tabindex="-1">Ticket Saver</h1>
 
+  <!-- OSM map (Nov 18): the home screen, ParkUsher-style — the map is the
+       dominant view, always visible (no collapsed row, no toggle). A real
+       OpenStreetMap tile base with the verdict-coloured curb overlay on
+       top: each curb line is colored by the verdict in effect right now on
+       that side. Pan to move around the nearby streets, zoom in/out, or
+       tap Centre to come back to your position. Tapping a curb opens a
+       detail card only — it never changes the parked side or the timer. -->
+  <div class="card" id="mapCard">
+    <div id="mapBody"></div>
+  </div>
+
   <div id="parkedBanner" class="parked hidden"><span>Parked: <b id="parkedSide">—</b></span><button class="linkbtn change" id="clearSide" aria-label="Not parked here — clear">&#10005;</button></div>
 
 
@@ -252,24 +273,6 @@
     <button class="sidebtn" id="btnSide1"></button>
   </div>
 
-  <!-- Map fix (Nov 18): the small inline map — always visible on the main
-       screen, centred on your position, the current street plus the
-       surrounding streets coloured by their verdicts (same colours as the
-       full Street map). It does not replace the full map below. -->
-  <div class="card minimap" id="miniMapCard">
-    <div id="miniMapBody"></div>
-  </div>
-
-  <!-- Phase 5 (Nov 17): the colored map — an expandable row in the same
-       collapsed-row pattern as the limit timer / plan ahead, so the compact
-       one-screen main view is preserved. The map is the verdict, visualized:
-       each curb line is colored by the verdict in effect right now on that
-       side. Tapping a curb opens a detail card only — it never changes the
-       parked side or the timer. -->
-  <div class="card" id="mapCard">
-    <button class="limitrow" id="mapToggle" aria-expanded="false"><span id="mapToggleText">Street map</span><span class="chev" aria-hidden="true">&rsaquo;</span></button>
-    <div id="mapBody" class="hidden"></div>
-  </div>
 
   <!-- Phase 5 piece 2 (Nov 17): where to move — an expandable row in the
        same collapsed-row pattern as the map / limit timer / plan ahead. It
@@ -499,7 +502,7 @@ function setStreet(slug, opts) {
   CENTERLINE = STREET_DATA[slug].centreline;
   applyStreetData();
   _paidWarnSig = ""; /* the paid warning re-renders for the new street's side */
-  _mapSelected = null; _mapSig = ""; /* the map re-renders for the new street */
+  _mapSelected = null; _mapSig = ""; _osmStreetKey = ""; /* the map re-centres on the new street */
   _whereSig = ""; /* the where-to-move list re-renders for the new street */
   if (liveMode()) liveSetIdle(); /* ends the live lookup (renders with the new DATA) */
   if (opts.manual) setManualPick(slug);
@@ -1636,6 +1639,25 @@ function heroState(key, now, parkedAtMs) {
              detail: "No cleaning windows until then.",
              exception: w.exception || null };
   }
+  /* SE hero (Nov 18, his call): verdict priority — when the posted limit
+     binds sooner than the next cleaning window, the hero leads with the
+     limit and the cleaning window does not appear in the hero at all (it
+     stays in Details / plan-ahead, which never read heroState). This
+     reuses verdictForSideData, the same priority the verdict line already
+     uses: limitExpiry < cleanStart -> limit; a tie -> cleaning (the
+     verdict returns cleaning_soon on a tie). "now" and "season_over"
+     above are unchanged. */
+  var limH = limitForSideKey(key);
+  if (limH) {
+    var vH = verdictForSideData(s, limH, +now, parkedAtMs);
+    if (vH && (vH.kind === "limit" || vH.kind === "limit_expired")) {
+      return { mode: "limit", showIcs: false,
+               title: limitAdjective(limH.minutes) + " limit",
+               count: "ends " + fmtTimeToronto(new Date(vH.deadlineMs)),
+               detail: "",
+               exception: w.exception || null };
+    }
+  }
   /* Next window: date + time only — no "in 2 days, 10 h" counter (his call Nov 17). */
   return { mode: "next", showIcs: true,
            title: fmtDateShortToronto(nw.start) + " · " + fmtTimeRangeShort(nw.start, nw.end),
@@ -1704,11 +1726,13 @@ function renderHero() {
     tg.classList.add("parked-on");
     return;
   }
-  if (st.mode === "limit") {
+  if (st.mode === "limit" && !v) {
     /* Parked on a limit-only side: the verdict line is the limit-only
        verdict (same source as the map and where-to-move) — the Phase 2
        verdict is null for these sides, so without this fallback the
-       hero would show a title with no verdict line. */
+       hero would show a title with no verdict line. An established side
+       whose limit binds (SE hero fix, Nov 18) already has its limit
+       verdict in v — the fallback must not overwrite it. */
     v = limitOnlyVerdictForSideData(liveActiveSides()[key], limitForSideKey(key), Date.now(), parkedAtForVerdict(key));
   }
   hero.classList.remove("hidden");
@@ -1914,7 +1938,6 @@ function renderAll() {
   renderSideCards();
   renderHero();
   renderMap();
-  renderMiniMap();
   renderWhereToMove();
   renderReportCard();
   renderLimit();
@@ -2185,9 +2208,7 @@ function init() {
   el("paidWarnToggle").addEventListener("click", function () {
     setPaidWarnOpen(el("paidWarnBody").classList.contains("hidden"));
   });
-  el("mapToggle").addEventListener("click", function () {
-    setMapOpen(el("mapBody").classList.contains("hidden"));
-  });
+
   el("whereToggle").addEventListener("click", function () {
     setWhereOpen(el("whereBody").classList.contains("hidden"));
   });
@@ -2230,9 +2251,13 @@ function init() {
   var mapBodyEl = el("mapBody");
   if (mapBodyEl) {
     mapBodyEl.addEventListener("click", function (e) {
+      if (_osmSuppressClick) return; /* a drag just ended — not a tap */
       var t = e.target || e.srcElement;
       while (t && t !== mapBodyEl) {
         if (t.getAttribute) {
+          var zm = t.getAttribute("data-osm-zoom");
+          if (zm) { osmZoomBy(+zm); return; }
+          if (t.getAttribute("data-osm-recentre") !== null) { osmRecentre(); return; }
           var rep = t.getAttribute("data-report-side");
           if (rep) { openReportForm(rep); return; }
           var layer = t.getAttribute("data-map-layer");
@@ -2252,6 +2277,19 @@ function init() {
         if (side2) { e.preventDefault(); mapSelectCurb(side2); }
       }
     });
+    /* OSM pan / zoom: pointer drag (one finger / mouse), two-finger pinch,
+       wheel, double-click. Listeners live on the stable mapBody (its
+       innerHTML is rebuilt on view change, so nothing inside it may own
+       them). Pointer capture is set on mapBody, with a try/catch — an
+       unguarded setPointerCapture can throw and kill the whole gesture
+       (jsm-radio lesson, Nov 5). A drag suppresses the click that follows
+       it, so a pan never opens a curb detail card. */
+    mapBodyEl.addEventListener("pointerdown", osmOnPointerDown);
+    mapBodyEl.addEventListener("pointermove", osmOnPointerMove);
+    mapBodyEl.addEventListener("pointerup", osmOnPointerUp);
+    mapBodyEl.addEventListener("pointercancel", osmOnPointerUp);
+    mapBodyEl.addEventListener("wheel", osmOnWheel, { passive: false });
+    mapBodyEl.addEventListener("dblclick", osmOnDblClick);
   }
   ["planDate", "planTime"].forEach(function (id) {
     var n = el(id);
@@ -2293,6 +2331,7 @@ function init() {
     else { showMain(); markSwiped(); }
   }
   document.addEventListener("touchstart", function (e) {
+    if (osmEventInMap(e)) return; /* a map pan is not a screen swipe */
     gs = (e.touches && e.touches.length === 1)
       ? { x: e.touches[0].clientX, y: e.touches[0].clientY } : null;
   }, { passive: true });
@@ -2302,6 +2341,7 @@ function init() {
     }
   });
   document.addEventListener("mousedown", function (e) {
+    if (osmEventInMap(e)) return; /* a map drag is not a screen swipe */
     if (e.button === 0) gs = { x: e.clientX, y: e.clientY };
   });
   document.addEventListener("mouseup", function (e) {
@@ -2329,7 +2369,6 @@ function init() {
   setInterval(function () {
     renderHero();
     try { renderMap(); } catch (e) { /* a map fault must never swallow the hero tick */ }
-    try { renderMiniMap(); } catch (e) { /* the inline map must never swallow the hero tick either */ }
     try { renderLimit(); } catch (e) { /* a timer fault must never swallow the hero tick */ }
     try { renderPlanAhead(); } catch (e) { /* a plan-ahead fault must never swallow the hero tick */ }
   }, 30000);
@@ -3996,7 +4035,7 @@ async function liveNearbySweepInner(fixLat, fixLon, currentStreetName, key, gen)
         LIVE_NEARBY.streets[r.slug] = r;
         LIVE_NEARBY.status = "ready";
         if (typeof renderWhereToMove === "function") renderWhereToMove();
-        if (typeof renderMiniMap === "function") renderMiniMap(); /* the inline map draws each landed street as it arrives */
+        if (typeof renderMap === "function") renderMap(); /* the OSM map draws each landed street as it arrives */
       }
     }
     if (LIVE_NEARBY.status === "loading") LIVE_NEARBY.status = "ready"; /* no candidate yielded a result — the list is just the current street */
@@ -4318,10 +4357,10 @@ function liveJunctionForMap() {
 }
 
 
-/* ---- Phase 5: the colored map (Nov 17) ----
-   An SVG of the current street, drawn from the REAL centreline geometry
-   (the same along-track snaps the paid strip already uses — no basemap
-   tiles, no server, offline-friendly). Two curb lines, one per side,
+/* ---- Phase 5: the colored map (Nov 17; OSM base Nov 18) ----
+   A real OpenStreetMap tile base with the verdict overlay drawn on top,
+   the overlay from the REAL centreline geometry (the same along-track
+   snaps the paid strip already uses). Two curb lines, one per side,
    colored by the rule in effect RIGHT NOW, computed by REUSING the Phase 2
    verdict functions per side — no forked verdict logic anywhere here.
    Curb-color rule (the map IS the verdict, visualized):
@@ -5100,11 +5139,263 @@ function mapDetailHtml(key, nowMs) {
   if (d.reportable !== false) s += '<div style="margin-top:8px"><button class="linkbtn" data-report-side="' + esc(d.key) + '">Report a sign here</button></div>';
   return s + '</div>';
 }
-/* The SVG + legend + (when a curb is tapped) the detail card. */
+/* ---- OSM map (Nov 18): the home screen, ParkUsher-style ----
+   The drawn SVG street-map base is replaced by a real OpenStreetMap tile
+   base with the existing verdict-colour overlay drawn on top of it. The
+   overlay is projected from the SAME centreline geometry the old map used
+   (mapGeometry: road, curbs, paid dots, home, junction roads, nearby
+   streets) — same colours, same verdict logic, same city-data rules — so
+   a curb never shows two colours and no verdict logic moved. The tiles
+   are a map fetch, not a data upload: no user data is sent anywhere, no
+   new server, light use (one 256 px tile per grid cell at the current
+   zoom). Hand-rolled tile layer, not Leaflet: the page stays a single
+   self-contained file with no external JS/CSS dependency (a CDN outage
+   must never blank the verdicts — the overlay + hero + lists all still
+   work with no tiles), and the projection is pure functions the Node
+   suites can drive without a browser. Tiles: tile.openstreetmap.org,
+   attribution "© OpenStreetMap contributors" on the map.
+   The map is pannable (pointer drag, one finger / mouse), zoomable
+   (+/- buttons, wheel, double-click, two-finger pinch), and re-centres
+   on the position with the Centre button. The home marker sits at the
+   exact centre of the view on load and after Centre (the view centres
+   on the snapped marker, not the raw address — the snap is ~25 m off
+   on the home street) — the rendered centring the verifier checks is the
+   marker at the container centre,
+   not an SVG viewBox. The house label sits ABOVE the marker (the old
+   SVG hung the house number 20 m below the tick, which read as a second, lower
+   marker). The mini-map is subsumed: the main map IS the overview — the
+   tiles already show the surrounding streets, and the live nearby-sweep
+   curbs are drawn on it in their verdict colours, as the mini-map did.
+   Geometry note: mapGeometry's viewBox framing is retained as the
+   geometry engine's bounding frame (its centring/aspect checks still
+   hold), but it is no longer rendered — the tiles carry the street
+   names, junctions and road shape, so the old title/subtitle/label
+   placement has nothing to draw. */
+var OSM_TILE_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
+var OSM_ATTRIBUTION_URL = "https://www.openstreetmap.org/copyright";
+var OSM_ZOOM_DEFAULT = 17; /* street level: ~0.85 m/px at Montreal's latitude */
+var OSM_ZOOM_MIN = 15, OSM_ZOOM_MAX = 19;
+var OSM_MAP_H = 400; /* the home-screen map is the dominant view */
+var _osmView = null; /* { lat, lon, zoom } — the view centre */
+var _osmStreetKey = "";
+function osmTileUrl(z, x, y) {
+  return OSM_TILE_URL.replace("{z}", z).replace("{x}", x).replace("{y}", y);
+}
+/* Web Mercator, pure: world pixels at a zoom (tile size 256). */
+function osmLatLngToWorld(lat, lon, zoom) {
+  var s = 256 * Math.pow(2, zoom);
+  var x = (lon + 180) / 360 * s;
+  var latR = lat * Math.PI / 180;
+  var y = (1 - Math.log(Math.tan(latR) + 1 / Math.cos(latR)) / Math.PI) / 2 * s;
+  return [x, y];
+}
+function osmWorldToLatLng(x, y, zoom) {
+  var s = 256 * Math.pow(2, zoom);
+  var lon = x / s * 360 - 180;
+  var n = Math.PI * (1 - 2 * y / s);
+  var lat = 180 / Math.PI * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n)));
+  return [lat, lon];
+}
+/* Which tiles cover the view, and where each sits in the container.
+   Pure — the suites drive it without a browser. x wraps at the
+   antimeridian; y is clamped to the valid tile range. */
+function osmTilesForView(lat, lon, zoom, w, h) {
+  var c = osmLatLngToWorld(lat, lon, zoom);
+  var left = c[0] - w / 2, top = c[1] - h / 2;
+  var n = Math.pow(2, zoom);
+  var x0 = Math.floor(left / 256), x1 = Math.floor((left + w - 1) / 256);
+  var y0 = Math.max(0, Math.floor(top / 256)), y1 = Math.min(n - 1, Math.floor((top + h - 1) / 256));
+  var out = [];
+  for (var ty = y0; ty <= y1; ty++) {
+    for (var tx = x0; tx <= x1; tx++) {
+      var wx = ((tx % n) + n) % n;
+      out.push({ z: zoom, x: wx, y: ty, url: osmTileUrl(zoom, wx, ty),
+                 left: tx * 256 - left, top: ty * 256 - top });
+    }
+  }
+  return out;
+}
+/* The reference point the local-metre geometry is anchored to (the
+   current street's house, baked or live) — the origin the overlay
+   projection uses. */
+function osmRefLatLon() {
+  var src = mapSource();
+  if (src && !src.error && typeof src.refLat === "number" && typeof src.refLon === "number") {
+    return { lat: src.refLat, lon: src.refLon };
+  }
+  /* A ready live lookup always carries the house point; a fixture that
+     omits it falls back to the baked street's home (the live fixture
+     streets ARE the baked streets) — never a null centre, which would
+     throw the render. */
+  return { lat: HOME_LAT, lon: HOME_LON };
+}
+/* The home MARKER's position: the reference address snapped onto the
+   centreline (mapGeometry's home point). The snap sits up to ~25 m off
+   the raw address (24.8 m on the home street), and the marker is what the user
+   reads as their position — so the view centres HERE, not on the raw
+   address. When no geometry exists, the reference point is the centre. */
+function osmHomeLatLon() {
+  var ref = osmRefLatLon();
+  var g = null;
+  try { g = mapGeometry(); } catch (e) { g = null; }
+  if (g && g.ok && g.home) {
+    var coslat = Math.cos(ref.lat * Math.PI / 180);
+    return { lat: ref.lat + g.home.y / 110540, lon: ref.lon + g.home.x / (111320 * coslat) };
+  }
+  return ref;
+}
+function osmStreetKey() {
+  return liveMode() ? ("live:" + (LIVE.streetSlug || "")) : ("baked:" + currentSlug());
+}
+function osmDefaultView() {
+  var h = osmHomeLatLon();
+  return { lat: h.lat, lon: h.lon, zoom: OSM_ZOOM_DEFAULT };
+}
+/* The current view; a street change (or a live lookup landing on a new
+   street) re-centres on the new position at the default zoom. */
+function osmView() {
+  var k = osmStreetKey();
+  if (!_osmView || _osmStreetKey !== k) { _osmView = osmDefaultView(); _osmStreetKey = k; }
+  return _osmView;
+}
+function osmSetView(lat, lon, zoom) {
+  if (typeof lat !== "number" || typeof lon !== "number") return osmView();
+  zoom = (typeof zoom === "number") ? Math.max(OSM_ZOOM_MIN, Math.min(OSM_ZOOM_MAX, Math.round(zoom))) : osmView().zoom;
+  lat = Math.max(-85, Math.min(85, lat));
+  lon = ((lon + 180) % 360 + 360) % 360 - 180;
+  _osmView = { lat: lat, lon: lon, zoom: zoom };
+  _osmStreetKey = osmStreetKey();
+  renderMap();
+  return _osmView;
+}
+function osmRecentre() {
+  _osmView = osmDefaultView();
+  _osmStreetKey = osmStreetKey();
+  renderMap();
+  return _osmView;
+}
+/* Container size: the real element in the browser, the 614 px card width
+   in the Node suites (whose stubs carry no offsetWidth). */
+function osmMapSize() {
+  var b = el("mapBody");
+  var w = (b && b.offsetWidth) ? b.offsetWidth : 614;
+  return { w: w, h: OSM_MAP_H };
+}
+/* Project a local-metre point (mapGeometry frame, ref = the house) to
+   container pixels in the given view. */
+function osmProjectLocal(x, y, refLat, refLon, view, size) {
+  var coslat = Math.cos(refLat * Math.PI / 180);
+  var lat = refLat + y / 110540, lon = refLon + x / (111320 * coslat);
+  var w = osmLatLngToWorld(lat, lon, view.zoom);
+  var c = osmLatLngToWorld(view.lat, view.lon, view.zoom);
+  return [w[0] - c[0] + size.w / 2, w[1] - c[1] + size.h / 2];
+}
+function osmPathD(list, refLat, refLon, view, size) {
+  var d = "";
+  list.forEach(function (pt, i) {
+    var q = osmProjectLocal(pt.x, pt.y, refLat, refLon, view, size);
+    d += (i === 0 ? "M" : "L") + q[0].toFixed(1) + " " + q[1].toFixed(1);
+  });
+  return d;
+}
+/* Pan by container pixels: dragging the map right moves the centre west,
+   so the content follows the finger / mouse. */
+function osmPanBy(dx, dy) {
+  var v = osmView(), size = osmMapSize();
+  var c = osmLatLngToWorld(v.lat, v.lon, v.zoom);
+  var ll = osmWorldToLatLng(c[0] - dx, c[1] - dy, v.zoom);
+  return osmSetView(ll[0], ll[1], v.zoom);
+}
+/* Zoom around a container point (px, py): the place under that point
+   stays under it. */
+function osmZoomAt(px, py, zoom) {
+  var v = osmView(), size = osmMapSize();
+  zoom = Math.max(OSM_ZOOM_MIN, Math.min(OSM_ZOOM_MAX, zoom));
+  if (zoom === v.zoom) return v;
+  var c = osmLatLngToWorld(v.lat, v.lon, v.zoom);
+  var wx = c[0] + px - size.w / 2, wy = c[1] + py - size.h / 2;
+  var ll = osmWorldToLatLng(wx, wy, v.zoom);
+  var nc = osmLatLngToWorld(ll[0], ll[1], zoom);
+  var cll = osmWorldToLatLng(nc[0] - (px - size.w / 2), nc[1] - (py - size.h / 2), zoom);
+  return osmSetView(cll[0], cll[1], zoom);
+}
+function osmZoomBy(d, cx, cy) {
+  var size = osmMapSize();
+  if (typeof cx !== "number") cx = size.w / 2;
+  if (typeof cy !== "number") cy = size.h / 2;
+  return osmZoomAt(cx, cy, osmView().zoom + d);
+}
+/* ---- nearby streets on the OSM map (subsumes the mini-map) ----
+   The live nearby sweep's streets draw their verdict-coloured curbs on
+   the main map, in the current street's local-metre frame — the same
+   projection the old mini-map used, the same verdict rule (verdict,
+   then the limit-only fallback). In baked mode there is no sweep, so
+   only the current street draws. */
+function osmNearbySigns(result) {
+  var counts = {};
+  (result.attributed || []).forEach(function (s) {
+    if (!s || !s.side || typeof s.cross_track_m !== "number") return;
+    counts[s.side] = counts[s.side] || { pos: 0, neg: 0 };
+    if (s.cross_track_m >= 0) counts[s.side].pos++; else counts[s.side].neg++;
+  });
+  var homeKey = (typeof result.houseNumber === "number")
+    ? ((result.houseNumber % 2 === 0) ? "even" : "odd") : null;
+  var out = {};
+  ["even", "odd"].forEach(function (k) {
+    var c = counts[k];
+    if (c && c.pos !== c.neg) { out[k] = c.pos > c.neg ? 1 : -1; return; }
+    if (typeof result.houseCt === "number" && result.houseCt !== 0 && homeKey) {
+      var homeSign = result.houseCt > 0 ? 1 : -1;
+      out[k] = (k === homeKey) ? homeSign : -homeSign;
+      return;
+    }
+    out[k] = 0;
+  });
+  return out;
+}
+function osmNearbyNormal(list, j) {
+  var p = list[j], q = list[Math.min(j + 1, list.length - 1)], r = list[Math.max(j - 1, 0)];
+  var dx = q.x - r.x, dy = q.y - r.y, len = Math.sqrt(dx * dx + dy * dy) || 1;
+  return [-dy / len, dx / len];
+}
+function osmNearbyStreetPts(result, refLat, refLon) {
+  var cl = result.centreline, cum = liveCumAlong(cl, refLat, refLon);
+  var houseAlong = result.houseAlong, smin = result.segment.min, smax = result.segment.max;
+  var pts = [];
+  for (var i = 0; i < cl.length - 1; i++) {
+    var a = mapXY(cl[i][0], cl[i][1], refLat, refLon);
+    var b = mapXY(cl[i + 1][0], cl[i + 1][1], refLat, refLon);
+    var ra = cum[i] - houseAlong, rb = cum[i + 1] - houseAlong;
+    var lo = Math.min(ra, rb), hi = Math.max(ra, rb);
+    if (hi < smin || lo > smax) continue;
+    var t0 = 0, t1 = 1;
+    if (ra < smin) t0 = Math.max(t0, (smin - ra) / (rb - ra));
+    if (ra > smax) t0 = Math.max(t0, (ra - smax) / (ra - rb));
+    if (rb < smin) t1 = Math.min(t1, (smin - ra) / (rb - ra));
+    if (rb > smax) t1 = Math.min(t1, (ra - smax) / (ra - rb));
+    if (t1 < t0) continue;
+    pts.push({ x: a[0] + (b[0] - a[0]) * t0, y: a[1] + (b[1] - a[1]) * t0, rel: ra + (rb - ra) * t0 });
+    pts.push({ x: a[0] + (b[0] - a[0]) * t1, y: a[1] + (b[1] - a[1]) * t1, rel: ra + (rb - ra) * t1 });
+  }
+  return pts;
+}
+function osmNearbyColor(sides, key, nowMs) {
+  var side = sides && sides[key];
+  if (!side) return "grey";
+  var v = verdictForSideData(side, null, nowMs, null);
+  if (!v) v = limitOnlyVerdictForSideData(side, null, nowMs, null);
+  return curbColorForVerdict(v);
+}
+/* The OSM map HTML: tiles + verdict overlay + controls + legend. The
+   overlay SVG is sized in container pixels (viewBox 0 0 W H), so the
+   rendered centring is the marker at the container centre — checkable
+   from the projected home point, not from a viewBox. */
 function mapSvgHtml(nowMs, geom, colors) {
   nowMs = nowMs || Date.now();
   if (!geom) geom = mapGeometry();
   if (!colors) colors = mapCurbColors(nowMs);
+  var view = osmView();
+  var size = osmMapSize();
   var s = '<div style="display:flex;gap:8px;justify-content:center;margin-bottom:10px">'
     + '<button class="maplayer" data-map-layer="paid" aria-pressed="' + MAP_LAYERS.paid + '">Paid</button>'
     + '<button class="maplayer" data-map-layer="cleaning" aria-pressed="' + MAP_LAYERS.cleaning + '">Cleaning / no-parking</button>'
@@ -5112,16 +5403,38 @@ function mapSvgHtml(nowMs, geom, colors) {
   if (!geom.ok) {
     return s + '<div class="note">' + esc(geom.message || "No street map here.") + '</div>';
   }
-  var sides = liveActiveSides();
-  s += '<div class="mapsvg"><svg viewBox="' + geom.viewBox + '" role="img" aria-label="Map of '
-    + esc(geom.streetName || "this street") + ' with parking rules by side">';
-  s += '<path d="' + mapPathD(geom.road) + '" fill="none" style="stroke:var(--line)" stroke-width="9" stroke-linecap="round"/>';
-  (geom.junctionRoads || []).forEach(function (jr) {
-    s += '<path d="' + mapPathD(jr.pts) + '" fill="none" style="stroke:var(--line)" stroke-width="9" stroke-linecap="round"/>';
+  var ref = osmRefLatLon();
+  var refLat = ref.lat, refLon = ref.lon;
+  var tiles = osmTilesForView(view.lat, view.lon, view.zoom, size.w, size.h);
+  s += '<div class="osmmap" id="osmMap">';
+  tiles.forEach(function (t) {
+    s += '<img class="osmtile" src="' + t.url + '" alt="" draggable="false" style="left:' + t.left.toFixed(0) + 'px;top:' + t.top.toFixed(0) + 'px">';
   });
+  s += '<svg class="osmsvg" width="' + size.w + '" height="' + size.h + '" viewBox="0 0 ' + size.w + ' ' + size.h + '" role="img" aria-label="Map of '
+    + esc(geom.streetName || "this street") + ' with parking rules by side">';
+  /* Nearby streets first (under the current street), from the nearby
+     sweep's own results — same data, same verdicts as where-to-move. */
+  var nearby = (typeof liveNearbyMapEntries === "function") ? liveNearbyMapEntries() : [];
+  nearby.forEach(function (n) {
+    if (n.name === geom.streetName) return;
+    var pts = osmNearbyStreetPts(n.result, refLat, refLon);
+    if (pts.length < 2) return;
+    var signs = osmNearbySigns(n.result);
+    ["even", "odd"].forEach(function (k) {
+      if (!signs[k]) return;
+      var curb = pts.map(function (pt, j) {
+        var nn = osmNearbyNormal(pts, j);
+        return { x: pt.x + nn[0] * MAP_CURB_M * signs[k], y: pt.y + nn[1] * MAP_CURB_M * signs[k] };
+      });
+      s += '<path d="' + osmPathD(curb, refLat, refLon, view, size) + '" fill="none" style="stroke:'
+        + mapColorStroke(osmNearbyColor(n.result.sides, k, nowMs))
+        + '" stroke-width="4" stroke-linecap="round"/>';
+    });
+  });
+  /* Current street's curbs, coloured by the verdict in effect right now. */
   Object.keys(geom.curbs).forEach(function (k) {
     var color = colors[k] || "grey";
-    var d = mapPathD(geom.curbs[k]);
+    var d = osmPathD(geom.curbs[k], refLat, refLon, view, size);
     s += '<path d="' + d + '" fill="none" style="stroke:' + mapColorStroke(color) + '" stroke-width="4.5" stroke-linecap="round"/>';
     s += '<path class="mapcurb-hit" data-map-side="' + esc(k) + '" tabindex="0" role="button" aria-label="'
       + esc(mapCurbAriaLabel(k, nowMs)) + ' — '
@@ -5129,47 +5442,25 @@ function mapSvgHtml(nowMs, geom, colors) {
       + '" d="' + d + '" fill="none" stroke="rgba(0,0,0,0)" stroke-width="18" stroke-linecap="round"/>';
   });
   geom.dots.forEach(function (dot) {
-    s += '<circle cx="' + dot.x.toFixed(1) + '" cy="' + (-dot.y).toFixed(1)
+    var q = osmProjectLocal(dot.x, dot.y, refLat, refLon, view, size);
+    s += '<circle cx="' + q[0].toFixed(1) + '" cy="' + q[1].toFixed(1)
       + '" r="4.5" fill="#d97706" stroke="#fff" stroke-width="1.5"/>';
   });
   if (geom.home) {
-    var hx = geom.home.x, hy = -geom.home.y;
-    var nx = geom.home.n[0], ny = -geom.home.n[1];
-    s += '<line x1="' + (hx - nx * 7).toFixed(1) + '" y1="' + (hy - ny * 7).toFixed(1)
-      + '" x2="' + (hx + nx * 7).toFixed(1) + '" y2="' + (hy + ny * 7).toFixed(1)
-      + '" style="stroke:var(--ink)" stroke-width="2"/>';
+    var hq = osmProjectLocal(geom.home.x, geom.home.y, refLat, refLon, view, size);
+    s += '<circle cx="' + hq[0].toFixed(1) + '" cy="' + hq[1].toFixed(1)
+      + '" r="7" fill="var(--accent)" stroke="#fff" stroke-width="2"/>';
     if (geom.home.label) {
-      s += '<text x="' + hx.toFixed(1) + '" y="' + (hy + 20).toFixed(1)
-        + '" font-size="' + (geom.home.fontSize || 11) + '" font-weight="bold" style="fill:var(--ink)" text-anchor="middle">' + esc(geom.home.label) + '</text>';
+      s += '<text x="' + hq[0].toFixed(1) + '" y="' + (hq[1] - 12).toFixed(1)
+        + '" font-size="11" font-weight="bold" style="fill:var(--ink)" text-anchor="middle">' + esc(geom.home.label) + '</text>';
     }
   }
-  /* Title: the street name, centred in the top band — never on the road.
-     Subtitle: the bracketing junctions, when the road is drawn past them. */
-  if (geom.title) {
-    s += '<text x="' + geom.title.x.toFixed(1) + '" y="' + geom.title.y.toFixed(1)
-      + '" font-size="' + geom.title.fontSize + '" font-weight="bold" style="fill:var(--ink)" text-anchor="middle">'
-      + esc(geom.title.text) + '</text>';
-  }
-  if (geom.subtitle) {
-    s += '<text x="' + geom.subtitle.x.toFixed(1) + '" y="' + geom.subtitle.y.toFixed(1)
-      + '" font-size="' + geom.subtitle.fontSize + '" style="fill:var(--muted)" text-anchor="middle">'
-      + esc(geom.subtitle.text) + '</text>';
-  }
-  /* Every label was clamped into the viewBox by mapGeometry — render as
-     placed. Interior labels ride along the road (rotated, never
-     upside-down) with a leader line from the junction on the road. */
-  (geom.labels || []).forEach(function (lb) {
-    if (lb.leader) {
-      s += '<line x1="' + lb.leader.x1.toFixed(1) + '" y1="' + lb.leader.y1.toFixed(1)
-        + '" x2="' + lb.leader.x2.toFixed(1) + '" y2="' + lb.leader.y2.toFixed(1)
-        + '" style="stroke:var(--muted)" stroke-width="1"/>';
-    }
-    s += '<text x="' + lb.x.toFixed(1) + '" y="' + lb.y.toFixed(1)
-      + '" font-size="' + lb.fontSize + '" style="fill:var(--muted)" text-anchor="' + lb.anchor + '"'
-      + (lb.angle ? ' transform="rotate(' + lb.angle.toFixed(1) + ' ' + lb.x.toFixed(1) + ' ' + lb.y.toFixed(1) + ')"' : '')
-      + '>' + esc(lb.text) + '</text>';
-  });
-  s += '</svg></div>';
+  s += '</svg>';
+  s += '<div class="osmzoom"><button data-osm-zoom="1" aria-label="Zoom in">+</button>'
+    + '<button data-osm-zoom="-1" aria-label="Zoom out">&minus;</button>'
+    + '<button class="wide" data-osm-recentre aria-label="Centre on your position">Centre</button></div>';
+  s += '<div class="osmattrib"><a href="' + OSM_ATTRIBUTION_URL + '">&copy; OpenStreetMap contributors</a></div>';
+  s += '</div>';
   s += '<div class="maplegend"><span class="mapsw" style="background:var(--accent)"></span>You can stay until the deadline'
     + ' &nbsp; <span class="mapsw" style="background:var(--fine-ink)"></span>Cannot park / stay now'
     + ' &nbsp; <span class="mapsw" style="background:#b3beb6"></span>Not established';
@@ -5190,26 +5481,17 @@ function mapSvgHtml(nowMs, geom, colors) {
       + esc(geom.nearestJunction.name) + ", " + Math.round(geom.nearestJunction.distanceM)
       + " m away.</div>";
   }
-  s += '<div class="note" style="margin-top:6px">Schematic map — curbs drawn from the street&rsquo;s centreline. Tap a curb for its rule.</div>';
+  s += '<div class="note" style="margin-top:6px">Curbs drawn from the street&rsquo;s centreline, on the real map. Tap a curb for its rule.</div>';
   if (_mapSelected) s += mapDetailHtml(_mapSelected, nowMs);
   return s;
 }
 function mapBodyHtml(nowMs, geom, colors) { return mapSvgHtml(nowMs, geom, colors); }
-function setMapOpen(open) {
-  var body = el("mapBody");
-  if (!body) return;
-  body.classList.toggle("hidden", !open);
-  var b = el("mapToggle");
-  if (b) {
-    b.setAttribute("aria-expanded", open ? "true" : "false");
-    b.classList.toggle("open", open);
-  }
-  if (open) renderMap();
-}
-function mapOpen() {
-  var body = el("mapBody");
-  return !!(body && !body.classList.contains("hidden"));
-}
+/* The OSM map is the home screen: always open, no toggle, no collapsed
+   row. setMapOpen / mapOpen stay as no-op compatibility shims (callers
+   such as whereShowOnMap still call setMapOpen(true)) — the map cannot
+   be closed. */
+function setMapOpen(open) { return mapOpen(); }
+function mapOpen() { return true; }
 /* Tapping a curb opens (or closes, on a second tap) its detail card — and
    changes nothing else. Read-only info: never the parked side, never the
    timer. */
@@ -5261,7 +5543,7 @@ function renderMap(nowMs) {
   var card = el("mapCard");
   if (!card) return;
   var body = el("mapBody");
-  if (!body || body.classList.contains("hidden")) return;
+  if (!body) return;
   nowMs = nowMs || Date.now();
   var geom = mapGeometry();
   var colors = mapCurbColors(nowMs, geom);
@@ -5274,182 +5556,16 @@ function renderMap(nowMs) {
   var jn = (typeof liveJunctionForMap === "function") ? liveJunctionForMap() : null;
   var jSig = jn ? ("j:" + (jn.sameStreet ? jn.sameStreet.status : "-") + "/" + (jn.crossStreet ? jn.crossStreet.status : "-")) : "j:-";
   var staleSig = (liveMode() && LIVE.cacheStale) ? ("stale:" + LIVE.cacheStale.savedAt) : "fresh";
+  var _osmV = osmView(), _osmSize = osmMapSize();
   var sig = (liveMode() ? "live:" + (LIVE.streetSlug || "") : "baked:" + currentSlug())
+    + "|osm:" + _osmV.lat.toFixed(5) + "," + _osmV.lon.toFixed(5) + "," + _osmV.zoom
+    + "," + _osmSize.w + "x" + _osmSize.h
     + "|" + JSON.stringify(colors) + "|" + (MAP_LAYERS.paid ? "P" : "p") + (MAP_LAYERS.cleaning ? "C" : "c")
     + "|" + paidSig + "|" + (_mapSelected || "-") + "|" + jSig + "|" + staleSig + "|"
     + (geom && geom.ok ? geom.viewBox : "nogeo:" + (geom && geom.reason || "?"));
   if (sig === _mapSig) return;
   _mapSig = sig;
   body.innerHTML = mapBodyHtml(nowMs, geom, colors);
-}
-
-/* ---- Map fix (Nov 18): the small inline map ----
-   Always visible on the main screen (never behind the collapsed Street map
-   row): a short strip (180 px tall, 560 x 280 m centred on the position)
-   showing the current street plus the surrounding streets from the nearby
-   sweep, each curb coloured by the SAME verdicts as the full map and
-   where-to-move — no second verdict path. The current street reuses the
-   full map's geometry (mapGeometry); a nearby street is projected into
-   the same local-metre frame from its own centreline + segment + house
-   position, which the sweep already landed. In baked mode there is no
-   sweep, so only the current street draws, with a plain line saying the
-   live lookup adds the streets around you. */
-var MINI_MAP_W_M = 560;
-var MINI_MAP_H_M = 280;
-var _miniMapHtml = "";
-/* A nearby street's curb colour: its own sides' verdicts, same rule as
-   where-to-move (verdict, then the limit-only fallback), same colours. */
-function miniMapNearbyColor(sides, key, nowMs) {
-  var side = sides && sides[key];
-  if (!side) return "grey";
-  var v = verdictForSideData(side, null, nowMs, null);
-  if (!v) v = limitOnlyVerdictForSideData(side, null, nowMs, null);
-  return curbColorForVerdict(v);
-}
-/* Which cross-track sign each side of a nearby street sits on: the
-   attributed signs' majority where they exist, else the reference
-   address — the same rule as mapSideCtSigns, but keyed even/odd (a
-   nearby street's sides are always even/odd, even on a baked page). */
-function miniMapSigns(result) {
-  var counts = {};
-  (result.attributed || []).forEach(function (s) {
-    if (!s || !s.side || typeof s.cross_track_m !== "number") return;
-    counts[s.side] = counts[s.side] || { pos: 0, neg: 0 };
-    if (s.cross_track_m >= 0) counts[s.side].pos++; else counts[s.side].neg++;
-  });
-  var homeKey = (typeof result.houseNumber === "number")
-    ? ((result.houseNumber % 2 === 0) ? "even" : "odd") : null;
-  var out = {};
-  ["even", "odd"].forEach(function (k) {
-    var c = counts[k];
-    if (c && c.pos !== c.neg) { out[k] = c.pos > c.neg ? 1 : -1; return; }
-    if (typeof result.houseCt === "number" && result.houseCt !== 0 && homeKey) {
-      var homeSign = result.houseCt > 0 ? 1 : -1;
-      out[k] = (k === homeKey) ? homeSign : -homeSign;
-      return;
-    }
-    out[k] = 0;
-  });
-  return out;
-}
-function miniMapNormal(list, j) {
-  var p = list[j], q = list[Math.min(j + 1, list.length - 1)], r = list[Math.max(j - 1, 0)];
-  var dx = q.x - r.x, dy = q.y - r.y, len = Math.sqrt(dx * dx + dy * dy) || 1;
-  return [-dy / len, dx / len];
-}
-/* One nearby street's centreline, projected into the current street's
-   local-metre frame and clipped to ITS segment (along-track metres from
-   its own reference house). Returns [{x, y, rel}] in local metres. */
-function miniMapStreetPts(result, refLat, refLon) {
-  var cl = result.centreline, cum = liveCumAlong(cl, refLat, refLon);
-  var houseAlong = result.houseAlong, smin = result.segment.min, smax = result.segment.max;
-  var pts = [];
-  for (var i = 0; i < cl.length - 1; i++) {
-    var a = mapXY(cl[i][0], cl[i][1], refLat, refLon);
-    var b = mapXY(cl[i + 1][0], cl[i + 1][1], refLat, refLon);
-    var ra = cum[i] - houseAlong, rb = cum[i + 1] - houseAlong;
-    var lo = Math.min(ra, rb), hi = Math.max(ra, rb);
-    if (hi < smin || lo > smax) continue;
-    var t0 = 0, t1 = 1;
-    if (ra < smin) t0 = Math.max(t0, (smin - ra) / (rb - ra));
-    if (ra > smax) t0 = Math.max(t0, (ra - smax) / (ra - rb));
-    if (rb < smin) t1 = Math.min(t1, (smin - ra) / (rb - ra));
-    if (rb > smax) t1 = Math.min(t1, (ra - smax) / (ra - rb));
-    if (t1 < t0) continue;
-    pts.push({ x: a[0] + (b[0] - a[0]) * t0, y: a[1] + (b[1] - a[1]) * t0, rel: ra + (rb - ra) * t0 });
-    pts.push({ x: a[0] + (b[0] - a[0]) * t1, y: a[1] + (b[1] - a[1]) * t1, rel: ra + (rb - ra) * t1 });
-  }
-  return pts;
-}
-function miniMapSvgHtml(nowMs, geom) {
-  nowMs = nowMs || Date.now();
-  if (!geom) geom = mapGeometry();
-  if (!geom.ok) return '<div class="note">' + esc(geom.message || "No street map here.") + '</div>';
-  var src = mapSource();
-  var refLat = src.refLat, refLon = src.refLon;
-  var hx = geom.home ? geom.home.x : 0, hy = geom.home ? -geom.home.y : 0;
-  var vbX = hx - MINI_MAP_W_M / 2, vbY = hy - MINI_MAP_H_M / 2;
-  var vb = vbX.toFixed(1) + " " + vbY.toFixed(1) + " " + MINI_MAP_W_M + " " + MINI_MAP_H_M;
-  var colors = mapCurbColors(nowMs, geom);
-  var s = '<svg viewBox="' + vb + '" role="img" aria-label="Small map of '
-    + esc(geom.streetName || "this street") + ' and the streets around it, coloured by parking rules">';
-  /* Surrounding streets first (under the current street), from the nearby
-     sweep's own results — same data, same verdicts as where-to-move. */
-  var nearby = (typeof liveNearbyMapEntries === "function") ? liveNearbyMapEntries() : [];
-  nearby.forEach(function (n) {
-    if (n.name === geom.streetName) return;
-    var pts = miniMapStreetPts(n.result, refLat, refLon);
-    if (pts.length < 2) return;
-    s += '<path d="' + mapPathD(pts) + '" fill="none" style="stroke:var(--line)" stroke-width="7" stroke-linecap="round"/>';
-    var signs = miniMapSigns(n.result);
-    ["even", "odd"].forEach(function (k) {
-      if (!signs[k]) return;
-      var curb = pts.map(function (p, j) {
-        var nn = miniMapNormal(pts, j);
-        return { x: p.x + nn[0] * MAP_CURB_M * signs[k], y: p.y + nn[1] * MAP_CURB_M * signs[k] };
-      });
-      s += '<path d="' + mapPathD(curb) + '" fill="none" style="stroke:'
-        + mapColorStroke(miniMapNearbyColor(n.result.sides, k, nowMs))
-        + '" stroke-width="4" stroke-linecap="round"/>';
-    });
-    /* The name rides at the point on that street CLOSEST to the position
-       (the segment midpoint can sit hundreds of metres away, off the
-       strip) — clamped inside the frame so it never runs off the edge. */
-    var closest = null, closestD = Infinity;
-    pts.forEach(function (p) {
-      var d = (p.x - hx) * (p.x - hx) + (p.y - (geom.home ? geom.home.y : 0)) * (p.y - (geom.home ? geom.home.y : 0));
-      if (d < closestD) { closestD = d; closest = p; }
-    });
-    if (closest) {
-      var lx = Math.max(vbX + 30, Math.min(vbX + MINI_MAP_W_M - 30, closest.x));
-      var ly = -closest.y - 8;
-      if (ly >= vbY + 14 && ly <= vbY + MINI_MAP_H_M - 8) {
-        s += '<text x="' + lx.toFixed(1) + '" y="' + ly.toFixed(1)
-          + '" font-size="11" style="fill:var(--muted)" text-anchor="middle">' + esc(n.name) + '</text>';
-      }
-    }
-  });
-  /* Current street on top, from the full map's geometry. */
-  s += '<path d="' + mapPathD(geom.road) + '" fill="none" style="stroke:var(--line)" stroke-width="9" stroke-linecap="round"/>';
-  Object.keys(geom.curbs).forEach(function (k) {
-    if (k.indexOf("next-") === 0 || k.indexOf("cross-") === 0) return; /* the strip shows this street only */
-    s += '<path d="' + mapPathD(geom.curbs[k]) + '" fill="none" style="stroke:'
-      + mapColorStroke(colors[k] || "grey") + '" stroke-width="4.5" stroke-linecap="round"/>';
-  });
-  if (geom.home) {
-    s += '<circle cx="' + hx.toFixed(1) + '" cy="' + hy.toFixed(1)
-      + '" r="7" fill="var(--accent)" stroke="#fff" stroke-width="2"/>';
-    if (geom.home.label) {
-      s += '<text x="' + hx.toFixed(1) + '" y="' + (hy - 12).toFixed(1)
-        + '" font-size="11" font-weight="bold" style="fill:var(--ink)" text-anchor="middle">' + esc(geom.home.label) + '</text>';
-    }
-  }
-  if (geom.streetName) {
-    s += '<text x="' + (vbX + 6).toFixed(1) + '" y="' + (vbY + 16).toFixed(1)
-      + '" font-size="12" font-weight="bold" style="fill:var(--ink)">' + esc(geom.streetName) + '</text>';
-  }
-  s += '</svg>';
-  s += '<div class="maplegend"><span class="mapsw" style="background:var(--accent)"></span>Stay until the deadline'
-    + ' &nbsp; <span class="mapsw" style="background:var(--fine-ink)"></span>Cannot park now'
-    + ' &nbsp; <span class="mapsw" style="background:#b3beb6"></span>Not established</div>';
-  if (liveMode() && LIVE.cacheStale) {
-    s += '<div class="note">Last known — saved ' + esc(LIVE.cacheStale.label || "")
-      + ", checking the city\u2019s signs now.</div>";
-  } else if (liveMode() && (!nearby.length)) {
-    s += '<div class="note">Nearby streets appear as the lookup lands.</div>';
-  } else if (!liveMode()) {
-    s += '<div class="note">Live lookup adds the streets around you.</div>';
-  }
-  return s;
-}
-function renderMiniMap(nowMs) {
-  var body = el("miniMapBody");
-  if (!body) return;
-  nowMs = nowMs || Date.now();
-  var html = miniMapSvgHtml(nowMs);
-  if (html === _miniMapHtml) return;
-  _miniMapHtml = html;
-  body.innerHTML = html;
 }
 
 /* ---- Phase 5 piece 2 (Nov 17): where to move / where can I park ----
@@ -5890,6 +6006,84 @@ function openReportForm(sideKey) {
   return _reportSide;
 }
 
+/* ---- OSM pan / zoom handlers (browser only; the pure math above is
+   what the suites drive) ---- */
+var _osmPointers = {}; /* pointerId -> { x, y } in client px */
+var _osmDrag = null; /* { moved, lastX, lastY, pinch } while a gesture runs */
+var _osmSuppressClick = false;
+function osmEventInMap(e) {
+  var t = e && e.target;
+  while (t) {
+    if (t.id === "osmMap" || t.id === "mapBody") return true;
+    t = t.parentNode;
+  }
+  return false;
+}
+function osmMapRect() {
+  var m = el("osmMap");
+  if (m && m.getBoundingClientRect) {
+    var r = m.getBoundingClientRect();
+    return { left: r.left, top: r.top };
+  }
+  return { left: 0, top: 0 };
+}
+function osmOnPointerDown(e) {
+  if (!osmEventInMap(e) || typeof e.pointerId === "undefined") return;
+  var body = el("mapBody");
+  try { if (body && body.setPointerCapture) body.setPointerCapture(e.pointerId); } catch (err) { /* drag works without capture while the finger stays on the map */ }
+  _osmPointers[e.pointerId] = { x: e.clientX, y: e.clientY };
+  var ids = Object.keys(_osmPointers);
+  if (ids.length === 2) {
+    var a = _osmPointers[ids[0]], b = _osmPointers[ids[1]];
+    _osmDrag = { moved: 0, pinch: { d0: Math.hypot(a.x - b.x, a.y - b.y),
+      midX: (a.x + b.x) / 2, midY: (a.y + b.y) / 2, zoom0: osmView().zoom } };
+  } else if (ids.length === 1) {
+    _osmDrag = { moved: 0, lastX: e.clientX, lastY: e.clientY, pinch: null };
+  }
+}
+function osmOnPointerMove(e) {
+  if (!_osmDrag || !_osmPointers[e.pointerId]) return;
+  var p = _osmPointers[e.pointerId];
+  var dx = e.clientX - p.x, dy = e.clientY - p.y;
+  p.x = e.clientX; p.y = e.clientY;
+  var ids = Object.keys(_osmPointers);
+  if (_osmDrag.pinch && ids.length === 2) {
+    var a = _osmPointers[ids[0]], b = _osmPointers[ids[1]];
+    var d = Math.hypot(a.x - b.x, a.y - b.y);
+    var midX = (a.x + b.x) / 2, midY = (a.y + b.y) / 2;
+    _osmDrag.moved += Math.abs(dx) + Math.abs(dy);
+    var r = osmMapRect();
+    var nz = _osmDrag.pinch.zoom0 + Math.log(d / _osmDrag.pinch.d0) / Math.log(2);
+    osmZoomAt(midX - r.left, midY - r.top, nz);
+    osmPanBy(midX - _osmDrag.pinch.midX, midY - _osmDrag.pinch.midY);
+    _osmDrag.pinch.midX = midX; _osmDrag.pinch.midY = midY;
+    return;
+  }
+  _osmDrag.moved += Math.abs(dx) + Math.abs(dy);
+  osmPanBy(dx, dy);
+}
+function osmOnPointerUp(e) {
+  if (typeof e.pointerId !== "undefined") delete _osmPointers[e.pointerId];
+  if (!Object.keys(_osmPointers).length) {
+    if (_osmDrag && _osmDrag.moved > 6) {
+      _osmSuppressClick = true;
+      setTimeout(function () { _osmSuppressClick = false; }, 100);
+    }
+    _osmDrag = null;
+  }
+}
+function osmOnWheel(e) {
+  if (!osmEventInMap(e)) return;
+  if (e.preventDefault) e.preventDefault();
+  var r = osmMapRect();
+  osmZoomAt(e.clientX - r.left, e.clientY - r.top, osmView().zoom + (e.deltaY < 0 ? 1 : -1));
+}
+function osmOnDblClick(e) {
+  if (!osmEventInMap(e)) return;
+  var r = osmMapRect();
+  osmZoomAt(e.clientX - r.left, e.clientY - r.top, osmView().zoom + 1);
+}
+
 /* Test hook (also handy in the console): pure date/.ics logic. */
 if (typeof window !== "undefined") {
   window.__ticketSaver = { nextWindow: nextWindow, buildIcs: buildIcs,
@@ -5983,9 +6177,16 @@ if (typeof window !== "undefined") {
     mapCurbColor: mapCurbColor, mapCurbColors: mapCurbColors, mapColorStroke: mapColorStroke,
     mapDetailForSide: mapDetailForSide, mapDetailHtml: mapDetailHtml,
     mapSvgHtml: mapSvgHtml, mapBodyHtml: mapBodyHtml, renderMap: renderMap,
-    miniMapSvgHtml: miniMapSvgHtml, renderMiniMap: renderMiniMap,
-    miniMapSigns: miniMapSigns, miniMapStreetPts: miniMapStreetPts,
-    miniMapNearbyColor: miniMapNearbyColor, MINI_MAP_W_M: MINI_MAP_W_M, MINI_MAP_H_M: MINI_MAP_H_M,
+    osmTileUrl: osmTileUrl, osmLatLngToWorld: osmLatLngToWorld, osmWorldToLatLng: osmWorldToLatLng,
+    osmTilesForView: osmTilesForView, osmProjectLocal: osmProjectLocal,
+    osmRefLatLon: osmRefLatLon, osmHomeLatLon: osmHomeLatLon, osmStreetKey: osmStreetKey, osmDefaultView: osmDefaultView,
+    osmView: osmView, osmSetView: osmSetView, osmRecentre: osmRecentre, osmMapSize: osmMapSize,
+    osmPanBy: osmPanBy, osmZoomAt: osmZoomAt, osmZoomBy: osmZoomBy,
+    osmNearbySigns: osmNearbySigns, osmNearbyStreetPts: osmNearbyStreetPts, osmNearbyColor: osmNearbyColor,
+    osmEventInMap: osmEventInMap,
+    OSM_TILE_URL: OSM_TILE_URL, OSM_ATTRIBUTION_URL: OSM_ATTRIBUTION_URL,
+    OSM_ZOOM_DEFAULT: OSM_ZOOM_DEFAULT, OSM_ZOOM_MIN: OSM_ZOOM_MIN, OSM_ZOOM_MAX: OSM_ZOOM_MAX,
+    OSM_MAP_H: OSM_MAP_H,
     setMapOpen: setMapOpen, mapOpen: mapOpen, mapSelectCurb: mapSelectCurb,
     mapSelectedCurb: mapSelectedCurb, mapLayers: mapLayers, mapSetLayer: mapSetLayer,
     mapToggleLayer: mapToggleLayer, MAP_CURB_M: MAP_CURB_M,
