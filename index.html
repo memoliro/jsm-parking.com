@@ -24,7 +24,7 @@
     --soft-green: #e7f6ee;
   }
   body { font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
-         margin: 0; padding: 16px; background: var(--page); color: var(--ink);
+         margin: 0; padding: 16px 16px calc(76px + env(safe-area-inset-bottom)); background: var(--page); color: var(--ink);
          font-size: 18px; line-height: 1.5; touch-action: pan-y; text-align: center; }
   .wrap { max-width: 640px; margin: 0 auto; display: flex; flex-direction: column;
           min-height: calc(100vh - 32px); min-height: calc(100dvh - 32px); }
@@ -211,6 +211,7 @@
            width: 100%; background: none; border: 0; padding: 8px 4px; font-size: 17px;
            color: var(--muted); cursor: pointer; font-family: inherit; }
   .gpsrow #gpsStatus { flex: 1; text-align: center; }
+  .gpsrow #gpsStatusSettings { flex: 1; text-align: center; }
   .gpsrow:hover, .gpsrow:focus-visible { background: var(--soft-green); color: var(--ink);
            border-radius: 8px; outline: none; }
   .gpsrow .gpsrefresh { color: var(--accent); font-size: 20px; }
@@ -227,6 +228,68 @@
   .dot.active::after { background: var(--accent); }
   .dot:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 50%; }
   #swipeHint { font-size: 15px; color: var(--muted); }
+  /* Bottom tab bar (Nov 18 homescreen restructure): fixed nav like
+     Deeniy's — five tabs, icon + label, the active tab highlighted.
+     Content pads for it (body padding-bottom above) so the bar never
+     covers content. */
+  #tabBar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 50;
+            background: var(--card); border-top: 1px solid var(--line);
+            padding-bottom: env(safe-area-inset-bottom); }
+  .tabbar-inner { max-width: 640px; margin: 0 auto; display: flex; }
+  .tabbtn { flex: 1 1 0; min-width: 0; background: none; border: 0; cursor: pointer;
+            font-family: inherit; font-size: 15px; font-weight: 700; color: var(--muted);
+            padding: 8px 2px 10px; display: flex; flex-direction: column; align-items: center; gap: 2px; }
+  .tabbtn svg { display: block; }
+  .tabbtn.active { color: var(--accent); }
+  .tabbtn:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--accent); }
+  /* Tab panels: Map is the home screen and stays underneath; the other four
+     are bottom sheets (below) that slide up over it — the bar switches tabs,
+     no reload. */
+  .tabpanel.hidden { display: none; }
+  /* Bottom sheets (Nov 18, his call — JSM Radio's .menu-sheet pattern,
+     copied literally): the four non-Map tabs slide up from the bottom over
+     the map instead of swapping in place. Closed = translateY(102%) +
+     visibility:hidden; open (.open) = translateY(0) + visible;
+     transition transform .5s ease, visibility .5s (none under
+     prefers-reduced-motion). The sheet's bottom edge sits ABOVE the tab bar
+     (bottom: 76px + safe-area — the same reservation the body padding uses
+     for the bar), so the bar stays visible and usable below the sheet and
+     never covers sheet content. Max-height is Radio's 85dvh minus that bar
+     offset, so the sheet's top never leaves the viewport. The dimming
+     backdrop sits below the bar (z-index 45 < 50) so the bar stays bright
+     and tappable; the sheets sit at 55. A closed sheet keeps its .hidden
+     class (the suites read visibility off it) but is never display:none —
+     the ID rule below beats .tabpanel.hidden and keeps it rendered
+     off-screen, invisible — or the slide could not animate. */
+  #tab-move, #tab-timer, #tab-destination, #tab-settings { position: fixed; left: 0; right: 0; bottom: calc(76px + env(safe-area-inset-bottom)); max-height: calc(85dvh - 76px - env(safe-area-inset-bottom)); overflow-y: auto; overscroll-behavior: none; touch-action: pan-y; background: var(--card); border-top: 1px solid var(--line); border-radius: 24px 24px 0 0; padding: 20px 20px calc(20px + env(safe-area-inset-bottom)); z-index: 55; box-shadow: 0 -10px 40px rgba(0,0,0,.4); transform: translateY(102%); visibility: hidden; transition: transform .5s ease, visibility .5s; user-select: none; -webkit-user-select: none; }
+  #tab-move input, #tab-move textarea, #tab-timer input, #tab-timer textarea, #tab-destination input, #tab-destination textarea, #tab-settings input, #tab-settings textarea { user-select: text; -webkit-user-select: text; }
+  #tab-move.open, #tab-timer.open, #tab-destination.open, #tab-settings.open { transform: translateY(0); visibility: visible; }
+  #tab-move.hidden, #tab-timer.hidden, #tab-destination.hidden, #tab-settings.hidden { display: block; }
+  @media (prefers-reduced-motion: reduce) { #tab-move, #tab-timer, #tab-destination, #tab-settings, .tab-backdrop { transition: none; } }
+  .tab-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 45; opacity: 0; visibility: hidden; transition: opacity .5s ease, visibility .5s; }
+  .tab-backdrop.open { opacity: 1; visibility: visible; }
+  /* Marked tap zone at the top of every sheet — Radio's .menu-grab pill
+     inside the tinted .menu-top band, with the title row + ✕. The pill is
+     40x4 px with 8 px vertical padding (~20 px hit area); the band spans
+     the sheet's full width and carries the sheet title and the ✕ button.
+     Tapping the pill or the title row (≤ 8 px movement) closes the sheet. */
+  .sheet-grab { width: 40px; height: 4px; padding: 8px 0; background: rgba(128,128,128,.45); background-clip: content-box; border-radius: 2px; margin: 0 auto 4px; touch-action: none; }
+  .sheet-top { margin: -20px -20px 8px; padding: 20px 20px 14px; background: var(--soft-green); border-bottom: 1px solid var(--line); border-radius: 24px 24px 0 0; }
+  .sheet-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 0; margin-bottom: 0; }
+  .sheet-head h2 { margin: 0; font-size: 24px; }
+  .sheet-close { width: 44px; height: 44px; border-radius: 50%; background: var(--card); border: 1px solid var(--line); color: var(--ink); font-size: 18px; cursor: pointer; }
+  /* Home tab: the map fills the screen ParkUsher-style — taller than the
+     old 400 px card, up to 60% of the viewport. The base .osmmap rule
+     keeps height: 400px (the Node suites read OSM_MAP_H = 400); this
+     rule only grows the rendered map in the browser, and osmMapSize()
+     reads the live element height there. */
+  #tab-map .osmmap { height: min(60dvh, 620px); min-height: 400px; }
+  /* Destination lookup: the address field. */
+  .destinput { flex: 1 1 0; min-width: 0; font-family: inherit; font-size: 18px;
+             padding: 12px 10px; border: 2px solid var(--line); border-radius: 12px;
+             background: var(--card); color: var(--ink); }
+  .destinput:focus-visible { outline: none; border-color: var(--accent);
+             box-shadow: 0 0 0 1px rgba(49,196,141,.35); }
   .hidden { display: none; }
 </style>
 </head>
@@ -235,6 +298,7 @@
   <div id="mainView">
   <h1 id="mainTitle" tabindex="-1">Ticket Saver</h1>
 
+  <section id="tab-map" class="tabpanel" aria-label="Map">
   <!-- OSM map (Nov 18): the home screen, ParkUsher-style — the map is the
        dominant view, always visible (no collapsed row, no toggle). A real
        OpenStreetMap tile base with the verdict-coloured curb overlay on
@@ -274,6 +338,27 @@
   </div>
 
 
+  <div class="card" id="planCard">
+    <button class="limitrow" id="planToggle" aria-expanded="false"><span id="planToggleText">Plan ahead &mdash; check a future day &amp; time</span><span class="chev" aria-hidden="true">&rsaquo;</span></button>
+    <div id="planBody" class="hidden">
+      <div class="planinputs">
+        <input type="date" id="planDate" aria-label="Day">
+        <input type="time" id="planTime" aria-label="Time">
+      </div>
+      <div id="planResult" style="font-size:18px;margin-top:10px"></div>
+    </div>
+  </div>
+
+  </section>
+
+  <section id="tab-move" class="tabpanel hidden" aria-label="Move">
+  <div class="sheet-top">
+    <div class="sheet-grab" aria-hidden="true"></div>
+    <div class="sheet-head">
+      <h2>Move</h2>
+      <button class="sheet-close" id="sheetClose-move" type="button" aria-label="Close">&#10005;</button>
+    </div>
+  </div>
   <!-- Phase 5 piece 2 (Nov 17): where to move — an expandable row in the
        same collapsed-row pattern as the map / limit timer / plan ahead. It
        ranks this street's curbs by how long you can stay, longest first.
@@ -286,6 +371,16 @@
     <div id="whereBody" class="hidden"></div>
   </div>
 
+  </section>
+
+  <section id="tab-settings" class="tabpanel hidden" aria-label="Settings">
+  <div class="sheet-top">
+    <div class="sheet-grab" aria-hidden="true"></div>
+    <div class="sheet-head">
+      <h2>Settings</h2>
+      <button class="sheet-close" id="sheetClose-settings" type="button" aria-label="Close">&#10005;</button>
+    </div>
+  </div>
   <!-- Phase 5 piece 3 (Nov 18): sign reports — a collapsed row in the same
        pattern as the map / where-to-move rows, so the compact one-screen main
        view stays compact. A report names the curb (prefilled from the tapped
@@ -305,6 +400,37 @@
     </div>
   </div>
 
+  <div class="card" id="permitCard">
+    <div id="permitSetting" class="hidden" style="margin-top:12px">
+      <div class="label">Your resident permit</div>
+      <div id="permitOptions" style="font-size:17px;margin-top:4px"></div>
+      <div style="font-size:15px;color:#9AA0A8;margin-top:4px">Saved on this device only. Verdicts change only for the permits you hold.</div>
+  </div>
+
+  <div class="card" id="layerCard">
+    <div class="label">Map layers</div>
+    <div style="display:flex;gap:8px;justify-content:center;margin-top:10px">
+      <button class="maplayer" data-settings-layer="paid" aria-pressed="true">Paid</button>
+      <button class="maplayer" data-settings-layer="cleaning" aria-pressed="true">Cleaning / no-parking</button>
+    </div>
+    <div class="note" style="margin-top:8px">Green means the layer is on. Paid shows the metered spots; Cleaning / no-parking shows the curb colours.</div>
+  </div>
+
+  <div class="card" id="gpsSettingsCard">
+    <div class="label">Location</div>
+    <button class="gpsrow" id="gpsBtnSettings"><span id="gpsStatusSettings">Checking location&hellip;</span><span class="gpsrefresh" aria-hidden="true"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg></span></button>
+    <div class="note" style="margin-top:8px">Tapping re-checks your location and clears a picked street.</div>
+  </div>
+  </section>
+
+  <section id="tab-timer" class="tabpanel hidden" aria-label="Timer">
+  <div class="sheet-top">
+    <div class="sheet-grab" aria-hidden="true"></div>
+    <div class="sheet-head">
+      <h2>Timer</h2>
+      <button class="sheet-close" id="sheetClose-timer" type="button" aria-label="Close">&#10005;</button>
+    </div>
+  </div>
   <div class="card" id="limitCard">
     <button class="limitrow" id="limitToggle" aria-expanded="false"><span id="limitToggleText">Parking limit timer</span><span class="chev" aria-hidden="true">&rsaquo;</span></button>
     <div id="limitBody" class="hidden">
@@ -328,16 +454,33 @@
     </div>
   </div>
 
-  <div class="card" id="planCard">
-    <button class="limitrow" id="planToggle" aria-expanded="false"><span id="planToggleText">Plan ahead &mdash; check a future day &amp; time</span><span class="chev" aria-hidden="true">&rsaquo;</span></button>
-    <div id="planBody" class="hidden">
-      <div class="planinputs">
-        <input type="date" id="planDate" aria-label="Day">
-        <input type="time" id="planTime" aria-label="Time">
-      </div>
-      <div id="planResult" style="font-size:18px;margin-top:10px"></div>
+  </section>
+
+  <section id="tab-destination" class="tabpanel hidden" aria-label="Destination">
+  <div class="sheet-top">
+    <div class="sheet-grab" aria-hidden="true"></div>
+    <div class="sheet-head">
+      <h2>Destination</h2>
+      <button class="sheet-close" id="sheetClose-destination" type="button" aria-label="Close">&#10005;</button>
     </div>
   </div>
+  <div class="card" id="destCard">
+    <div class="label">Destination</div>
+    <div style="font-size:17px;margin-top:4px">Type a destination address to see the parking rules for that spot.</div>
+    <div style="display:flex;gap:10px;margin-top:10px">
+      <input type="text" id="destInput" class="destinput" aria-label="Destination address" placeholder="1558 Avenue des Pins Ouest" autocomplete="off">
+      <button class="action primary" id="destSearch">Look up</button>
+    </div>
+    <div id="destResult" style="font-size:17px;margin-top:10px">Type an address above &mdash; the rules come from the city&rsquo;s data, live.</div>
+    <div class="note" style="margin-top:8px">Live city-data lookup &mdash; not a verified page. If the rules can&rsquo;t be established, the app says so instead of guessing.</div>
+  </div>
+  </section>
+
+  <!-- Bottom-sheet backdrop (Nov 18, Radio pattern): dims the map while a
+       sheet is open. It sits below the tab bar (z-index 45 < 50) so the bar
+       stays bright and tappable, and inside the main view so it hides with
+       it on Details. A tap closes the sheet back to Map. -->
+  <div class="tab-backdrop" id="tabBackdrop" aria-hidden="true"></div>
 
   <button class="gpsrow" id="gpsBtn"><span id="gpsStatus">&#128205; Checking location&hellip;</span><span class="gpsrefresh" aria-hidden="true"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg></span></button>
   <!-- The live label lives here, under the GPS row (Nov 17): the picker card
@@ -379,10 +522,6 @@
     <div style="margin-top:8px">Cleaning only. Winter snow removal is separate — infoneige.ca already covers it.
     No-stopping panels (\A EN TOUT TEMPS) are a stopping ban, not a cleaning window.</div>
     <div id="permitNote" class="hidden" style="margin-top:8px"></div>
-    <div id="permitSetting" class="hidden" style="margin-top:12px">
-      <div class="label">Your resident permit</div>
-      <div id="permitOptions" style="font-size:17px;margin-top:4px"></div>
-      <div style="font-size:15px;color:#9AA0A8;margin-top:4px">Saved on this device only. Verdicts change only for the permits you hold.</div>
     </div>
   </div>
   </div><!-- /detailsView -->
@@ -393,6 +532,20 @@
     <span id="swipeHint">Swipe &larr; for details</span>
   </nav>
 </div>
+
+  <!-- Bottom tab bar (Nov 18 homescreen restructure): five tabs, icon +
+       label, no page reload. Map is the home screen and stays underneath;
+       the other four open as bottom sheets over it. Settings is right-most.
+       Details stays reachable by swipe / dots, as before. -->
+  <nav id="tabBar" aria-label="Sections">
+    <div class="tabbar-inner">
+      <button class="tabbtn active" id="tabbtn-map" data-tab="map" aria-selected="true"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6"></polygon><line x1="8" y1="2" x2="8" y2="18"></line><line x1="16" y1="6" x2="16" y2="22"></line></svg>Map</button>
+      <button class="tabbtn" id="tabbtn-move" data-tab="move" aria-selected="false"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="3 11 22 2 13 21 11 13 3 11"></polygon></svg>Move</button>
+      <button class="tabbtn" id="tabbtn-timer" data-tab="timer" aria-selected="false"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>Timer</button>
+      <button class="tabbtn" id="tabbtn-destination" data-tab="destination" aria-selected="false"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"></path><circle cx="12" cy="10" r="3"></circle></svg>Destination</button>
+      <button class="tabbtn" id="tabbtn-settings" data-tab="settings" aria-selected="false"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>Settings</button>
+    </div>
+  </nav>
 
 <script>
 "use strict";
@@ -1935,6 +2088,7 @@ function renderAll() {
     else { pn.innerHTML = ""; pn.classList.add("hidden"); }
   }
   renderPermitSetting();
+  renderSettingsLayers();
   renderSideCards();
   renderHero();
   renderMap();
@@ -1942,6 +2096,7 @@ function renderAll() {
   renderReportCard();
   renderLimit();
   renderPlanAhead();
+  destRender();
   liveRenderChrome();
 }
 
@@ -1955,6 +2110,8 @@ function renderPermitSetting() {
   if (!wrap) return;
   var sectors = permitSectors();
   wrap.classList.toggle("hidden", sectors.length === 0);
+  var pcard = el("permitCard");
+  if (pcard) pcard.classList.toggle("hidden", sectors.length === 0);
   var opts = el("permitOptions");
   if (opts) {
     var held = getHeldPermits();
@@ -2073,29 +2230,33 @@ function reverseGeocode(lat, lon, cb) {
     })
     .catch(function () { if (cb) cb(null); /* keep the distance text */ });
 }
+/* The GPS status line is shown twice — the shared strip under the tabs
+   and the Settings tab — so every write goes through here. */
+function setGpsStatusText(txt) {
+  var a = el("gpsStatus"); if (a) a.textContent = txt;
+  var b = el("gpsStatusSettings"); if (b) b.textContent = txt;
+}
 function renderGpsRow() {
-  var st = el("gpsStatus");
   if (!lastFix) return;
   /* The fix's accuracy is printed so a rough fix reads as rough: indoors the
      phone can be off by hundreds of metres and the street name follows the
      fix, not the car — "Cavendish, 6000 (±350 m)" says so, a bare street
      name does not. */
   var acc = (typeof lastFix.accuracy === "number") ? " (±" + Math.round(lastFix.accuracy) + " m)" : "";
-  if (geoLookup && geoLookup.label) { st.textContent = "📍 " + geoLookup.label + acc; return; }
+  if (geoLookup && geoLookup.label) { setGpsStatusText("📍 " + geoLookup.label + acc); return; }
   if (lastFix.dist <= 30) {
-    st.textContent = "📍 " + lastFix.homeDist + " m from home" + acc;
+    setGpsStatusText("📍 " + lastFix.homeDist + " m from home" + acc);
   } else {
-    st.textContent = "📍 " + Math.round(lastFix.dist)
-      + " m from " + DATA.street.short_name + " — home block (" + DATA.street.address_number + ")" + acc;
+    setGpsStatusText("📍 " + Math.round(lastFix.dist)
+      + " m from " + DATA.street.short_name + " — home block (" + DATA.street.address_number + ")" + acc);
   }
 }
 function checkGps() {
-  var st = el("gpsStatus");
   if (!("geolocation" in navigator)) {
-    st.textContent = "📍 No location — home block (" + DATA.street.address_number + ")";
+    setGpsStatusText("📍 No location — home block (" + DATA.street.address_number + ")");
     return;
   }
-  st.textContent = "📍 Waiting for a fix…";
+  setGpsStatusText("📍 Waiting for a fix…");
   navigator.geolocation.getCurrentPosition(function (pos) {
     var s = snap(pos.coords.latitude, pos.coords.longitude);
     var hp = toXY(pos.coords.latitude, pos.coords.longitude);
@@ -2111,7 +2272,7 @@ function checkGps() {
     });
     maybeSwitchStreet(pos.coords.latitude, pos.coords.longitude, pos.coords.accuracy);
   }, function () {
-    st.textContent = "📍 Location unavailable — home block (" + DATA.street.address_number + ")";
+    setGpsStatusText("📍 Location unavailable — home block (" + DATA.street.address_number + ")");
   }, { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 });
 }
 
@@ -2166,6 +2327,135 @@ function updateDots() {
   var h = el("swipeHint");
   if (h) h.textContent = view === "main" ? "Swipe ← for details" : "Swipe → to go back";
 }
+/* ---- bottom tab bar (Nov 18 homescreen restructure) ----
+   Five tabs, no page reload. Map is the home screen and stays underneath;
+   the other four open as JSM Radio-style bottom sheets sliding up over the
+   map (Nov 18, his call). Entering Move opens the where-to-move list and
+   entering Timer opens the limit timer, so the tab always shows its
+   content — the collapsed rows stay collapsed in the HTML for the suites. */
+var tab = "map";
+var TABS = ["map", "move", "timer", "destination", "settings"];
+function currentTab() { return tab; }
+/* Bottom sheets (Nov 18 — Radio's .menu-sheet pattern, copied literally):
+   a sheet is position:fixed at the bottom with translateY(102%) closed and
+   translateY(0) open (.open class, transition transform .5s ease,
+   visibility .5s; none under prefers-reduced-motion). Its bottom edge sits
+   above the tab bar (bottom: 76px + safe-area — the same reservation the
+   body padding uses for the bar), so the bar stays visible and usable below
+   the sheet and never covers sheet content. A sheet keeps its .hidden class
+   when closed (the suites read visibility off it) — but a closed sheet is
+   never display:none, or the slide could not animate: the ID rule in the
+   stylesheet beats .tabpanel.hidden and keeps it rendered off-screen,
+   invisible. Closing a sheet returns to Map via showTab("map"). */
+var SHEET_TABS = ["move", "timer", "destination", "settings"];
+function sheetIsOpen(name) {
+  var p = el("tab-" + name);
+  return !!p && p.classList.contains("open");
+}
+/* The one close path: a tap on a sheet's top zone (grab pill / title row),
+   its ✕ button, the backdrop, Escape, or a drag-down all land here. */
+function closeSheet() { showTab("map"); }
+function renderSettingsLayers() {
+  if (typeof document === "undefined" || !document.querySelectorAll) return;
+  ["paid", "cleaning"].forEach(function (name) {
+    var btns = document.querySelectorAll('[data-settings-layer="' + name + '"]');
+    for (var i = 0; i < btns.length; i++) {
+      btns[i].setAttribute("aria-pressed", MAP_LAYERS[name] ? "true" : "false");
+    }
+  });
+}
+function showTab(name) {
+  if (TABS.indexOf(name) < 0) name = "map";
+  if (view === "details") showMain();
+  tab = name;
+  TABS.forEach(function (t) {
+    var p = el("tab-" + t);
+    if (p) {
+      /* Map is the base and stays underneath an open sheet — it is never
+         hidden by a tab switch (its panel hides only with the main view). */
+      if (t === "map") p.classList.remove("hidden");
+      else p.classList.toggle("hidden", t !== name);
+      if (SHEET_TABS.indexOf(t) >= 0) p.classList.toggle("open", t === name);
+    }
+    var b = el("tabbtn-" + t);
+    if (b) {
+      b.classList.toggle("active", t === name);
+      b.setAttribute("aria-selected", t === name ? "true" : "false");
+    }
+  });
+  var bd = el("tabBackdrop");
+  if (bd) bd.classList.toggle("open", name !== "map");
+  if (name === "move") setWhereOpen(true);
+  else if (name === "timer") setLimitOpen(true);
+  else if (name === "map") { try { renderMap(); } catch (e) { /* sizing only */ } }
+  else if (name === "destination") destRender();
+  else if (name === "settings") renderSettingsLayers();
+  if (typeof window !== "undefined" && window.scrollTo) window.scrollTo(0, 0);
+}
+/* Drag a sheet down to close + tap its top zone to close — Radio's
+   menu-sheet pointer handlers, one per sheet, same thresholds: a press on
+   the grab pill or title row that moves ≤ 8 px in either axis is a tap and
+   closes; a downward drag past 100 px (or a > 40 px flick at velocity >
+   0.5) closes, otherwise it springs back. The drag engages only at
+   scrollTop 0 and never from a form field, so the Destination input and
+   the report textarea keep working; a hover (no button held) never
+   engages it. */
+function bindSheetDrag(panel) {
+  if (!panel || !panel.addEventListener) return;
+  var startY = 0, startX = 0, lastY = 0, lastT = 0, vel = 0, dragging = false, ignore = false, dy = 0, downOnHandle = false;
+  function onDown(e) {
+    ignore = false; dragging = false; dy = 0; vel = 0; downOnHandle = false;
+    if (!panel.classList.contains("open")) { ignore = true; return; }
+    var t = e.target;
+    if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable)) { ignore = true; return; }
+    /* A press on the handle (grabber/title) captures the pointer at once,
+       so the browser can't cancel the drag for scrolling — mouse drags on
+       PC were being cancelled (and selecting the title text) instead of
+       moving the sheet. Content drags keep native scrolling. */
+    downOnHandle = !!(t && t.closest && (t.closest(".sheet-grab") || t.closest(".sheet-head")));
+    if (downOnHandle) { try { panel.setPointerCapture(e.pointerId); } catch (err) {} }
+    startY = e.clientY; startX = e.clientX; lastY = e.clientY; lastT = e.timeStamp || Date.now();
+  }
+  function onMove(e) {
+    if (ignore || !panel.classList.contains("open")) return;
+    /* A hover is not a drag: without a button held, the pointer merely
+       moving over the sheet must not engage it. */
+    if (e.buttons === 0) return;
+    var curY = e.clientY, now = e.timeStamp || Date.now(), dt = now - lastT;
+    if (dt > 0) vel = (curY - lastY) / dt;
+    lastY = curY; lastT = now;
+    if (!dragging) {
+      dy = curY - startY;
+      if (dy > 8 && Math.abs(dy) > Math.abs(e.clientX - startX) && panel.scrollTop <= 0) {
+        dragging = true;
+        panel.style.transition = "none";
+      }
+      return;
+    }
+    dy = curY - startY;
+    if (dy < 0) dy = 0;
+    panel.style.transform = "translateY(" + dy + "px)";
+  }
+  function finish(close) {
+    dragging = false;
+    panel.style.transition = "";
+    panel.style.transform = "";
+    if (close) closeSheet();
+  }
+  function onUp(e) {
+    if (ignore) return;
+    if (dragging) { finish(dy > 100 || (dy > 40 && vel > 0.5)); return; }
+    /* Tap on the handle (grabber/title) closes — the fallback when a drag
+       won't work (a mouse drag the browser won't honour, or a one-handed
+       tap). A tap is a press with almost no movement. */
+    if (downOnHandle && Math.abs(e.clientY - startY) <= 8 && Math.abs(e.clientX - startX) <= 8) closeSheet();
+  }
+  function onCancel() { if (!ignore && dragging) finish(false); }
+  panel.addEventListener("pointerdown", onDown);
+  panel.addEventListener("pointermove", onMove);
+  panel.addEventListener("pointerup", onUp);
+  panel.addEventListener("pointercancel", onCancel);
+}
 function showDetails() {
   view = "details";
   el("mainView").classList.add("hidden");
@@ -2189,6 +2479,7 @@ function init() {
   var armed = maybeAutoArmLimit(Date.now());
   if (armed) saveLimitTimer(armed.parkedAt, armed.limitMin);
   renderAll();
+  try { renderMap(); } catch (e) { /* sizing only — the first render ran on an empty map body */ }
   /* A running timer must not hide behind the collapsed tiles. */
   if (getLimitTimer()) setLimitOpen(true);
   try { if (localStorage.getItem(SWIPED_KEY) === "1") el("swipeHint").classList.add("hidden"); } catch (e) { /* private mode */ }
@@ -2310,6 +2601,45 @@ function init() {
       renderLimit();
     });
   }
+  /* Bottom tab bar (Nov 18): five tabs, no reload — Map is the base, the
+     other four open as bottom sheets over it. */
+  TABS.forEach(function (name) {
+    var b = el("tabbtn-" + name);
+    if (b) b.addEventListener("click", function () { showTab(name); });
+  });
+  /* Bottom sheets (Nov 18): the ✕ in each sheet's top zone, the backdrop
+     tap, Escape, and the drag/tap handlers all close back to Map. */
+  SHEET_TABS.forEach(function (name) {
+    bindSheetDrag(el("tab-" + name));
+    var c = el("sheetClose-" + name);
+    if (c) c.addEventListener("click", function () { closeSheet(); });
+  });
+  var bd = el("tabBackdrop");
+  if (bd) bd.addEventListener("click", function () { closeSheet(); });
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape" && SHEET_TABS.some(function (n) { return sheetIsOpen(n); })) closeSheet();
+  });
+  var g2 = el("gpsBtnSettings");
+  if (g2) g2.addEventListener("click", onGpsRowTap);
+  var destBtn = el("destSearch");
+  if (destBtn) destBtn.addEventListener("click", function () {
+    destSearch(el("destInput") ? el("destInput").value : "");
+  });
+  var destInput = el("destInput");
+  if (destInput) destInput.addEventListener("keydown", function (e) {
+    if (e.key === "Enter") { e.preventDefault(); destSearch(destInput.value); }
+  });
+  var settingsPanel = el("tab-settings");
+  if (settingsPanel) settingsPanel.addEventListener("click", function (e) {
+    var t = e.target || e.srcElement;
+    while (t && t !== settingsPanel) {
+      if (t.getAttribute) {
+        var layer = t.getAttribute("data-settings-layer");
+        if (layer) { mapToggleLayer(layer); return; }
+      }
+      t = t.parentNode;
+    }
+  });
   el("limitClear").addEventListener("click", function () { clearLimitTimer(); renderLimit(); });
   el("limitIcsBtn").addEventListener("click", exportLimitIcs);
   /* Dots are real buttons: the fallback path for everyone who never swipes. */
@@ -2371,6 +2701,7 @@ function init() {
     try { renderMap(); } catch (e) { /* a map fault must never swallow the hero tick */ }
     try { renderLimit(); } catch (e) { /* a timer fault must never swallow the hero tick */ }
     try { renderPlanAhead(); } catch (e) { /* a plan-ahead fault must never swallow the hero tick */ }
+    try { destRender(); } catch (e) { /* a destination fault must never swallow the hero tick */ }
   }, 30000);
 }
 
@@ -5279,7 +5610,8 @@ function osmRecentre() {
 function osmMapSize() {
   var b = el("mapBody");
   var w = (b && b.offsetWidth) ? b.offsetWidth : 614;
-  return { w: w, h: OSM_MAP_H };
+  var h = (b && b.offsetHeight) ? b.offsetHeight : OSM_MAP_H;
+  return { w: w, h: h };
 }
 /* Project a local-metre point (mapGeometry frame, ref = the house) to
    container pixels in the given view. */
@@ -5529,6 +5861,7 @@ function mapSetLayer(name, on) {
   MAP_LAYERS[name] = !!on;
   renderMap();
   renderWhereToMove(); /* the where-to-move swatches follow the same layer rule */
+  renderSettingsLayers(); /* the Settings tab carries the same two toggles */
   return mapLayers();
 }
 function mapToggleLayer(name) {
@@ -5622,6 +5955,64 @@ function renderMap(nowMs) {
    permit exempts it, the row says so (the limit does not bind, the
    cleaning deadline does). Fines are not shown here — the verdicts
    already carry them where they apply. */
+/* One ranked entry for one curb — the shared builder for where-to-move
+   and the Destination tab: same verdict (Phase 2, then the limit-only
+   fallback), same stay/resume math, same permit statement. */
+function moveEntryFor(slug, name, side, key, lim, isCurrent, nowMs) {
+  var v = verdictForSideData(side, lim, nowMs, nowMs);
+  if (!v) v = limitOnlyVerdictForSideData(side, lim, nowMs, nowMs);
+  var e = { streetSlug: slug, streetName: name, sideKey: key, side: side,
+    sideLabel: side.label || key, isCurrent: !!isCurrent, verdict: v, lim: lim,
+    color: curbColorForVerdict(v), stayMs: null, binds: null,
+    cannotPark: false, notEstablished: false, limitOnly: !!(v && v.limitOnly), resumeMs: null };
+  if (!v) {
+    e.notEstablished = true;
+    if (lim && typeof lim.minutes === "number") e.limitOnly = true;
+  } else if (v.kind === "no_stop" || v.kind === "cleaning_now" || v.kind === "limit_expired") {
+    e.cannotPark = true;
+    if (v.kind === "cleaning_now") {
+      var r = nextWindowForSideData(side, new Date(nowMs));
+      if (r && r.nw.state === "now") e.resumeMs = r.nw.end.getTime();
+    }
+  } else if (v.kind === "season") {
+    var r2 = nextWindowForSideData(side, new Date(nowMs));
+    e.stayMs = (r2 && r2.nw.start) ? r2.nw.start.getTime() : null;
+  } else if (v.kind === "permit_exempt") {
+    e.stayMs = Infinity;
+  } else if (v.deadlineMs) {
+    e.stayMs = v.deadlineMs;
+    e.binds = v.binds;
+  }
+  return e;
+}
+/* The ranking both tabs share: longest stay first; cannot-park last
+   among decided curbs; not-established last of all (see
+   whereToMoveEntries for the rule in full). */
+function rankMoveEntries(out) {
+  function alpha(a, b) {
+    if (a.streetSlug !== b.streetSlug) return a.streetSlug < b.streetSlug ? -1 : 1;
+    return a.sideKey < b.sideKey ? -1 : (a.sideKey > b.sideKey ? 1 : 0);
+  }
+  out.sort(function (a, b) {
+    var ga = a.notEstablished ? 2 : (a.cannotPark ? 1 : 0);
+    var gb = b.notEstablished ? 2 : (b.cannotPark ? 1 : 0);
+    if (ga !== gb) return ga - gb;
+    if (ga === 2) return alpha(a, b);
+    if (ga === 1) {
+      var ra = (a.resumeMs === null) ? Infinity : a.resumeMs;
+      var rb = (b.resumeMs === null) ? Infinity : b.resumeMs;
+      if (ra !== rb) return ra - rb;
+      return alpha(a, b);
+    }
+    var sa = (a.stayMs === null) ? -Infinity : a.stayMs;
+    var sb = (b.stayMs === null) ? -Infinity : b.stayMs;
+    if (sa !== sb) return sb - sa;
+    if (a.binds === "cleaning" && b.binds !== "cleaning") return -1;
+    if (b.binds === "cleaning" && a.binds !== "cleaning") return 1;
+    return alpha(a, b);
+  });
+  return out;
+}
 function whereToMoveEntries(nowMs) {
   nowMs = nowMs || Date.now();
   var out = [];
@@ -5630,32 +6021,7 @@ function whereToMoveEntries(nowMs) {
     Object.keys(sides).forEach(function (key) {
       var side = sides[key];
       if (!side) return;
-      var lim = (lims && lims[key]) || null;
-      var v = verdictForSideData(side, lim, nowMs, nowMs);
-      if (!v) v = limitOnlyVerdictForSideData(side, lim, nowMs, nowMs);
-      var e = { streetSlug: slug, streetName: name, sideKey: key, side: side,
-        sideLabel: side.label || key, isCurrent: !!isCurrent, verdict: v, lim: lim,
-        color: curbColorForVerdict(v), stayMs: null, binds: null,
-        cannotPark: false, notEstablished: false, limitOnly: !!(v && v.limitOnly), resumeMs: null };
-      if (!v) {
-        e.notEstablished = true;
-        if (lim && typeof lim.minutes === "number") e.limitOnly = true;
-      } else if (v.kind === "no_stop" || v.kind === "cleaning_now" || v.kind === "limit_expired") {
-        e.cannotPark = true;
-        if (v.kind === "cleaning_now") {
-          var r = nextWindowForSideData(side, new Date(nowMs));
-          if (r && r.nw.state === "now") e.resumeMs = r.nw.end.getTime();
-        }
-      } else if (v.kind === "season") {
-        var r2 = nextWindowForSideData(side, new Date(nowMs));
-        e.stayMs = (r2 && r2.nw.start) ? r2.nw.start.getTime() : null;
-      } else if (v.kind === "permit_exempt") {
-        e.stayMs = Infinity;
-      } else if (v.deadlineMs) {
-        e.stayMs = v.deadlineMs;
-        e.binds = v.binds;
-      }
-      out.push(e);
+      out.push(moveEntryFor(slug, name, side, key, (lims && lims[key]) || null, isCurrent, nowMs));
     });
   }
   /* Nov 18: this street first, then the streets around it (nearby lookup).
@@ -5681,29 +6047,7 @@ function whereToMoveEntries(nowMs) {
     var d = (STREET_DATA || {})[cur];
     if (d) addStreet(cur, d.data.street.short_name, d.data.sides, d.data.limits, true);
   }
-  function alpha(a, b) {
-    if (a.streetSlug !== b.streetSlug) return a.streetSlug < b.streetSlug ? -1 : 1;
-    return a.sideKey < b.sideKey ? -1 : (a.sideKey > b.sideKey ? 1 : 0);
-  }
-  out.sort(function (a, b) {
-    var ga = a.notEstablished ? 2 : (a.cannotPark ? 1 : 0);
-    var gb = b.notEstablished ? 2 : (b.cannotPark ? 1 : 0);
-    if (ga !== gb) return ga - gb;
-    if (ga === 2) return alpha(a, b);
-    if (ga === 1) {
-      var ra = (a.resumeMs === null) ? Infinity : a.resumeMs;
-      var rb = (b.resumeMs === null) ? Infinity : b.resumeMs;
-      if (ra !== rb) return ra - rb;
-      return alpha(a, b);
-    }
-    var sa = (a.stayMs === null) ? -Infinity : a.stayMs;
-    var sb = (b.stayMs === null) ? -Infinity : b.stayMs;
-    if (sa !== sb) return sb - sa;
-    if (a.binds === "cleaning" && b.binds !== "cleaning") return -1;
-    if (b.binds === "cleaning" && a.binds !== "cleaning") return 1;
-    return alpha(a, b);
-  });
-  return out;
+  return rankMoveEntries(out);
 }
 /* Covered street names, from the ranked list itself — the current street
    plus any nearby streets the sweep landed. */
@@ -5841,6 +6185,7 @@ function renderWhereToMove(nowMs) {
    side or the timer. */
 function whereShowOnMap(key) {
   if (!key || liveActiveSideKeys().indexOf(key) < 0) return mapSelectedCurb();
+  showTab("map");
   setMapOpen(true);
   return mapSelectCurb(key);
 }
@@ -5999,12 +6344,307 @@ function fetchReports(fetchImpl) {
    opens, and the textarea takes focus. Read-only for everything else —
    like a curb tap, it never touches the parked side or the timer. */
 function openReportForm(sideKey) {
+  showTab("settings");
   if (sideKey && liveActiveSideKeys().indexOf(sideKey) >= 0) _reportSide = sideKey;
   setReportOpen(true);
   var t = el("reportText");
   if (t && t.focus) t.focus();
   return _reportSide;
 }
+
+
+/* ---- Destination tab (Nov 18 homescreen restructure) ----
+   "What are the rules where I'm going?" Type a destination address;
+   the app shows the parking rules (verdicts) for that spot, through the
+   SAME live-lookup pipeline as the GPS path (Photon -> Overpass ->
+   CKAN Signalisation +-250 m -> Geobase side by house number -> same
+   parser + guards), and the SAME honest-data rules: city data stands
+   unless reported different, 1 pole establishes on the live path,
+   placement guards stay; not-established / ambiguous / conflict -> no
+   verdict, said plainly. Nothing is invented.
+   The destination result lives in DEST, separate from LIVE: looking up
+   a destination never moves the current street, the parked side or the
+   timer. A destination that IS one of the three verified streets uses
+   that street's verified data (no live re-read — the verified page is
+   authoritative there). */
+var DEST = { status: "idle", query: "", streetName: null, houseNumber: null,
+  sides: null, lims: null, counts: null, segment: null, sideMethod: null,
+  dataAsOf: null, errorTitle: null, errorDetail: null, cacheStale: null, baked: false };
+var DEST_GEN = 0;
+function destBakedSlug(streetName) {
+  if (!streetName || !DATA || !DATA.streets) return null;
+  var lower = String(streetName).toLowerCase();
+  for (var i = 0; i < DATA.streets.length; i++) {
+    if (String(DATA.streets[i].name).toLowerCase() === lower) return DATA.streets[i].slug;
+  }
+  return null;
+}
+/* Pick the Photon forward-search feature to use: the first feature with
+   a street AND a house number wins; else the first feature with a street
+   (the house is then found by the nearest-address fallback). Pure, so
+   tests can drive it without the network. */
+function destPickFeature(features) {
+  var withStreet = null;
+  var list = (features && features.features) || features || [];
+  for (var i = 0; i < list.length; i++) {
+    var h = liveHouseFromFeature(list[i]);
+    if (!h || !h.street) continue;
+    if (h.number !== null && h.number !== undefined) return { feature: list[i], house: h };
+    if (!withStreet) withStreet = { feature: list[i], house: h };
+  }
+  return withStreet;
+}
+function destSetError(status, title, detail) {
+  DEST.status = status; DEST.errorTitle = title; DEST.errorDetail = detail;
+  DEST.sides = null; DEST.lims = null; DEST.cacheStale = null;
+  destRender();
+}
+function destApplyResult(result, dataAsOf) {
+  DEST.status = "ready"; DEST.sides = result.sides; DEST.lims = null;
+  DEST.counts = result.counts; DEST.segment = result.segment;
+  DEST.sideMethod = result.sideMethod; DEST.dataAsOf = dataAsOf || result.dataAsOf || null;
+  DEST.cacheStale = null; DEST.baked = false;
+  destRender();
+}
+/* The live pipeline for a destination fix — the same steps as
+   liveRunLookupInner (Geobase -> packages -> cache -> Overpass -> CKAN
+   signs -> RPA canon -> liveBuildResult -> paid), but the result lands
+   in DEST, never in LIVE, and no nearby sweep or junction lookup fires:
+   the destination is a lookup, not a move. A verified (baked) street
+   short-circuits to its verified data before any network call. */
+async function destRunLookup(fix) {
+  var gen = ++DEST_GEN;
+  var slug = liveSlug(fix.streetName);
+  var baked = destBakedSlug(fix.streetName);
+  if (baked && STREET_DATA && STREET_DATA[baked]) {
+    var bd = STREET_DATA[baked].data;
+    DEST = { status: "ready", query: DEST.query, streetName: bd.street.name,
+      houseNumber: fix.houseNumber, sides: bd.sides, lims: bd.limits || null,
+      counts: null, segment: null, sideMethod: "verified", dataAsOf: bd.data_as_of,
+      errorTitle: null, errorDetail: null, cacheStale: null, baked: true };
+    destRender();
+    return { status: "ok", baked: true };
+  }
+  DEST = { status: "loading", query: DEST.query, streetName: fix.streetName,
+    houseNumber: fix.houseNumber, houseLat: fix.houseLat, houseLon: fix.houseLon,
+    sides: null, lims: null, counts: null, segment: null, sideMethod: null,
+    dataAsOf: null, errorTitle: null, errorDetail: null, cacheStale: null, baked: false };
+  destRender();
+  try {
+    if (typeof fetch === "undefined") {
+      throw { liveError: "error-data", title: "Couldn't read the city's signs",
+        detail: "This browser can't reach the city's data. Read the sign where you park." };
+    }
+    var candidate = liveNomVoieCandidate(fix.streetName);
+    var geoRows = [];
+    try { geoRows = await liveCkanSql(liveGeobaseSql(candidate)); } catch (e) { geoRows = []; }
+    var geoHit = liveGeobaseHit(geoRows, fix.houseNumber);
+    var dataAsOf = null;
+    try {
+      var pkg = await liveCkanPackage();
+      dataAsOf = (pkg.metadata_modified || pkg.metadata_created || "").slice(0, 10) || null;
+    } catch (e) { dataAsOf = null; }
+    var paidAsOf = null;
+    try {
+      var ppkg = await liveCkanPaidPackage();
+      paidAsOf = (ppkg.metadata_modified || ppkg.metadata_created || "").slice(0, 10) || null;
+    } catch (e) { paidAsOf = null; }
+    var cacheKey = liveCacheKey(slug, geoHit ? geoHit.idTrc : null, fix.houseNumber);
+    var cached = liveCacheRead(cacheKey);
+    var signsOk = !dataAsOf || (cached && cached.dataAsOf === dataAsOf);
+    var paidOk = !paidAsOf || (cached && cached.paidAsOf === paidAsOf);
+    if (cached && signsOk && paidOk) {
+      if (gen !== DEST_GEN) return { status: "abandoned" };
+      if (liveCacheIsStale(cached)) {
+        destApplyResult(cached.result, dataAsOf);
+        DEST.cacheStale = { savedAt: cached.savedAt, label: liveCacheSavedLabel(cached.savedAt) };
+        destRender();
+      } else {
+        destApplyResult(cached.result, dataAsOf);
+        return cached.result;
+      }
+    }
+    var houseLat = fix.houseLat, houseLon = fix.houseLon;
+    if (houseLat === null || houseLat === undefined || houseLon === null || houseLon === undefined) {
+      var pt = await liveHousePointViaSearch(fix.houseNumber, fix.streetName);
+      if (!pt) {
+        throw { liveError: "error-side", title: "Couldn't tell which side",
+          detail: "The house couldn't be placed on the street map, so no side could be placed. Read the sign where you park." };
+      }
+      houseLat = pt.lat; houseLon = pt.lon;
+    }
+    var over = await liveOverpassLookup(fix.streetName, fix.lat, fix.lon);
+    var chain = liveChainStreetWays(over.ways, fix.streetName, fix.lat, fix.lon);
+    if (!chain) {
+      throw { liveError: "error-map", title: "Couldn't read the street map",
+        detail: "No road matching this street came back from the map, so no windows can be shown. Read the sign where you park." };
+    }
+    var crossWays = over.ways.filter(function (w) {
+      var t = w.tags || {};
+      return !chain.streetWayIds[w.id] && (t.name || "").toLowerCase() !== String(fix.streetName).toLowerCase()
+        && ["footway", "path", "cycleway", "steps", "pedestrian"].indexOf(t.highway) < 0;
+    });
+    var signs = await liveCkanSql(liveCkanSignsSql(fix.lat, fix.lon));
+    var codes = [];
+    signs.forEach(function (s) { if (s.CODE_RPA && codes.indexOf(s.CODE_RPA) < 0) codes.push(s.CODE_RPA); });
+    var canon = liveRpaCacheGet(codes);
+    var missing = codes.filter(function (c) { return canon[c] === undefined; });
+    if (missing.length) {
+      try {
+        var rows = await liveCkanSql(liveRpaSql(missing));
+        rows.forEach(function (r) { canon[r.CODE_RPA] = r.DESCRIPTION_RPA; });
+        liveRpaCacheSave(canon);
+      } catch (e) { /* keep the cached subset — codes still missing stay ambiguous, honestly */ }
+    }
+    var result = liveBuildResult({ signs: signs, canonByCode: canon, chain: chain,
+      crossWays: crossWays, houseLat: houseLat, houseLon: houseLon,
+      houseNumber: fix.houseNumber, streetName: fix.streetName, dataAsOf: dataAsOf, geoHit: geoHit });
+    if (result.status !== "ok") {
+      throw { liveError: result.error, title: "Couldn't tell which side",
+        detail: "The house couldn't be placed on the street map, so no side could be placed. Read the sign where you park." };
+    }
+    var paid = await livePaidLookup(fix, result,
+      { chain: chain, houseLat: houseLat, houseLon: houseLon,
+        houseNumber: fix.houseNumber, streetName: fix.streetName }, paidAsOf);
+    result.sides.even.paid = paid.even;
+    result.sides.odd.paid = paid.odd;
+    if (gen !== DEST_GEN) return { status: "abandoned" };
+    liveCacheSave(cacheKey, { streetName: fix.streetName, streetSlug: slug,
+      houseNumber: fix.houseNumber, dataAsOf: dataAsOf, paidAsOf: paidAsOf,
+      savedAt: Date.now(), result: result });
+    destApplyResult(result, dataAsOf);
+    return result;
+  } catch (err) {
+    if (gen !== DEST_GEN) return { status: "abandoned" };
+    var e2 = (err && err.liveError) ? err : { liveError: "error-data",
+      title: "Couldn't read the city's signs",
+      detail: "The city's signage data didn't load, so no windows can be shown. Read the sign where you park." };
+    destSetError(e2.liveError, e2.title, e2.detail);
+    return { status: "error", error: e2.liveError };
+  }
+}
+/* Resolve a typed destination address (Photon forward search) and run
+   the live pipeline on it. A street named without a house number falls
+   back to the nearest house on that street, the same fallback as the
+   GPS path. Returns a promise of { status, ... } — never throws. */
+function destSearch(query) {
+  var q = String(query || "").replace(/^\s+|\s+$/g, "");
+  var gen0 = ++DEST_GEN; /* a new search drops any in-flight one */
+  if (!q) {
+    destSetError("error-address", "Type an address first.",
+      "Type a street address in Montreal, with a house number, and try again.");
+    return Promise.resolve({ status: "error", error: "error-address" });
+  }
+  DEST = { status: "loading", query: q, streetName: null, houseNumber: null,
+    sides: null, lims: null, counts: null, segment: null, sideMethod: null,
+    dataAsOf: null, errorTitle: null, errorDetail: null, cacheStale: null, baked: false };
+  destRender();
+  if (typeof fetch === "undefined") {
+    destSetError("error-data", "Couldn't read the city's signs",
+      "This browser can't reach the city's data. Read the sign where you park.");
+    return Promise.resolve({ status: "error", error: "error-data" });
+  }
+  var url = LIVE_PHOTON_SEARCH + encodeURIComponent(q + ", Montreal") + "&limit=5";
+  return liveFetchWithRetry(url, {}, 2)
+    .then(function (res) { return res.json(); })
+    .then(function (j) {
+      if (gen0 !== DEST_GEN) return { status: "abandoned" };
+      var picked = destPickFeature(j);
+      if (!picked) {
+        destSetError("error-address", "Couldn't find that address",
+          "No address matching \u201c" + q + "\u201d came back. Check the spelling and try again.");
+        return { status: "error", error: "error-address" };
+      }
+      var h = picked.house;
+      var pt = (picked.feature.geometry && picked.feature.geometry.coordinates)
+        ? { lat: picked.feature.geometry.coordinates[1], lon: picked.feature.geometry.coordinates[0] } : null;
+      if (h.number === null || h.number === undefined) {
+        if (!pt) {
+          destSetError("error-side", "Couldn't tell which side",
+            "No house number came back for this street, so no side could be placed. Read the sign where you park.");
+          return { status: "error", error: "error-side" };
+        }
+        return liveNearestAddressPoint(h.street, pt.lat, pt.lon).then(function (near) {
+          if (gen0 !== DEST_GEN) return { status: "abandoned" };
+          if (!near) {
+            destSetError("error-side", "Couldn't tell which side",
+              "No house number came back for this street, so no side could be placed. Read the sign where you park.");
+            return { status: "error", error: "error-side" };
+          }
+          return destRunLookup({ lat: pt.lat, lon: pt.lon, streetName: h.street,
+            houseNumber: near.number, houseLat: near.lat, houseLon: near.lon, city: h.city || null });
+        });
+      }
+      return destRunLookup({ lat: pt ? pt.lat : null, lon: pt ? pt.lon : null,
+        streetName: h.street, houseNumber: h.number,
+        houseLat: pt ? pt.lat : null, houseLon: pt ? pt.lon : null, city: h.city || null });
+    })
+    .catch(function () {
+      destSetError("error-data", "Couldn't read the city's signs",
+        "The address lookup didn't load, so no windows can be shown. Read the sign where you park.");
+      return { status: "error", error: "error-data" };
+    });
+}
+/* The destination's ranked curb entries — the same builder + ranking as
+   where-to-move, so a destination curb ranks exactly like a Move curb. */
+function destEntries(nowMs) {
+  nowMs = nowMs || Date.now();
+  if (!DEST.sides) return [];
+  var out = [];
+  Object.keys(DEST.sides).forEach(function (key) {
+    var side = DEST.sides[key];
+    if (!side) return;
+    out.push(moveEntryFor(destBakedSlug(DEST.streetName) || "destination",
+      DEST.streetName || "Destination", side, key,
+      (DEST.lims && DEST.lims[key]) || null, false, nowMs));
+  });
+  return rankMoveEntries(out);
+}
+function destResultHtml(nowMs) {
+  nowMs = nowMs || Date.now();
+  if (DEST.status === "idle") return "Type an address above &mdash; the rules come from the city&rsquo;s data, live.";
+  if (DEST.status === "loading") return "Reading the city&rsquo;s signs\u2026";
+  if (DEST.status !== "ready") {
+    return esc(DEST.errorTitle || "Couldn't find the rules")
+      + "<br>" + esc(DEST.errorDetail || "Read the sign where you park.");
+  }
+  var s = "";
+  if (DEST.cacheStale) {
+    s += "<div>Last known &mdash; saved " + esc(DEST.cacheStale.label || "")
+      + ", checking the city\u2019s signs now.</div>";
+  }
+  s += "<div><b>" + esc(DEST.streetName || "")
+    + (DEST.houseNumber ? ", " + DEST.houseNumber : "") + "</b>"
+    + (DEST.baked ? " &mdash; verified street" : "") + "</div>";
+  destEntries(nowMs).forEach(function (e) { s += whereRowHtml(e, nowMs); });
+  /* Paid, same rule as the map: a paid side states its rate, an unknown
+     side says unknown — never "free" on a failed lookup. */
+  Object.keys(DEST.sides).forEach(function (k) {
+    var side = DEST.sides[k];
+    if (!side || !side.paid) return;
+    if (side.paid.status === "paid") {
+      var pr = paidWarnRowText(side);
+      if (pr) s += '<div class="wtmnote">' + esc(pr) + "</div>";
+    } else if (side.paid.status === "unknown") {
+      s += '<div class="wtmnote">Paid parking unknown for the ' + esc(side.label || k)
+        + " &mdash; the lookup didn&rsquo;t say whether this side is metered.</div>";
+    }
+  });
+  if (DEST.dataAsOf) {
+    s += '<div class="note" style="margin-top:8px">From city data dated ' + esc(DEST.dataAsOf)
+      + ". Live city-data lookup &mdash; not a verified page.</div>";
+  } else {
+    s += '<div class="note" style="margin-top:8px">Live city-data lookup &mdash; not a verified page.</div>';
+  }
+  return s;
+}
+function destRender(nowMs) {
+  var r = el("destResult");
+  if (!r) return;
+  r.innerHTML = destResultHtml(nowMs);
+}
+function destState() { return DEST; }
+function destSetState(s) { DEST = s; }
 
 /* ---- OSM pan / zoom handlers (browser only; the pure math above is
    what the suites drive) ---- */
@@ -6225,6 +6865,13 @@ if (typeof window !== "undefined") {
     reportListHtml: reportListHtml, renderReportCard: renderReportCard,
     setReportOpen: setReportOpen, reportOpen: reportOpen,
     fetchReports: fetchReports, openReportForm: openReportForm,
+    showTab: showTab, currentTab: currentTab, TABS: TABS,
+    closeSheet: closeSheet, sheetIsOpen: sheetIsOpen, SHEET_TABS: SHEET_TABS,
+    renderSettingsLayers: renderSettingsLayers, setGpsStatusText: setGpsStatusText,
+    destSearch: destSearch, destRunLookup: destRunLookup, destPickFeature: destPickFeature,
+    destBakedSlug: destBakedSlug, destEntries: destEntries, destResultHtml: destResultHtml,
+    destRender: destRender, destState: destState, destSetState: destSetState,
+    moveEntryFor: moveEntryFor, rankMoveEntries: rankMoveEntries,
     _reportCache: function () { return _reportCache; },
     _reportSide: function () { return _reportSide; } };
 }
