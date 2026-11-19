@@ -4371,18 +4371,74 @@ function liveMaybeLookup(lat, lon, feature) {
 }
 
 /* ---- network: fetch with backoff, CKAN, Overpass, Photon forward search ---- */
+/* ---- fetch timeouts (deststuck, Nov 19): a hung connection used to wait
+   forever — every fetch funnelled through liveFetchWithRetry with no signal
+   and no timeout, so a stalled re-fetch left the "checking" label up for
+   minutes (the Destination stale-cache hang). Each attempt now carries its
+   own AbortController deadline: 20 s for the fast lookups (CKAN, Photon,
+   paid), 30 s for Overpass (a real spatial query; its own [timeout:60] is
+   server-side only and never bounded the client wait). An abort rejects
+   like a network failure, so the existing retry/backoff still applies —
+   except Overpass, where an abort skips the same-host retry and falls
+   straight through to the fallback host (a hung host is not transient).
+   LIVE_LOOKUP_DEADLINE_MS bounds one whole lookup: 120 s after a lookup
+   starts, a watchdog surfaces a timeout error (and clears the stale flag)
+   even if an attempt's fetch ignores its abort signal. The underlying run
+   keeps going; a late success still lands and replaces the error.
+   LIVE_PAID_TIMEOUT_MS bounds the paid phase alone: the windows are
+   already computed when it runs, so it never holds them up past 30 s —
+   both sides read "unknown" instead. All four are plain vars so suites
+   can shorten them; the shipped values are what a phone on a slow
+   connection gets. Where AbortController/clearTimeout do not exist (very
+   old engines) the code degrades to the old bare fetch, honestly. */
+var LIVE_FETCH_TIMEOUT_MS = 20000;
+var LIVE_OVERPASS_TIMEOUT_MS = 30000;
+var LIVE_LOOKUP_DEADLINE_MS = 120000;
+var LIVE_PAID_TIMEOUT_MS = 30000;
 function liveSleep(ms) {
   return new Promise(function (res) { setTimeout(res, ms); });
 }
-function liveFetchWithRetry(url, options, maxAttempts) {
+function liveFetchWithRetry(url, options, maxAttempts, timeoutMs, retryOnTimeout) {
+  var tMs = (typeof timeoutMs === "number" && timeoutMs > 0) ? timeoutMs : LIVE_FETCH_TIMEOUT_MS;
+  var retryTO = (retryOnTimeout !== false); /* Overpass passes false: a hung host is not transient */
   function attempt(n) {
-    return fetch(url, options).then(function (res) {
+    /* Clone the caller's options per attempt: the signal is per-attempt,
+       and Overpass reuses one opts object across its hosts. */
+    var opts = {};
+    if (options) {
+      for (var k in options) {
+        if (Object.prototype.hasOwnProperty.call(options, k)) opts[k] = options[k];
+      }
+    }
+    var ctrl = null, timer = null;
+    if (typeof AbortController !== "undefined") {
+      try {
+        ctrl = new AbortController();
+        opts.signal = ctrl.signal;
+        timer = setTimeout(function () { try { ctrl.abort(); } catch (e) { /* already settled */ } }, tMs);
+      } catch (e) { ctrl = null; timer = null; }
+    }
+    function done() {
+      if (timer) {
+        try { if (typeof clearTimeout === "function") clearTimeout(timer); } catch (e) { /* already fired */ }
+        timer = null;
+      }
+    }
+    function isAbort(err) {
+      if (!err) return false;
+      if (err.name === "AbortError") return true;
+      try { return !!(ctrl && ctrl.signal && ctrl.signal.aborted); } catch (e) { return false; }
+    }
+    return fetch(url, opts).then(function (res) {
+      done();
       if (res.ok) return res;
       if ((res.status === 502 || res.status === 503 || res.status === 504 || res.status === 429) && n < maxAttempts) {
         return liveSleep(800 * n).then(function () { return attempt(n + 1); });
       }
       throw new Error("HTTP " + res.status);
     }, function (err) {
+      done();
+      if (isAbort(err) && !retryTO) throw err; /* hung host: no same-host retry, the caller falls through */
       if (n < maxAttempts) return liveSleep(800 * n).then(function () { return attempt(n + 1); });
       throw err;
     });
@@ -4430,7 +4486,7 @@ function liveOverpassLookup(streetName, lat, lon) {
   urls.forEach(function (url, u) {
     chain = chain.then(function () {
       if (result) return;
-      return liveFetchWithRetry(url, opts, tries[u])
+      return liveFetchWithRetry(url, opts, tries[u], LIVE_OVERPASS_TIMEOUT_MS, false)
         .then(function (res) { return res.json(); })
         .then(function (j) {
           if (j && j.elements && j.elements.length) {
@@ -4722,7 +4778,36 @@ async function livePaidLookup(fix, result, input, paidAsOf) {
     return unknownBoth;
   }
 }
+/* Paid lookup with its own deadline (deststuck, Nov 19): the windows are
+   already computed when this runs, so a hung paid phase must never hold
+   them up — past LIVE_PAID_TIMEOUT_MS both sides read "unknown" (the
+   honest best-effort answer) and the result applies. The underlying
+   lookup keeps running; its late return is discarded by the race. Only
+   the two main paths use this; the background prefetch keeps the plain
+   call — a hung paid fetch there only delays a sweep landing, never a
+   verdict or a label. */
+function livePaidLookupTimed(fix, result, input, paidAsOf) {
+  var reason = "The paid-parking lookup didn't finish in time.";
+  return Promise.race([
+    livePaidLookup(fix, result, input, paidAsOf),
+    liveSleep(LIVE_PAID_TIMEOUT_MS).then(function () {
+      return { even: livePaidUnknown(reason), odd: livePaidUnknown(reason) };
+    })
+  ]);
+}
 
+/* Clear a stale "checking" label ONLY when it is this run's own frame
+   (deststuck, Nov 19): an abandoned run must never strip a newer run's
+   label — the newer run reset LIVE when it started and owns the flag now.
+   The gen stamp on the flag (set where the stale frame is applied) is
+   what makes the check possible; a flag without a stamp (older entries,
+   hand-built states) is left alone. */
+function liveClearStaleIfMine(gen) {
+  if (LIVE.cacheStale && LIVE.cacheStale.gen === gen) {
+    LIVE.cacheStale = null;
+    if (typeof renderAll === "function") renderAll();
+  }
+}
 function liveRunLookup(fix) {
   var key = liveSlug(fix.streetName) + "|" + fix.houseNumber;
   if (LIVE_LOADING && LIVE_LOADING.key === key) return LIVE_LOADING.promise;
@@ -4741,6 +4826,25 @@ async function liveRunLookupInner(fix) {
     dataAsOf: null, errorTitle: null, errorDetail: null, geoDisagreement: false,
     centreline: null, houseAlong: null, houseCt: null };
   if (typeof renderAll === "function") renderAll();
+  /* Lookup watchdog (deststuck, Nov 19): if this run still owns LIVE after
+     LIVE_LOOKUP_DEADLINE_MS, surface a timeout error and clear the stale
+     flag — the per-attempt timeouts bound every fetch that honours its
+     abort signal, and this bounds the rest (a fetch that ignores its
+     signal, or a pathological all-hung sequence). The run keeps going in
+     the background; a late success still lands via liveApplyResult and
+     replaces the error, and a late failure re-renders the same error. */
+  var __liveWatchdog = null;
+  try {
+    __liveWatchdog = setTimeout(function () {
+      if (gen !== LIVE_GEN) return; /* a newer lookup owns LIVE now */
+      LIVE.cacheStale = null;
+      LIVE.status = "error-data";
+      LIVE.errorTitle = "The city's signs are taking too long";
+      LIVE.errorDetail = "The lookup didn't finish in time, so no windows can be shown. Read the sign where you park.";
+      LIVE.sides = null;
+      if (typeof renderAll === "function") renderAll();
+    }, LIVE_LOOKUP_DEADLINE_MS);
+  } catch (e) { __liveWatchdog = null; }
   try {
     if (typeof fetch === "undefined") {
       throw { liveError: "error-data", title: "Couldn't read the city's signs",
@@ -4768,7 +4872,7 @@ async function liveRunLookupInner(fix) {
     var signsOk = !dataAsOf || (cached && cached.dataAsOf === dataAsOf);
     var paidOk = !paidAsOf || (cached && cached.paidAsOf === paidAsOf);
     if (cached && signsOk && paidOk) {
-      if (gen !== LIVE_GEN) return { status: "abandoned" }; /* left live mode mid-lookup */
+      if (gen !== LIVE_GEN) { liveClearStaleIfMine(gen); return { status: "abandoned" }; } /* left live mode mid-lookup */
       liveCacheTouch(cacheKey); /* a hit is a use - most-recently-used */
       if (liveCacheIsStale(cached)) {
         /* STALE cache hit (map fix, Nov 18): a morning-saved entry is never
@@ -4777,7 +4881,7 @@ async function liveRunLookupInner(fix) {
            fresh lookup below re-runs — then fall through to the fresh
            path, which overwrites the cache and clears the flag. */
         liveApplyResult(cached.result, dataAsOf);
-        LIVE.cacheStale = { savedAt: cached.savedAt, label: liveCacheSavedLabel(cached.savedAt) };
+        LIVE.cacheStale = { savedAt: cached.savedAt, label: liveCacheSavedLabel(cached.savedAt), gen: gen };
         if (typeof renderAll === "function") renderAll();
       } else {
         liveApplyResult(cached.result, dataAsOf);
@@ -4828,12 +4932,12 @@ async function liveRunLookupInner(fix) {
     /* Paid parking rides the same cache entry (Phase 4). Best effort: a
        failed lookup leaves both sides "unknown", never "free", and never
        blocks the windows. */
-    var paid = await livePaidLookup(fix, result,
+    var paid = await livePaidLookupTimed(fix, result,
       { chain: chain, houseLat: houseLat, houseLon: houseLon,
         houseNumber: fix.houseNumber, streetName: fix.streetName }, paidAsOf);
     result.sides.even.paid = paid.even;
     result.sides.odd.paid = paid.odd;
-    if (gen !== LIVE_GEN) return { status: "abandoned" }; /* left live mode mid-lookup */
+    if (gen !== LIVE_GEN) { liveClearStaleIfMine(gen); return { status: "abandoned" }; } /* left live mode mid-lookup */
     liveCacheSaveEntry(cacheKey, { streetName: fix.streetName, streetSlug: slug,
       houseNumber: fix.houseNumber, dataAsOf: dataAsOf, paidAsOf: paidAsOf,
       savedAt: Date.now(), result: result });
@@ -4842,13 +4946,24 @@ async function liveRunLookupInner(fix) {
     liveJunctionLookup(fix, over.ways); /* the map shows the junction when the house sits close to one — the cross street's ways are already in the .c set, so no extra Overpass query */
     return result;
   } catch (err) {
-    if (gen !== LIVE_GEN) return { status: "abandoned" }; /* left live mode mid-lookup */
+    if (gen !== LIVE_GEN) { liveClearStaleIfMine(gen); return { status: "abandoned" }; } /* left live mode mid-lookup */
+    /* (deststuck, Nov 19): a failed re-fetch must clear the "checking"
+       label — the banner, the map note and where-to-move all read this
+       flag, and until now only success (liveApplyResult) cleared it, so
+       a stale hit + failed re-fetch left every "checking" line up while
+       the verify banner already showed the error. */
+    LIVE.cacheStale = null;
     var e2 = (err && err.liveError) ? err : { liveError: "error-data",
       title: "Couldn't read the city's signs",
       detail: "The city's signage data didn't load, so no windows can be shown. Read the sign where you park." };
     LIVE.status = e2.liveError; LIVE.errorTitle = e2.title; LIVE.errorDetail = e2.detail; LIVE.sides = null;
     if (typeof renderAll === "function") renderAll();
     return { status: "error", error: e2.liveError };
+  } finally {
+    if (__liveWatchdog) {
+      try { if (typeof clearTimeout === "function") clearTimeout(__liveWatchdog); } catch (e) { /* already fired */ }
+      __liveWatchdog = null;
+    }
   }
 }
 function liveApplyResult(result, dataAsOf) {
@@ -4900,7 +5015,7 @@ function liveNearbyAreaQuery(lat, lon) {
   urls.forEach(function (url, u) {
     chain = chain.then(function () {
       if (result) return;
-      return liveFetchWithRetry(url, opts, tries[u])
+      return liveFetchWithRetry(url, opts, tries[u], LIVE_OVERPASS_TIMEOUT_MS, false)
         .then(function (res) { return res.json(); })
         .then(function (j) {
           if (j && j.elements && j.elements.length) {
@@ -7645,12 +7760,48 @@ function destSetError(status, title, detail) {
   DEST.sides = null; DEST.lims = null; DEST.cacheStale = null;
   destRender();
 }
+/* Clear a stale "checking" label ONLY when it is this run's own frame
+   (deststuck, Nov 19): an abandoned run must never strip a newer run's
+   label — the newer run reset DEST when it started and owns the flag now.
+   The gen stamp on the flag (set where the stale frame is applied) is
+   what makes the check possible; a flag without a stamp (older entries,
+   hand-built states) is left alone. */
+function destClearStaleIfMine(gen) {
+  if (DEST.cacheStale && DEST.cacheStale.gen === gen) {
+    DEST.cacheStale = null;
+    destRender();
+  }
+}
+/* Move the map to the destination (deststuck issue 3, Nov 19): a
+   Destination lookup resolves to a place, and the map is the screen that
+   shows it — ParkUsher's reference behaviour is that searching an address
+   moves the map to it with the coloured curbs. The colour-around layer
+   follows the screen centre, so centring on the destination's house point
+   makes the destination's own live.v5 entry (saved just before this apply
+   on the success path, already cached on the stale/fresh paths) draw its
+   verdict-coloured curbs as an area street. Best effort: the verdicts
+   already rendered — a map fault never blocks them. Zoom keeps the current
+   zoom but never below street level (OSM_ZOOM_DEFAULT, 17). */
+function destCentreMap(result) {
+  try {
+    var lat = (result && typeof result.houseLat === "number") ? result.houseLat : null;
+    var lon = (result && typeof result.houseLon === "number") ? result.houseLon : null;
+    if ((lat === null || lon === null) && typeof DEST.houseLat === "number" && typeof DEST.houseLon === "number") {
+      lat = DEST.houseLat; lon = DEST.houseLon;
+    }
+    if (typeof lat !== "number" || typeof lon !== "number" || !isFinite(lat) || !isFinite(lon)) return;
+    if (typeof osmSetView !== "function") return;
+    osmSetView(lat, lon, Math.max(osmView().zoom, OSM_ZOOM_DEFAULT));
+    if (typeof osmAreaScheduleRefresh === "function") osmAreaScheduleRefresh();
+  } catch (e) { /* the map follows best-effort; the verdicts already rendered */ }
+}
 function destApplyResult(result, dataAsOf) {
   DEST.status = "ready"; DEST.sides = result.sides; DEST.lims = null;
   DEST.counts = result.counts; DEST.segment = result.segment;
   DEST.sideMethod = result.sideMethod; DEST.dataAsOf = dataAsOf || result.dataAsOf || null;
   DEST.cacheStale = null; DEST.baked = false;
   destRender();
+  destCentreMap(result);
 }
 /* The live pipeline for a destination fix — the same steps as
    liveRunLookupInner (Geobase -> packages -> cache -> Overpass -> CKAN
@@ -7669,6 +7820,7 @@ async function destRunLookup(fix) {
       counts: null, segment: null, sideMethod: "verified", dataAsOf: bd.data_as_of,
       errorTitle: null, errorDetail: null, cacheStale: null, baked: true };
     destRender();
+    destCentreMap({ houseLat: fix.houseLat, houseLon: fix.houseLon });
     return { status: "ok", baked: true };
   }
   DEST = { status: "loading", query: DEST.query, streetName: fix.streetName,
@@ -7676,6 +7828,19 @@ async function destRunLookup(fix) {
     sides: null, lims: null, counts: null, segment: null, sideMethod: null,
     dataAsOf: null, errorTitle: null, errorDetail: null, cacheStale: null, baked: false };
   destRender();
+  /* Lookup watchdog (deststuck, Nov 19): if this run still owns DEST after
+     LIVE_LOOKUP_DEADLINE_MS, surface a timeout error — which clears the
+     stale flag via destSetError — even if an attempt's fetch ignores its
+     abort signal. The run keeps going in the background; a late success
+     still lands via destApplyResult and replaces the error. */
+  var __destWatchdog = null;
+  try {
+    __destWatchdog = setTimeout(function () {
+      if (gen !== DEST_GEN) return; /* a newer search owns DEST now */
+      destSetError("error-data", "The city's signs are taking too long",
+        "The lookup didn't finish in time, so no windows can be shown. Read the sign where you park.");
+    }, LIVE_LOOKUP_DEADLINE_MS);
+  } catch (e) { __destWatchdog = null; }
   try {
     if (typeof fetch === "undefined") {
       throw { liveError: "error-data", title: "Couldn't read the city's signs",
@@ -7700,11 +7865,11 @@ async function destRunLookup(fix) {
     var signsOk = !dataAsOf || (cached && cached.dataAsOf === dataAsOf);
     var paidOk = !paidAsOf || (cached && cached.paidAsOf === paidAsOf);
     if (cached && signsOk && paidOk) {
-      if (gen !== DEST_GEN) return { status: "abandoned" };
+      if (gen !== DEST_GEN) { destClearStaleIfMine(gen); return { status: "abandoned" }; }
       liveCacheTouch(cacheKey); /* a hit is a use - most-recently-used */
       if (liveCacheIsStale(cached)) {
         destApplyResult(cached.result, dataAsOf);
-        DEST.cacheStale = { savedAt: cached.savedAt, label: liveCacheSavedLabel(cached.savedAt) };
+        DEST.cacheStale = { savedAt: cached.savedAt, label: liveCacheSavedLabel(cached.savedAt), gen: gen };
         destRender();
       } else {
         destApplyResult(cached.result, dataAsOf);
@@ -7751,12 +7916,12 @@ async function destRunLookup(fix) {
       throw { liveError: result.error, title: "Couldn't tell which side",
         detail: "The house couldn't be placed on the street map, so no side could be placed. Read the sign where you park." };
     }
-    var paid = await livePaidLookup(fix, result,
+    var paid = await livePaidLookupTimed(fix, result,
       { chain: chain, houseLat: houseLat, houseLon: houseLon,
         houseNumber: fix.houseNumber, streetName: fix.streetName }, paidAsOf);
     result.sides.even.paid = paid.even;
     result.sides.odd.paid = paid.odd;
-    if (gen !== DEST_GEN) return { status: "abandoned" };
+    if (gen !== DEST_GEN) { destClearStaleIfMine(gen); return { status: "abandoned" }; }
     liveCacheSaveEntry(cacheKey, { streetName: fix.streetName, streetSlug: slug,
       houseNumber: fix.houseNumber, dataAsOf: dataAsOf, paidAsOf: paidAsOf,
       savedAt: Date.now(), result: result });
@@ -7764,20 +7929,36 @@ async function destRunLookup(fix) {
     livePrefetchAround(fix.lat, fix.lon, fix.streetName, fix.city); /* background: the streets around the destination are prefetched into the live.v5 cache - fire and forget, never delays this result */
     return result;
   } catch (err) {
-    if (gen !== DEST_GEN) return { status: "abandoned" };
+    if (gen !== DEST_GEN) { destClearStaleIfMine(gen); return { status: "abandoned" }; }
     var e2 = (err && err.liveError) ? err : { liveError: "error-data",
       title: "Couldn't read the city's signs",
       detail: "The city's signage data didn't load, so no windows can be shown. Read the sign where you park." };
     destSetError(e2.liveError, e2.title, e2.detail);
     return { status: "error", error: e2.liveError };
+  } finally {
+    if (__destWatchdog) {
+      try { if (typeof clearTimeout === "function") clearTimeout(__destWatchdog); } catch (e) { /* already fired */ }
+      __destWatchdog = null;
+    }
   }
 }
 /* Resolve a typed destination address (Photon forward search) and run
    the live pipeline on it. A street named without a house number falls
    back to the nearest house on that street, the same fallback as the
    GPS path. Returns a promise of { status, ... } — never throws. */
+var DEST_LOADING = null; /* { key, promise } — one in-flight search per query
+   (deststuck, Nov 19): the LIVE path dedups the same way (LIVE_LOADING).
+   Without it a double tap (button + Enter) starts two runs, and a second
+   run completing with a transiently different fetched set is the only way
+   the sheet can render one result and then another (the grey-then-red
+   flip). A repeat of the same query returns the in-flight promise; a
+   different query still drops the old run via DEST_GEN. */
 function destSearch(query) {
   var q = String(query || "").replace(/^\s+|\s+$/g, "");
+  if (q) {
+    var dkey = q.toLowerCase();
+    if (DEST_LOADING && DEST_LOADING.key === dkey) return DEST_LOADING.promise;
+  }
   var gen0 = ++DEST_GEN; /* a new search drops any in-flight one */
   if (!q) {
     destSetError("error-address", "Type an address first.",
@@ -7794,7 +7975,7 @@ function destSearch(query) {
     return Promise.resolve({ status: "error", error: "error-data" });
   }
   var url = LIVE_PHOTON_SEARCH + encodeURIComponent(q + ", Montreal") + "&limit=5";
-  return liveFetchWithRetry(url, {}, 2)
+  var p = liveFetchWithRetry(url, {}, 2)
     .then(function (res) { return res.json(); })
     .then(function (j) {
       if (gen0 !== DEST_GEN) return { status: "abandoned" };
@@ -7833,6 +8014,10 @@ function destSearch(query) {
         "The address lookup didn't load, so no windows can be shown. Read the sign where you park.");
       return { status: "error", error: "error-data" };
     });
+  DEST_LOADING = { key: q.toLowerCase(), promise: p };
+  p.then(function () { if (DEST_LOADING && DEST_LOADING.key === q.toLowerCase()) DEST_LOADING = null; },
+    function () { if (DEST_LOADING && DEST_LOADING.key === q.toLowerCase()) DEST_LOADING = null; });
+  return p;
 }
 /* The destination's ranked curb entries — the same builder + ranking as
    where-to-move, so a destination curb ranks exactly like a Move curb. */
