@@ -5714,6 +5714,18 @@ function mapCurbColor(key, nowMs) {
     if (!jr || jr.status !== "ready" || !jr.sides) return "grey";
     return curbColorForVerdict(verdictForSideData(jr.sides[jm[2]], null, nowMs, null));
   }
+  /* Area curb (Nov 19, colour around the centre): "area:<slug>:even|odd"
+     -- coloured by THAT street's own sides, from the area entry, never
+     the current street's. A street whose entry has left the area (or
+     never had one) reads grey, never a guessed verdict colour. */
+  var am = /^area:([^:]+):(even|odd)$/.exec(key || "");
+  if (am) {
+    var ae = (typeof osmAreaEntry === "function") ? osmAreaEntry(am[1]) : null;
+    if (!ae || !ae.result.sides) return "grey";
+    var av = verdictForSideData(ae.result.sides[am[2]], null, nowMs, null);
+    if (!av) av = limitOnlyVerdictForSideData(ae.result.sides[am[2]], null, nowMs, null);
+    return curbColorForVerdict(av);
+  }
   var v = verdictForSide(key, nowMs, parkedAtForVerdict(key));
   if (!v) v = limitOnlyVerdictForSideData(liveActiveSides()[key], limitForSideKey(key), nowMs, parkedAtForVerdict(key));
   return curbColorForVerdict(v);
@@ -5799,6 +5811,38 @@ function mapDetailForSide(key, nowMs) {
     }
     return { key: key, sideLabel: jlabel, color: jcolor, main: jv.text,
              allowedUntil: jallowed, comingUp: jcoming, note: null, reportable: false };
+  }
+  /* Area curb (Nov 19): the detail card reads from the area entry's own
+     sides -- the same verdict text as the current street's cards,
+     labelled with the street it belongs to (without the name the sheet
+     would just say "Even numbers side" for a street the app is not
+     showing). No "Report a sign here" button: a report is filed against
+     the street the app is showing, and this curb belongs to a
+     neighbouring street -- reporting it here would misattribute it
+     (same rule as the junction curbs). The sheet itself is the same
+     mapDetailHtml wrapper as every other curb tap. */
+  var am = /^area:([^:]+):(even|odd)$/.exec(key || "");
+  if (am) {
+    var ae = (typeof osmAreaEntry === "function") ? osmAreaEntry(am[1]) : null;
+    if (!ae || !ae.result.sides) return null;
+    var aside = ae.result.sides[am[2]];
+    if (!aside) return null;
+    var acolor = mapCurbColor(key, nowMs);
+    var alabel = (aside.label || am[2]) + " \u2014 " + ae.name;
+    var av = verdictForSideData(aside, null, nowMs, null);
+    if (!av) av = limitOnlyVerdictForSideData(aside, null, nowMs, null);
+    if (!av) return { key: key, sideLabel: alabel, color: acolor,
+      main: "No verified window for this side \u2014 the data doesn't say.",
+      allowedUntil: null, comingUp: null, note: null, reportable: false };
+    var aallowed = stayUntilTextFor(aside, null, av, nowMs);
+    var acoming = null;
+    var ar = nextWindowForSideData(aside, new Date(nowMs));
+    if (ar) {
+      if (ar.nw.state === "season_over") acoming = "Coming up: cleaning resumes " + seasonStartLabel(ar.win) + ".";
+      else acoming = "Coming up: " + windowHeadline(ar.win) + ".";
+    }
+    return { key: key, sideLabel: alabel, color: acolor, main: av.text,
+             allowedUntil: aallowed, comingUp: acoming, note: null, reportable: false };
   }
   var sides = liveActiveSides();
   var side = sides[key];
@@ -5976,6 +6020,7 @@ function osmRecentre() {
   _osmView = osmDefaultView();
   _osmStreetKey = osmStreetKey();
   renderMap();
+  osmAreaScheduleRefresh();
   return _osmView;
 }
 /* Free map rotation (Nov 18): bearing in degrees, clockwise from
@@ -6020,6 +6065,7 @@ function osmCentreOnGps() {
   if (lastFix) osmSetView(lastFix.lat, lastFix.lon, osmView().zoom);
   _gpsCentrePending = true;
   checkGps();
+  osmAreaScheduleRefresh();
   return osmView();
 }
 /* Container size: the real element in the browser, the 614 px card width
@@ -6090,7 +6136,13 @@ function osmZoomBy(d, cx, cy) {
    the main map, in the current street's local-metre frame — the same
    projection the old mini-map used, the same verdict rule (verdict,
    then the limit-only fallback). In baked mode there is no sweep, so
-   only the current street draws. */
+   only the current street draws.
+   Colour around the centre (Nov 19): the sweep streets no longer draw
+   from this section -- they draw from the area layer in mapSvgHtml
+   (osmAreaEntries), which covers every street with fetched data in the
+   250 m area around the screen centre, tappably. osmNearbySigns /
+   osmNearbyStreetPts / osmNearbyColor below are the shared geometry + colour
+   helpers both layers use. */
 function osmNearbySigns(result) {
   var counts = {};
   (result.attributed || []).forEach(function (s) {
@@ -6146,6 +6198,203 @@ function osmNearbyColor(sides, key, nowMs) {
   if (!v) v = limitOnlyVerdictForSideData(side, null, nowMs, null);
   return curbColorForVerdict(v);
 }
+/* ---- colour around the centre (Nov 19, his call: "it is colouring around
+   the center of screen ... what matter is to show around, not only the
+   street itself") ----
+   The map colours the verdict curbs of EVERY street with fetched data
+   inside the 250 m area around the SCREEN CENTRE -- not just the current
+   street, and not just the where-to-move sweep's streets. The area follows
+   the centre as the user pans: the derivation below re-runs from the
+   centre on every render, and the fetch for streets not yet in the cache
+   runs debounced after the pan ends (osmAreaRefresh / osmAreaScheduleRefresh).
+   Data source: the background cache ONLY -- the live.v5 entries (index
+   ticketSaver.live.v5.index, same LRU/TTL as the on-demand lookup) plus
+   the in-memory sweep streets (liveNearbyMapEntries), which are the same
+   entries the sweep just saved. A street with no fetched data gets NO
+   coloured curb -- not grey, not a guess: it simply is not in the list.
+   A fetched street with no established verdict still draws, grey -- the
+   same "no verdict" grey as the current street's curbs. The current
+   street is skipped here (its own curbs draw above, with the plain
+   even/odd keys); baked streets other than the current one are never area
+   candidates (the sweep never prefetches them, and the area layer reads
+   only the live cache + the sweep). */
+var LIVE_AREA_RADIUS_M = 250; /* the coloured area around the screen centre */
+var LIVE_AREA_GRID_M = 25; /* the derivation memo is keyed by ~25 m centre cell */
+var LIVE_AREA_PREFETCH_MIN_MOVE_M = 50; /* a nudge under 50 m never re-fetches */
+var LIVE_AREA_PREFETCH_DEBOUNCE_MS = 400; /* ms after the last centre change */
+var _areaMemo = null; /* { key, entries } -- entries carry their clipped pts */
+var _areaPrefetchAt = null; /* { lat, lon } the last area prefetch ran for */
+var _areaPrefetchPromise = null; /* the in-flight area prefetch, if any */
+var _areaTimer = null; /* the pending debounced refresh, if any */
+/* Min distance (m) from a point to a polyline in local metres. */
+function osmAreaDistToPts(pts, cx, cy) {
+  var best = null;
+  for (var i = 0; i < pts.length - 1; i++) {
+    var a = pts[i], b = pts[i + 1];
+    var dx = b.x - a.x, dy = b.y - a.y, l2 = dx * dx + dy * dy;
+    var t = l2 ? ((cx - a.x) * dx + (cy - a.y) * dy) / l2 : 0;
+    t = Math.max(0, Math.min(1, t));
+    var ex = cx - (a.x + t * dx), ey = cy - (a.y + t * dy);
+    var d = Math.sqrt(ex * ex + ey * ey);
+    if (best === null || d < best) best = d;
+  }
+  return best;
+}
+/* The area streets for the CURRENT screen centre: every street with fetched
+   data whose verdict segment comes within LIVE_AREA_RADIUS_M of the centre.
+   Pure derivation (no fetch) -- the memo is keyed by the centre cell + the
+   live.v5 index + the sweep state, so a landed prefetch, a re-fetch, or a
+   pan into a new cell re-derives, and a render at the same centre re-uses
+   the list. Each entry is { slug, name, distM, result, pts } -- pts are the
+   segment-clipped centreline points in the home-street local-metre frame,
+   exactly what the draw code offsets into curbs, so the distance test and
+   the drawn curb agree: a street is in the area exactly when its drawn
+   curb is. */
+function osmAreaEntries() {
+  var view = osmView();
+  var ref = osmRefLatLon();
+  var refLat = ref.lat, refLon = ref.lon;
+  var curName = null;
+  try {
+    var g0 = mapGeometry();
+    curName = (g0 && g0.ok) ? g0.streetName : null;
+  } catch (e) { curName = null; }
+  var idx = "";
+  try { idx = (typeof liveCacheIndexRead === "function") ? liveCacheIndexRead().join(",") : ""; } catch (e) { idx = ""; }
+  var nbState = "";
+  try {
+    nbState = ((typeof LIVE_NEARBY !== "undefined" && LIVE_NEARBY) ? (LIVE_NEARBY.status + ":" + (LIVE_NEARBY.fixKey || "")) : "");
+  } catch (e) { nbState = ""; }
+  var cellLat = Math.round(view.lat / (LIVE_AREA_GRID_M / 110540));
+  var cellLon = Math.round(view.lon / (LIVE_AREA_GRID_M / (111320 * Math.cos(view.lat * Math.PI / 180))));
+  var key = cellLat + "," + cellLon + "|" + idx + "|" + nbState;
+  if (_areaMemo && _areaMemo.key === key) return _areaMemo.entries;
+  var cands = {}; /* slug -> { slug, name, result }: the cache first, the in-memory sweep wins on a clash (freshest in-session) */
+  var prefix = (typeof LIVE_CACHE_PREFIX === "string") ? LIVE_CACHE_PREFIX : "ticketSaver.live.v5.";
+  if (idx) {
+    idx.split(",").forEach(function (k) {
+      if (!k || k.indexOf(prefix) !== 0) return;
+      var entry = null;
+      try { entry = (typeof liveCacheRead === "function") ? liveCacheRead(k) : null; } catch (e) { entry = null; }
+      if (!entry || !entry.result) return; /* liveCacheRead already enforces the 7-day TTL; a stale (>2 h) entry still reads -- last-known colours, refreshed by the area prefetch */
+      var slug = k.slice(prefix.length).split(".")[0]; /* the slug carries no dots (liveSlug), so the first segment is the slug */
+      if (!slug) return;
+      cands[slug] = { slug: slug, name: entry.streetName || entry.result.streetName || slug, result: entry.result };
+    });
+  }
+  try {
+    if (typeof liveNearbyMapEntries === "function") {
+      liveNearbyMapEntries().forEach(function (n) {
+        if (n && n.slug && n.result) cands[n.slug] = { slug: n.slug, name: n.name, result: n.result };
+      });
+    }
+  } catch (e) { /* the sweep streets are best-effort here; the cache is the source */ }
+  var c = mapXY(view.lat, view.lon, refLat, refLon); /* the screen centre, in the home-street local-metre frame */
+  var out = [];
+  Object.keys(cands).forEach(function (slug) {
+    var cand = cands[slug];
+    if (!cand.result || !cand.result.centreline || cand.result.centreline.length < 2) return;
+    if (!cand.result.segment) return;
+    if (curName && cand.name === curName) return;
+    var pts = null;
+    try { pts = osmNearbyStreetPts(cand.result, refLat, refLon); } catch (e) { return; }
+    if (!pts || pts.length < 2) return;
+    var d = osmAreaDistToPts(pts, c[0], c[1]); /* mapXY returns [x, y], not {x, y} */
+    if (d === null || !(d <= LIVE_AREA_RADIUS_M)) return; /* a non-finite distance excludes the street: NaN must never slip past the radius test (NaN > 250 is false) */
+    out.push({ slug: slug, name: cand.name, distM: Math.round(d * 10) / 10, result: cand.result, pts: pts });
+  });
+  out.sort(function (a, b) { return a.distM - b.distM || (a.slug < b.slug ? -1 : 1); });
+  _areaMemo = { key: key, entries: out };
+  return out;
+}
+function osmAreaEntry(slug) {
+  var list = osmAreaEntries();
+  for (var i = 0; i < list.length; i++) if (list[i].slug === slug) return list[i];
+  return null;
+}
+/* The area's render signature: slugs + per-side colours, so a landed
+   prefetch re-renders the map even when the centre has not moved. */
+function osmAreaSig(nowMs) {
+  return osmAreaEntries().map(function (a) {
+    return a.slug + "=" + ["even", "odd"].map(function (k) { return osmNearbyColor(a.result.sides, k, nowMs); }).join(",");
+  }).join(";");
+}
+/* Fetch the streets around the CURRENT screen centre through the identical
+   shared pipeline (livePrefetchAround -- the same area query, candidates,
+   parser + guards, caps, and live.v5 save as the GPS sweep and the
+   destination prefetch). Returns the prefetch promise (a resolved null
+   when there is nothing to do). Centres closer than 50 m to the last
+   trigger re-use the in-flight / finished prefetch instead of fetching
+   again; a finished prefetch for the same fixKey short-circuits inside
+   livePrefetchAround. The street excluded from the candidates is the
+   street the map is showing. City is null: the map centre has no
+   reverse-geocoded municipality, and inventing one would misstate the
+   paid lookup -- without a city the paid verdict falls back to "unknown",
+   honestly (the bgcache (b) note); sides, segments and verdicts do not
+   depend on the city. When the prefetch lands, the map re-renders (the
+   area signature changed). Never throws. */
+function osmAreaRefresh() {
+  var v = osmView();
+  var c = { lat: v.lat, lon: v.lon };
+  if (_areaPrefetchAt) {
+    try {
+      if (liveDistM(_areaPrefetchAt.lat, _areaPrefetchAt.lon, c.lat, c.lon) < LIVE_AREA_PREFETCH_MIN_MOVE_M) {
+        return _areaPrefetchPromise || Promise.resolve(null);
+      }
+    } catch (e) { /* fall through and fetch */ }
+  }
+  _areaPrefetchAt = c;
+  var name = null;
+  try {
+    var g1 = mapGeometry();
+    name = (g1 && g1.ok) ? g1.streetName : null;
+  } catch (e) { name = null; }
+  if (!name) {
+    try { name = liveMode() ? (LIVE.streetName || null) : null; } catch (e) { name = null; }
+  }
+  var p = Promise.resolve(null);
+  try {
+    if (typeof livePrefetchAround === "function") p = livePrefetchAround(c.lat, c.lon, name, null) || Promise.resolve(null);
+  } catch (e) { p = Promise.resolve(null); }
+  _areaPrefetchPromise = p;
+  return p.then(function (r) {
+    if (_areaPrefetchPromise === p) _areaPrefetchPromise = null;
+    renderMap();
+    return r;
+  }, function () {
+    if (_areaPrefetchPromise === p) _areaPrefetchPromise = null;
+    return null;
+  });
+}
+/* Debounced trigger for osmAreaRefresh: one 400 ms timer, reset on every
+   call, so a drag that fires pointermove/render dozens of times fetches
+   once, 400 ms after the last centre change. Called only from gesture-end
+   paths (pointer-up after a real pan, wheel, double-click, North,
+   GPS-centre) -- never from osmSetView/renderMap, so a programmatic
+   re-centre or a suite driving osmSetView never starts a fetch on its own. */
+function osmAreaScheduleRefresh() {
+  try {
+    if (typeof setTimeout !== "function") return;
+    /* Only schedule when the centre moved >= 50 m from the last area fetch
+       (or, before any fetch, from the default view -- the home area is the
+       GPS sweep's / destination prefetch's job, not this timer's). A no-op
+       re-centre (North tapped while already home, or a suite recentring an
+       unmoved map) schedules nothing, so no background fetch fires for a
+       centre that never moved. */
+    var v = osmView();
+    var base = _areaPrefetchAt;
+    if (!base) {
+      try { var d0 = osmDefaultView(); base = { lat: d0.lat, lon: d0.lon }; } catch (e) { base = null; }
+    }
+    if (base) {
+      try {
+        if (liveDistM(base.lat, base.lon, v.lat, v.lon) < LIVE_AREA_PREFETCH_MIN_MOVE_M) return;
+      } catch (e) { /* fall through and schedule */ }
+    }
+    if (_areaTimer !== null && typeof clearTimeout === "function") clearTimeout(_areaTimer);
+    _areaTimer = setTimeout(function () { _areaTimer = null; osmAreaRefresh(); }, LIVE_AREA_PREFETCH_DEBOUNCE_MS);
+  } catch (e) { /* the refresh is best-effort; the map still draws from cache */ }
+}
 /* The OSM map HTML: tiles + verdict overlay + the hint pill + the three
    controls (North / Info / GPS-centre). The legend, junction line and
    detail card used to ride here too; they moved to the (i) sheet and the
@@ -6191,23 +6440,34 @@ function mapSvgHtml(nowMs, geom, colors) {
   });
   s += '<svg class="osmsvg" width="' + fsize.w + '" height="' + fsize.h + '" viewBox="0 0 ' + fsize.w + ' ' + fsize.h + '" role="img" aria-label="Map of '
     + esc(geom.streetName || "this street") + ' with parking rules by side">';
-  /* Nearby streets first (under the current street), from the nearby
-     sweep's own results — same data, same verdicts as where-to-move. */
-  var nearby = (typeof liveNearbyMapEntries === "function") ? liveNearbyMapEntries() : [];
-  nearby.forEach(function (n) {
-    if (n.name === geom.streetName) return;
-    var pts = osmNearbyStreetPts(n.result, refLat, refLon);
-    if (pts.length < 2) return;
-    var signs = osmNearbySigns(n.result);
+  /* Area streets first (under the current street): every street with
+     fetched data in the 250 m area around the screen centre, in its
+     verdict colours -- the same data, same verdicts as where-to-move,
+     but centred on the view, not on the home street. This REPLACES the
+     old nearby-sweep block (baseline section 4.3): sweep streets inside
+     the area now draw here, TAPPABLE (the 18 px hit path, same as the
+     current street's curbs); a sweep street outside the 250 m area
+     does not draw at all -- its where-to-move row is unchanged. A
+     street with no fetched data is not in the list and draws nothing:
+     never grey, never a guess. */
+  var area = (typeof osmAreaEntries === "function") ? osmAreaEntries() : [];
+  area.forEach(function (a) {
+    var signs = osmNearbySigns(a.result);
     ["even", "odd"].forEach(function (k) {
       if (!signs[k]) return;
-      var curb = pts.map(function (pt, j) {
-        var nn = osmNearbyNormal(pts, j);
+      var curb = a.pts.map(function (pt, j) {
+        var nn = osmNearbyNormal(a.pts, j);
         return { x: pt.x + nn[0] * MAP_CURB_M * signs[k], y: pt.y + nn[1] * MAP_CURB_M * signs[k] };
       });
-      s += '<path d="' + osmPathD(curb, refLat, refLon, view, fsize) + '" fill="none" style="stroke:'
-        + mapColorStroke(osmNearbyColor(n.result.sides, k, nowMs))
+      var acolor = osmNearbyColor(a.result.sides, k, nowMs);
+      var akey = "area:" + a.slug + ":" + k;
+      var ad = osmPathD(curb, refLat, refLon, view, fsize);
+      s += '<path d="' + ad + '" fill="none" style="stroke:' + mapColorStroke(acolor)
         + '" stroke-width="4" stroke-linecap="round"/>';
+      s += '<path class="mapcurb-hit" data-map-side="' + esc(akey) + '" tabindex="0" role="button" aria-label="'
+        + esc(mapCurbAriaLabel(akey, nowMs)) + " \u2014 "
+        + (acolor === "red" ? "cannot park here now" : acolor === "green" ? "parking allowed until the deadline" : "no verified rule")
+        + '" d="' + ad + '" fill="none" stroke="rgba(0,0,0,0)" stroke-width="18" stroke-linecap="round"/>';
     });
   });
   /* Current street's curbs, coloured by the verdict in effect right now. */
@@ -6295,6 +6555,22 @@ function mapSelectableKeys() {
   if (geom && geom.ok && geom.curbs) {
     Object.keys(geom.curbs).forEach(function (k) { if (keys.indexOf(k) < 0) keys.push(k); });
   }
+  /* Area curbs (Nov 19): every drawn area curb is tappable, like the
+     current street's -- a key is selectable exactly when its curb is
+     drawn (a side with no side sign draws no curb and is not
+     selectable). */
+  if (typeof osmAreaEntries === "function") {
+    osmAreaEntries().forEach(function (a) {
+      var signs = null;
+      try { signs = osmNearbySigns(a.result); } catch (e) { signs = null; }
+      if (!signs) return;
+      ["even", "odd"].forEach(function (k) {
+        if (!signs[k]) return;
+        var key = "area:" + a.slug + ":" + k;
+        if (keys.indexOf(key) < 0) keys.push(key);
+      });
+    });
+  }
   return keys;
 }
 function mapSelectCurb(key) {
@@ -6364,10 +6640,19 @@ function renderMap(nowMs) {
     + "," + _osmSize.w + "x" + _osmSize.h
     + "|" + JSON.stringify(colors) + "|" + (MAP_LAYERS.paid ? "P" : "p") + (MAP_LAYERS.cleaning ? "C" : "c")
     + "|" + paidSig + "|" + (_mapSelected || "-") + "|" + jSig + "|" + staleSig + "|"
-    + (geom && geom.ok ? geom.viewBox : "nogeo:" + (geom && geom.reason || "?"));
+    + (geom && geom.ok ? geom.viewBox : "nogeo:" + (geom && geom.reason || "?"))
+    + "|area:" + osmAreaSig(nowMs);
   if (sig === _mapSig) return;
   _mapSig = sig;
   body.innerHTML = mapBodyHtml(nowMs, geom, colors);
+  /* An area curb that fell out of the 250 m area (the user panned away)
+     leaves no sheet behind: a selected area key that is no longer drawn
+     is cleared and its sheet closed, instead of showing a blank sheet. */
+  if (_mapSelected && _mapSelected.indexOf("area:") === 0
+      && mapSelectableKeys().indexOf(_mapSelected) < 0) {
+    _mapSelected = null;
+    if (sheetIsOpen("curb")) closeSheet();
+  }
   /* The curb sheet shows the same detail the map used to carry inline —
      refresh it while it is open, so the sheet never goes stale relative
      to the map. */
@@ -7218,6 +7503,7 @@ function osmOnPointerUp(e) {
     if (_osmDrag && _osmDrag.moved > 6) {
       _osmSuppressClick = true;
       setTimeout(function () { _osmSuppressClick = false; }, 100);
+      osmAreaScheduleRefresh(); /* the pan ended -- the coloured area follows the new centre, fetched once, debounced */
     }
     _osmDrag = null;
   }
@@ -7227,11 +7513,13 @@ function osmOnWheel(e) {
   if (e.preventDefault) e.preventDefault();
   var r = osmMapRect();
   osmZoomAt(e.clientX - r.left, e.clientY - r.top, osmView().zoom + (e.deltaY < 0 ? 1 : -1));
+  osmAreaScheduleRefresh();
 }
 function osmOnDblClick(e) {
   if (!osmEventInMap(e)) return;
   var r = osmMapRect();
   osmZoomAt(e.clientX - r.left, e.clientY - r.top, osmView().zoom + 1);
+  osmAreaScheduleRefresh();
 }
 
 /* Test hook (also handy in the console): pure date/.ics logic. */
@@ -7342,6 +7630,12 @@ if (typeof window !== "undefined") {
     osmOnPointerDown: osmOnPointerDown, osmOnPointerMove: osmOnPointerMove, osmOnPointerUp: osmOnPointerUp,
     osmPanBy: osmPanBy, osmZoomAt: osmZoomAt, osmZoomBy: osmZoomBy,
     osmNearbySigns: osmNearbySigns, osmNearbyStreetPts: osmNearbyStreetPts, osmNearbyColor: osmNearbyColor,
+    osmAreaEntries: osmAreaEntries, osmAreaEntry: osmAreaEntry, osmAreaSig: osmAreaSig,
+    osmAreaDistToPts: osmAreaDistToPts, osmAreaRefresh: osmAreaRefresh,
+    osmAreaScheduleRefresh: osmAreaScheduleRefresh,
+    LIVE_AREA_RADIUS_M: LIVE_AREA_RADIUS_M, LIVE_AREA_GRID_M: LIVE_AREA_GRID_M,
+    LIVE_AREA_PREFETCH_MIN_MOVE_M: LIVE_AREA_PREFETCH_MIN_MOVE_M,
+    LIVE_AREA_PREFETCH_DEBOUNCE_MS: LIVE_AREA_PREFETCH_DEBOUNCE_MS,
     osmEventInMap: osmEventInMap,
     OSM_TILE_URL: OSM_TILE_URL, OSM_ATTRIBUTION_URL: OSM_ATTRIBUTION_URL,
     OSM_ZOOM_DEFAULT: OSM_ZOOM_DEFAULT, OSM_ZOOM_MIN: OSM_ZOOM_MIN, OSM_ZOOM_MAX: OSM_ZOOM_MAX,
