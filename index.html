@@ -114,6 +114,15 @@
              border: 1.5px solid var(--amber-line); border-radius: 999px; padding: 6px 14px; font-size: 15px; font-weight: 700;
              color: var(--amber-ink); white-space: nowrap; box-shadow: 0 2px 10px rgba(0,0,0,.18);
              pointer-events: none; z-index: 5; }
+  /* Retry pill (Nov 19 area-paint phone fix): same seat as the hint pill,
+     but a real button — shown when the area prefetch finished with no
+     streets (failed or 0 landed), so the map says so and offers a retry
+     instead of sitting bare with no explanation. pointer-events auto
+     (unlike the hint pill) so the tap reaches it. */
+  .osmaretry { position: absolute; left: 50%; top: 12px; transform: translateX(-50%); background: var(--amber-bg);
+             border: 1.5px solid var(--amber-line); border-radius: 999px; padding: 6px 14px; font-size: 15px; font-weight: 700;
+             color: var(--amber-ink); white-space: nowrap; box-shadow: 0 2px 10px rgba(0,0,0,.18);
+             cursor: pointer; font-family: inherit; z-index: 5; }
   .osmctl { width: 44px; height: 44px; border-radius: 12px; border: 1px solid var(--line);
             background: var(--card); color: var(--ink); cursor: pointer; font-family: inherit;
             display: flex; align-items: center; justify-content: center; padding: 0;
@@ -570,6 +579,10 @@
     <div class="label">Tap a color line for details</div>
     <div style="font-size:17px;text-align:left;margin-top:4px">Tap any coloured curb line to see that side&rsquo;s rule &mdash; its cleaning window, limit, and paid status.</div>
   </div>
+  <div class="card">
+    <div class="label">Build &amp; nearby streets</div>
+    <div id="infoDiag" style="font-size:17px;text-align:left;margin-top:4px">Build 2026-11-19-areapaint-phone</div>
+  </div>
   </section>
 
   <!-- Curb detail sheet (Nov 18 map cleanup): a curb tap opens the same
@@ -683,6 +696,16 @@ var INITIAL_STREET = "des-pins";
   } catch (e) { s = null; }
   if (s) { INITIAL_STREET = s; setManualPick(s); }
 })();
+/* Build marker (Nov 19 area-paint phone fix): bump this string on every
+   push, and keep it visible on screen — the map-info sheet shows it, so
+   a phone screenshot can prove which build is running. The pre-fix
+   builds had no marker at all, so a cached copy was indistinguishable
+   from the live one; a curl of the live bytes is not proof a phone sees
+   the new build, only the marker on screen is. (It lives here, after the
+   INITIAL_STREET block, because the one-page gate slices the
+   STREET_REGISTRY JSON up to the "initial street" comment — nothing may
+   sit between the registry and that comment.) */
+var TICKET_SAVER_BUILD = "2026-11-19-areapaint-phone";
 /* Embedded generated data for the current street (see the data file — same
    content). */
 var DATA = STREET_DATA[INITIAL_STREET].data;
@@ -2880,6 +2903,35 @@ function renderSettingsLayers() {
     }
   });
 }
+/* The map-info sheet's diagnostic readout (Nov 19 area-paint phone fix):
+   the build marker plus the last area-prefetch run — the probe the
+   baseline report names, so memoli can report it after a hard-refresh +
+   2-minute wait: "landed 0, tried 20" is the Photon-burst account, a
+   lastError naming the area query is the Overpass/network account, and
+   the cached-street count says what the area layer can paint from. The
+   static fallback in the HTML carries the build string on its own, so
+   the marker is visible even before this runs. */
+function renderInfoSheet() {
+  var d = null;
+  try { d = (typeof osmAreaDiag === "function") ? osmAreaDiag() : null; } catch (e) { d = null; }
+  var box = null;
+  try { box = el("infoDiag"); } catch (e) { box = null; }
+  if (!box) return;
+  if (!d) { box.textContent = "Build " + TICKET_SAVER_BUILD; return; }
+  var pf = d.prefetch || {};
+  var lines = ["Build " + d.build,
+    "Nearby streets painted: " + d.areaCount + (d.areaCount ? " (" + d.areaSlugs.join(", ") + ")" : ""),
+    "Prefetch: " + (pf.status || "idle") + " \u00b7 landed " + (pf.landed || 0) + " \u00b7 tried " + (pf.tried || 0)
+      + " \u00b7 retried " + (pf.retried || 0) + " \u00b7 attempts " + (pf.attempts || 0)
+      + (pf.lastError ? " \u00b7 " + pf.lastError : ""),
+    "Cached streets: " + d.cacheKeys];
+  var html = "";
+  lines.forEach(function (ln, i) {
+    if (i > 0) html += "<br>";
+    html += esc(ln);
+  });
+  box.innerHTML = html;
+}
 function showTab(name) {
   /* Sheet-only names (info, curb) open a sheet without a tab: the Map tab
      stays active and currentTab stays "map" while one is open. A bogus
@@ -2914,9 +2966,10 @@ function showTab(name) {
   if (wasCurb && name !== "curb" && _mapSelected) { _mapSelected = null; }
   if (name === "move") setWhereOpen(true);
   else if (name === "park") setLimitOpen(true);
-  else if (name === "map") { try { renderMap(); } catch (e) { /* sizing only */ } }
+  else if (name === "map") { try { renderMap(); osmAreaRetryIfEmpty(); } catch (e) { /* sizing only */ } }
   else if (name === "destination") destRender();
   else if (name === "settings") renderSettingsLayers();
+  else if (name === "info") { try { renderInfoSheet(); } catch (e) { /* static sheet */ } }
   else if (name === "curb") renderCurbSheet();
   if (typeof window !== "undefined" && window.scrollTo) window.scrollTo(0, 0);
 }
@@ -3080,6 +3133,7 @@ function init() {
           if (t.getAttribute("data-map-north") !== null) { osmRecentre(); return; }
           if (t.getAttribute("data-map-info") !== null) { showTab("info"); return; }
           if (t.getAttribute("data-map-gps") !== null) { osmCentreOnGps(); return; }
+          if (t.getAttribute("data-area-retry") !== null) { osmAreaRetryNow(); return; } /* the "didn't load — tap to retry" pill re-fetches at once */
           var side = t.getAttribute("data-map-side");
           if (side) { mapSelectCurb(side); return; }
         }
@@ -3237,6 +3291,12 @@ function init() {
   setInterval(function () {
     renderHero();
     try { renderMap(); } catch (e) { /* a map fault must never swallow the hero tick */ }
+    /* Empty-area retry (Nov 19 area-paint phone fix): the tick re-renders
+       but never re-fetched — so a 0-landed prefetch stayed empty all
+       session. While the area is empty this re-fetches, bounded by the
+       consecutive-empty cap in osmAreaRetryIfEmpty; once streets paint
+       it does nothing. */
+    try { osmAreaRetryIfEmpty(); } catch (e) { /* a retry fault must never swallow the hero tick */ }
     try { renderLimit(); } catch (e) { /* a timer fault must never swallow the hero tick */ }
     try { renderPlanAhead(); } catch (e) { /* a plan-ahead fault must never swallow the hero tick */ }
     try { destRender(); } catch (e) { /* a destination fault must never swallow the hero tick */ }
@@ -5214,7 +5274,7 @@ function liveNearbySweep(fixLat, fixLon, currentStreetName, city) {
   if (typeof fetch === "undefined") return Promise.resolve(null);
   var key = liveNearbyFixKey(fixLat, fixLon);
   if (LIVE_NEARBY_PROMISE && LIVE_NEARBY.fixKey === key && LIVE_NEARBY.status !== "idle") return LIVE_NEARBY_PROMISE;
-  if (LIVE_NEARBY.fixKey === key && LIVE_NEARBY.status === "ready") return Promise.resolve(LIVE_NEARBY.streets); /* same block, results already landed — one area query per fix, not one per 90 s tick; a new fix re-sweeps */
+  if (LIVE_NEARBY.fixKey === key && LIVE_NEARBY.status === "ready" && Object.keys(LIVE_NEARBY.streets).length > 0) return Promise.resolve(LIVE_NEARBY.streets); /* same block, results already landed — one area query per fix, not one per 90 s tick; a new fix re-sweeps. The streets-length guard is the no-latch rule's other half: a "ready" with no streets behind it (an externally-set state, or a 0-landed run from before the fix) re-sweeps instead of short-circuiting. */
   var gen = (typeof LIVE_GEN !== "undefined") ? LIVE_GEN : 0;
   LIVE_NEARBY = { status: "loading", fixKey: key, fixLat: fixLat, fixLon: fixLon, streets: {} };
   var p = liveNearbySweepInner(fixLat, fixLon, currentStreetName, key, gen, city || null);
@@ -5231,24 +5291,46 @@ function liveNearbySweep(fixLat, fixLon, currentStreetName, city) {
    when the user moved on; onLand(r) is called for each landed result
    (the sweep records it into LIVE_NEARBY and renders; the prefetch
    passes null - the live.v5 save already happened inside
-   liveNearbyLookupOne). Returns { landed, tried }. Never throws. */
+   liveNearbyLookupOne). Returns { landed, tried, retried }. Never throws.
+   One retry pass (Nov 19 area-paint phone fix): a candidate that yields
+   nothing may have hit a transient empty answer — Photon reverse
+   intermittently returns 0 features for the same query, then succeeds
+   seconds later — so failed candidates get ONE more attempt each, in
+   distance order, while the caps still bind (a retry consumes a try,
+   exactly like a first attempt; a deterministic failure — no house on
+   the street — just spends one more try and stays failed). No third
+   pass: the loop stops as soon as the landed cap or the try cap binds,
+   so a sweep that already filled its caps retries nothing. */
 async function liveNearbySweepLoop(fixLat, fixLon, currentStreetName, areaWays, dataAsOf, opts, stillValid, onLand) {
   var radiusM = (opts && typeof opts.radiusM === "number") ? opts.radiusM : LIVE_NEARBY_RADIUS_M;
   var maxStreets = (opts && typeof opts.maxStreets === "number") ? opts.maxStreets : LIVE_NEARBY_MAX_STREETS;
   var maxTries = (opts && typeof opts.maxTries === "number") ? opts.maxTries : LIVE_NEARBY_MAX_TRIES;
   var cands = liveNearbyCandidates(areaWays, currentStreetName, fixLat, fixLon, radiusM);
-  var landed = 0, tried = 0;
+  var landed = 0, tried = 0, retried = 0;
+  var failed = [];
   for (var i = 0; i < cands.length && landed < maxStreets && tried < maxTries; i++) {
-    if (typeof stillValid === "function" && !stillValid()) return { landed: landed, tried: tried };
+    if (typeof stillValid === "function" && !stillValid()) return { landed: landed, tried: tried, retried: retried };
     tried++;
     var r = await liveNearbyLookupOne(fixLat, fixLon, cands[i], areaWays, dataAsOf, null, opts);
-    if (typeof stillValid === "function" && !stillValid()) return { landed: landed, tried: tried };
+    if (typeof stillValid === "function" && !stillValid()) return { landed: landed, tried: tried, retried: retried };
     if (r && r.result && r.result.sides) {
       landed++;
       if (typeof onLand === "function") onLand(r);
+    } else {
+      failed.push(cands[i]);
     }
   }
-  return { landed: landed, tried: tried };
+  for (var j = 0; j < failed.length && landed < maxStreets && tried < maxTries; j++) {
+    if (typeof stillValid === "function" && !stillValid()) return { landed: landed, tried: tried, retried: retried };
+    tried++; retried++;
+    var r2 = await liveNearbyLookupOne(fixLat, fixLon, failed[j], areaWays, dataAsOf, null, opts);
+    if (typeof stillValid === "function" && !stillValid()) return { landed: landed, tried: tried, retried: retried };
+    if (r2 && r2.result && r2.result.sides) {
+      landed++;
+      if (typeof onLand === "function") onLand(r2);
+    }
+  }
+  return { landed: landed, tried: tried, retried: retried };
 }
 async function liveNearbySweepInner(fixLat, fixLon, currentStreetName, key, gen, city) {
   try {
@@ -5282,7 +5364,14 @@ async function liveNearbySweepInner(fixLat, fixLon, currentStreetName, key, gen,
         if (typeof renderMap === "function") renderMap(); /* the OSM map draws each landed street as it arrives */
       });
     if (gen !== LIVE_GEN || LIVE_NEARBY.fixKey !== key) return null; /* abandoned mid-loop - the user moved on */
-    if (LIVE_NEARBY.status === "loading") LIVE_NEARBY.status = "ready"; /* no candidate yielded a result — the list is just the current street */
+    /* No-latch rule (Nov 19 area-paint phone fix), same as the prefetch:
+       "ready" only when at least one street landed. A 0-landed sweep ends
+       "idle", so the next GPS tick re-sweeps instead of the empty result
+       latching for the session; where-to-move lists the current street
+       alone either way. */
+    if (LIVE_NEARBY.status === "loading") {
+      LIVE_NEARBY.status = (Object.keys(LIVE_NEARBY.streets).length > 0) ? "ready" : "idle";
+    }
     return LIVE_NEARBY.streets;
   } catch (e) {
     if (LIVE_NEARBY.fixKey === key) LIVE_NEARBY.status = "idle"; /* no nearby data — the list is just the current street, nothing guessed */
@@ -5303,24 +5392,42 @@ async function liveNearbySweepInner(fixLat, fixLon, currentStreetName, key, gen,
    when a new destination search starts (DEST_GEN). Never throws, never
    touches LIVE or DEST. A baked destination does not prefetch: its own
    data needed no network, and its neighbours are prefetched by the GPS
-   sweep when the user actually arrives there. */
-var LIVE_PREFETCH = { status: "idle", fixKey: null, promise: null };
-function livePrefetchAround(lat, lon, streetName, city, radiusM) {
+   sweep when the user actually arrives there.
+   No-latch rule (Nov 19 area-paint phone fix): a run that lands ZERO
+   streets does NOT latch "ready" — it ends "idle" with its landed /
+   tried counts and last error recorded on LIVE_PREFETCH, so the next
+   call for the same fix re-fetches instead of short-circuiting for the
+   rest of the session. A run that lands >= 1 street latches "ready" as
+   before. livePrefetchDiag() exposes the last run for the map-info
+   sheet, so "still fetching" vs "failed" vs "0 landed" can be told
+   apart from the phone. */
+var LIVE_PREFETCH = { status: "idle", fixKey: null, promise: null, landed: 0, tried: 0, retried: 0,
+  lastError: null, startedAt: null, endedAt: null, attempts: 0 };
+function livePrefetchAround(lat, lon, streetName, city, radiusM, force) {
   /* city: see liveNearbySweep - the destination fix's municipality, so the
      prefetched paid verdict matches an on-demand lookup there.
      radiusM (Nov 19 area paint): the visible area's half-diagonal, so
      the fetch covers the whole screen; callers that pass nothing get
      the nearby radius (500 m), exactly as before. The dedup key carries
      the radius bucket, so zooming to a wider view re-fetches instead of
-     short-circuiting on the narrower run. */
+     short-circuiting on the narrower run.
+     force (Nov 19 area-paint phone fix): re-fetch even when a previous
+     run for this key latched "ready" — the area layer calls with force
+     when its area is EMPTY, because the live.v5 entries a "ready" run
+     landed can since have been evicted by the 20-entry LRU cap, and a
+     latched "ready" must never stand between an empty map and a
+     re-fetch. An in-flight run for the same key is still shared, never
+     doubled. */
   if (typeof fetch === "undefined") return Promise.resolve(null);
   if (lat === null || lat === undefined || lon === null || lon === undefined) return Promise.resolve(null);
   var radius = (typeof radiusM === "number" && isFinite(radiusM) && radiusM > 0) ? Math.round(radiusM) : LIVE_NEARBY_RADIUS_M;
   var key = liveNearbyFixKey(lat, lon) + "|" + liveSlug(streetName || "") + "|r" + Math.round(radius / 100);
   if (LIVE_PREFETCH.promise && LIVE_PREFETCH.fixKey === key && LIVE_PREFETCH.status !== "idle") return LIVE_PREFETCH.promise;
-  if (LIVE_PREFETCH.fixKey === key && LIVE_PREFETCH.status === "ready") return Promise.resolve(null);
+  if (!force && LIVE_PREFETCH.fixKey === key && LIVE_PREFETCH.status === "ready" && (LIVE_PREFETCH.landed || 0) > 0) return Promise.resolve(null);
   var gen = (typeof DEST_GEN !== "undefined") ? DEST_GEN : 0;
-  LIVE_PREFETCH = { status: "loading", fixKey: key, promise: null };
+  var attempts = (LIVE_PREFETCH.fixKey === key) ? ((LIVE_PREFETCH.attempts || 0) + 1) : 1;
+  LIVE_PREFETCH = { status: "loading", fixKey: key, promise: null, landed: 0, tried: 0, retried: 0,
+    lastError: null, startedAt: Date.now(), endedAt: null, attempts: attempts };
   var p = livePrefetchAroundInner(lat, lon, streetName, key, gen, city || null, radius);
   LIVE_PREFETCH.promise = p;
   p.then(function () { if (LIVE_PREFETCH.promise === p) LIVE_PREFETCH.promise = null; },
@@ -5348,12 +5455,40 @@ async function livePrefetchAroundInner(lat, lon, streetName, key, gen, city, rad
       function () { return gen === DEST_GEN && LIVE_PREFETCH.fixKey === key; },
       null);
     if (gen !== DEST_GEN || LIVE_PREFETCH.fixKey !== key) return null;
-    LIVE_PREFETCH.status = "ready";
+    /* No-latch rule (Nov 19 area-paint phone fix): "ready" only when at
+       least one street landed. A 0-landed run ends "idle" — retryable by
+       the next call for the same key — with its counts and cause kept on
+       the state for the diagnostic readout. */
+    LIVE_PREFETCH.landed = loop.landed; LIVE_PREFETCH.tried = loop.tried;
+    LIVE_PREFETCH.retried = loop.retried || 0; LIVE_PREFETCH.endedAt = Date.now();
+    if (loop.landed > 0) { LIVE_PREFETCH.status = "ready"; LIVE_PREFETCH.lastError = null; }
+    else {
+      LIVE_PREFETCH.status = "idle";
+      LIVE_PREFETCH.lastError = (loop.tried === 0) ? "no candidates in range" : "no streets landed";
+    }
     return loop;
   } catch (e) {
-    if (LIVE_PREFETCH.fixKey === key) LIVE_PREFETCH.status = "idle";
+    if (LIVE_PREFETCH.fixKey === key) {
+      LIVE_PREFETCH.status = "idle";
+      LIVE_PREFETCH.lastError = String((e && e.message) || e || "area query failed");
+      LIVE_PREFETCH.endedAt = Date.now();
+    }
     return null;
   }
+}
+/* The last area-prefetch run, for the map-info diagnostic readout: status
+   plus the counts that distinguish a Photon burst (landed 0, tried 20)
+   from an Overpass failure (lastError set, tried 0) from a run that
+   never started (attempts 0). cacheIndex is the live.v5 index — the
+   streets the area layer can actually paint from. Never throws. */
+function livePrefetchDiag() {
+  var idx = [];
+  try { idx = liveCacheIndexRead(); } catch (e) { idx = []; }
+  return { status: LIVE_PREFETCH.status, fixKey: LIVE_PREFETCH.fixKey,
+    landed: (LIVE_PREFETCH.landed || 0), tried: (LIVE_PREFETCH.tried || 0),
+    retried: (LIVE_PREFETCH.retried || 0), lastError: LIVE_PREFETCH.lastError || null,
+    startedAt: LIVE_PREFETCH.startedAt || null, endedAt: LIVE_PREFETCH.endedAt || null,
+    attempts: (LIVE_PREFETCH.attempts || 0), cacheKeys: idx.length, cacheIndex: idx };
 }
 /* What where-to-move lists from the sweep: ready nearby streets, nearest
    first. The ranking itself (stay-length) lives in whereToMoveEntries. */
@@ -7047,12 +7182,19 @@ function osmAreaSig(nowMs) {
    paid lookup -- without a city the paid verdict falls back to "unknown",
    honestly (the bgcache (b) note); sides, segments and verdicts do not
    depend on the city. When the prefetch lands, the map re-renders (the
-   area signature changed). Never throws. */
+   area signature changed). Never throws.
+   Empty-area bypass (Nov 19 area-paint phone fix): when the area is
+   EMPTY at a zoomed-in view, the <50 m reuse gate does NOT apply — the
+   fetch re-runs at the same centre, and it passes force=true so a
+   latched "ready" from an earlier run (whose entries the LRU cap may
+   since have evicted) cannot short-circuit it either. A non-empty area
+   keeps the old behaviour exactly: same centre, no fetch. */
 function osmAreaRefresh() {
   var v = osmView();
   if (v.zoom < LIVE_AREA_MIN_ZOOM) return Promise.resolve(null); /* too zoomed out: nothing paints, so nothing fetches -- zooming in re-triggers via the gesture-end schedule */
   var c = { lat: v.lat, lon: v.lon };
-  if (_areaPrefetchAt) {
+  var areaEmpty = osmAreaIsEmpty();
+  if (!areaEmpty && _areaPrefetchAt) {
     try {
       if (liveDistM(_areaPrefetchAt.lat, _areaPrefetchAt.lon, c.lat, c.lon) < LIVE_AREA_PREFETCH_MIN_MOVE_M) {
         return _areaPrefetchPromise || Promise.resolve(null);
@@ -7074,18 +7216,113 @@ function osmAreaRefresh() {
        viewport (never below the 500 m nearby radius, never above a
        1000 m neighbourhood block), through the identical shared pipeline
        -- same area query, candidates, parser + guards, caps, and live.v5
-       save as the GPS sweep and the destination prefetch. */
-    if (typeof livePrefetchAround === "function") p = livePrefetchAround(c.lat, c.lon, name, null, osmVisibleFetchRadiusM()) || Promise.resolve(null);
+       save as the GPS sweep and the destination prefetch. force is the
+       empty-area bypass above: a "ready" latch never blocks a re-fetch
+       of an empty area. */
+    if (typeof livePrefetchAround === "function") p = livePrefetchAround(c.lat, c.lon, name, null, osmVisibleFetchRadiusM(), areaEmpty) || Promise.resolve(null);
   } catch (e) { p = Promise.resolve(null); }
   _areaPrefetchPromise = p;
+  /* Render at once, not only when the fetch settles: while it runs the
+     map shows the "Checking nearby streets…" pill instead of the tap
+     hint, so "still fetching" is visible from the phone. The settle
+     handler below re-renders again with the landed streets. */
+  try { renderMap(); } catch (e) { /* a map fault must never swallow the fetch */ }
   return p.then(function (r) {
     if (_areaPrefetchPromise === p) _areaPrefetchPromise = null;
+    try { if (!osmAreaIsEmpty()) _areaEmptyRetries = 0; } catch (e) { /* best-effort */ }
     renderMap();
     return r;
   }, function () {
     if (_areaPrefetchPromise === p) _areaPrefetchPromise = null;
     return null;
   });
+}
+/* ---- empty-area state + retry (Nov 19 area-paint phone fix) ----
+   The pre-b83039d hole was not the paint rule but the recovery: a
+   0-landed / failed prefetch latched, nothing re-fetched without a
+   >= 50 m pan, and nothing on screen said a fetch was running, had
+   failed, or had landed nothing. These helpers close it. The paint
+   rule, the zoom gate and the 50 m *pan* gate are untouched: a
+   non-empty area still re-fetches only on a real move. */
+var LIVE_AREA_EMPTY_MAX_RETRIES = 8; /* consecutive empty-area retries (30 s tick / Map-tab open) before the page stops re-fetching on its own — a failed Photon burst is retried for ~4 minutes of ticks, then the map waits for the user (a pan, a tab switch back to Map, or the tap-to-retry pill), which resets the count. A tap-to-retry always resets and fetches. */
+var _areaEmptyRetries = 0; /* consecutive osmAreaRetryIfEmpty attempts that found the area still empty */
+/* True when the area layer has nothing to paint at a zoomed-in view:
+   the zoom gate passes and osmAreaEntries() is empty. False below the
+   zoom gate (nothing paints there by design, and nothing should fetch)
+   and false whenever at least one street paints. Never throws. */
+function osmAreaIsEmpty() {
+  try {
+    if (!osmAreaZoomOk()) return false;
+    return osmAreaEntries().length === 0;
+  } catch (e) { return false; }
+}
+/* "loading" while an area prefetch is in flight and the area is empty;
+   "ready" once at least one street paints; "failed" once a prefetch run
+   has finished with nothing landed (lastError set, or landed 0 after
+   tries — the diagnostic readout carries which); "empty" when no run
+   has been attempted yet for this view. Never throws.
+   The in-flight signal is the prefetch diagnostic's status, NOT the
+   _areaPrefetchPromise slot: that slot is set synchronously and cleared
+   only in a .then, so a resolved-but-not-yet-cleared promise (or a
+   no-fetch short-circuit, which never sets status "loading" at all)
+   would read as "loading" and hide the tap hint. */
+function osmAreaState() {
+  try {
+    if (!osmAreaIsEmpty()) return "ready";
+    var pf = null;
+    try { pf = (typeof livePrefetchDiag === "function") ? livePrefetchDiag() : null; } catch (e) { pf = null; }
+    if (pf && pf.status === "loading") return "loading";
+    if (pf && pf.endedAt && (pf.landed || 0) === 0 && (pf.attempts || 0) > 0) return "failed";
+    return "empty";
+  } catch (e) { return "empty"; }
+}
+/* The diagnostic readout the phone probe needs (baseline report §7):
+   the build, the zoom, what paints now, and the last prefetch run
+   {status, landed, tried, retried, lastError, attempts} plus the live.v5
+   index — the streets the area layer can paint from. Never throws. */
+function osmAreaDiag() {
+  var pf = null;
+  try { pf = (typeof livePrefetchDiag === "function") ? livePrefetchDiag() : null; } catch (e) { pf = null; }
+  var idx = [];
+  try { idx = (typeof liveCacheIndexRead === "function") ? liveCacheIndexRead() : []; } catch (e) { idx = []; }
+  var area = [];
+  try { area = osmAreaEntries(); } catch (e) { area = []; }
+  var zoom = null;
+  try { zoom = osmView().zoom; } catch (e) { zoom = null; }
+  return { build: TICKET_SAVER_BUILD, state: osmAreaState(), zoom: zoom,
+    areaCount: area.length,
+    areaSlugs: area.map(function (a) { return a.slug; }),
+    prefetch: pf, cacheKeys: idx.length, cacheIndex: idx };
+}
+/* Re-fetch the area when it is empty, bounded: at most
+   LIVE_AREA_EMPTY_MAX_RETRIES consecutive attempts that still find it
+   empty, then stop until a user trigger (tap-to-retry, which resets the
+   count) or new data lands (which resets it too). Never fetches while a
+   prefetch is in flight, never fetches below the zoom gate, never
+   fetches when the area already paints. Returns the fetch promise, the
+   in-flight promise, or a resolved null. Never throws. */
+function osmAreaRetryIfEmpty() {
+  try {
+    if (!osmAreaIsEmpty()) { _areaEmptyRetries = 0; return Promise.resolve(null); }
+    if (typeof livePrefetchDiag === "function") {
+      var pf0 = livePrefetchDiag();
+      if (pf0 && pf0.status === "loading") return _areaPrefetchPromise || Promise.resolve(null);
+    } else if (_areaPrefetchPromise) {
+      return _areaPrefetchPromise;
+    }
+    if (_areaEmptyRetries >= LIVE_AREA_EMPTY_MAX_RETRIES) return Promise.resolve(null);
+    _areaEmptyRetries++;
+    return osmAreaRefresh();
+  } catch (e) { return Promise.resolve(null); }
+}
+/* Tap-to-retry (the pill on the map): resets the consecutive-empty count
+   and re-fetches at once, even past the cap — an explicit user retry is
+   never bounded. Never throws. */
+function osmAreaRetryNow() {
+  try {
+    _areaEmptyRetries = 0;
+    return osmAreaRefresh();
+  } catch (e) { return Promise.resolve(null); }
 }
 /* Debounced trigger for osmAreaRefresh: one 400 ms timer, reset on every
    call, so a drag that fires pointermove/render dozens of times fetches
@@ -7102,13 +7339,29 @@ function osmAreaScheduleRefresh() {
        GPS sweep's / destination prefetch's job, not this timer's). A no-op
        re-centre (North tapped while already home, or a suite recentring an
        unmoved map) schedules nothing, so no background fetch fires for a
-       centre that never moved. */
+       centre that never moved.
+       Empty-area bypass (Nov 19 area-paint phone fix): when the area is
+       empty, the 50 m gate does NOT apply — a small pan re-triggers a
+       fetch even if the centre moved < 50 m, so a "little drag" can refill
+       an empty cache. A non-empty area keeps the old behaviour exactly. */
     var v = osmView();
     var base = _areaPrefetchAt;
     if (!base) {
       try { var d0 = osmDefaultView(); base = { lat: d0.lat, lon: d0.lon }; } catch (e) { base = null; }
     }
+    /* A re-centre that moved the centre ~0 m (North tapped while already
+       home, a zoom with no pan, a suite recentring an unmoved map) is not
+       a pan at all: scheduling here would fire a whole area fetch for a
+       centre that never moved. The live suite caught it — osmRecentre on
+       an empty area scheduled a background prefetch that raced the second
+       des-pins lookup and broke its cache-hit assertion. The empty-area
+       bypass below is for a real small pan only (1–50 m). */
     if (base) {
+      try {
+        if (liveDistM(base.lat, base.lon, v.lat, v.lon) < 1) return;
+      } catch (e) { /* fall through and schedule */ }
+    }
+    if (base && !osmAreaIsEmpty()) {
       try {
         if (liveDistM(base.lat, base.lon, v.lat, v.lon) < LIVE_AREA_PREFETCH_MIN_MOVE_M) return;
       } catch (e) { /* fall through and schedule */ }
@@ -7242,9 +7495,20 @@ function mapSvgHtml(nowMs, geom, colors) {
      (ParkUsher-style) -- the area paint is tied to a zoomed-in view, so
      a zoomed-out view says so instead of painting a misleadingly small
      patch. The current street's own curbs still draw; only the area
-     layer is gated. */
+     layer is gated.
+     Area state (Nov 19 area-paint phone fix): at a zoomed-in view the
+     pill says which of the three states the area is in — "Checking
+     nearby streets…" while a prefetch is in flight, a tap-to-retry
+     button when the last run finished with nothing landed, the tap hint
+     once streets paint (or before any run has been attempted). */
+  var areaPill = null;
+  try { areaPill = (typeof osmAreaState === "function") ? osmAreaState() : "ready"; } catch (e) { areaPill = "ready"; }
   s += osmAreaZoomOk()
-    ? '<div class="osmhint" aria-hidden="true">Tap a color line for details</div>'
+    ? (areaPill === "loading"
+      ? '<div class="osmhint" aria-hidden="true">Checking nearby streets\u2026</div>'
+      : areaPill === "failed"
+      ? '<button class="osmaretry" data-area-retry type="button">Nearby streets didn\u2019t load \u2014 tap to retry</button>'
+      : '<div class="osmhint" aria-hidden="true">Tap a color line for details</div>')
     : '<div class="osmzoomhint" aria-hidden="true">Too zoomed out \u2014 zoom in to see parking rules</div>';
   s += '<div class="osmcontrols">'
     + '<button class="osmctl" data-map-north type="button" aria-label="North up — centre on home"><svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true"><text x="12" y="8.5" text-anchor="middle" font-size="9" font-weight="bold" fill="currentColor">N</text><path d="M12 11 L17.5 20 L12 17.5 L6.5 20 Z" fill="currentColor"/></svg></button>'
@@ -8377,6 +8641,8 @@ if (typeof window !== "undefined") {
     liveNearbyAreaQuery: liveNearbyAreaQuery, liveNearbyLookupOne: liveNearbyLookupOne,
     liveNearbySweepLoop: liveNearbySweepLoop,
     livePrefetchAround: livePrefetchAround,
+    livePrefetchDiag: livePrefetchDiag,
+    TICKET_SAVER_BUILD: TICKET_SAVER_BUILD,
     LIVE_PREFETCH_MAX_STREETS: LIVE_PREFETCH_MAX_STREETS,
     LIVE_PREFETCH_MAX_TRIES: LIVE_PREFETCH_MAX_TRIES,
     livePrefetchGetState: function () { return LIVE_PREFETCH; },
@@ -8452,6 +8718,10 @@ if (typeof window !== "undefined") {
     osmAreaEntries: osmAreaEntries, osmAreaEntry: osmAreaEntry, osmAreaSig: osmAreaSig,
     osmAreaDistToPts: osmAreaDistToPts, osmAreaRefresh: osmAreaRefresh,
     osmAreaScheduleRefresh: osmAreaScheduleRefresh,
+    osmAreaIsEmpty: osmAreaIsEmpty, osmAreaState: osmAreaState, osmAreaDiag: osmAreaDiag,
+    osmAreaRetryIfEmpty: osmAreaRetryIfEmpty, osmAreaRetryNow: osmAreaRetryNow,
+    renderInfoSheet: renderInfoSheet,
+    LIVE_AREA_EMPTY_MAX_RETRIES: LIVE_AREA_EMPTY_MAX_RETRIES,
     osmMetresPerPx: osmMetresPerPx, osmVisibleHalfDiagM: osmVisibleHalfDiagM,
     osmVisibleFetchRadiusM: osmVisibleFetchRadiusM, osmAreaZoomOk: osmAreaZoomOk,
     osmSegHitsRect: osmSegHitsRect, osmAreaPaintsPts: osmAreaPaintsPts,
