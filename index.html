@@ -24,10 +24,14 @@
     --soft-green: #e7f6ee;
   }
   body { font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
-         margin: 0; padding: 16px 16px calc(76px + env(safe-area-inset-bottom)); background: var(--page); color: var(--ink);
+         margin: 0; padding: 0 16px calc(76px + env(safe-area-inset-bottom)); background: var(--page); color: var(--ink);
          font-size: 18px; line-height: 1.5; touch-action: pan-y; text-align: center; }
+  /* Map tab (Nov 18 map cleanup): the map is full-screen — the wrap's
+     min-height is the same arithmetic as the map height below (viewport
+     minus the 76 px tab-bar reservation + safe-area), so the home screen
+     is exactly one viewport tall with no scroll. */
   .wrap { max-width: 640px; margin: 0 auto; display: flex; flex-direction: column;
-          min-height: calc(100vh - 32px); min-height: calc(100dvh - 32px); }
+          min-height: calc(100vh - 76px - env(safe-area-inset-bottom)); min-height: calc(100dvh - 76px - env(safe-area-inset-bottom)); }
   h1 { font-size: 26px; margin: 4px 0 2px 0; line-height: 1.2; }
   .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px;
           padding: 12px; margin-bottom: 10px; }
@@ -81,19 +85,34 @@
      so the two sides read apart — the centreline itself is real geometry. */
   /* OSM map (Nov 18): the home screen — a real OpenStreetMap tile base
      with the verdict-coloured curb overlay drawn on top of it. The map
-     is the dominant view: 400 px tall, pannable and zoomable, centred on
-     the position. Tiles are a map fetch, not a data upload; the overlay
+     is the home screen: full-screen from the top of the viewport to the
+     tab bar, pannable and zoomable, centred on the position. Tiles are a
+     map fetch, not a data upload; the overlay
      (curbs, dots, marker) is drawn from the same centreline + verdict
      data as the old schematic map, so no verdict logic moved. */
   .osmmap { position: relative; height: 400px; overflow: hidden; border-radius: 12px;
             background: #e8eef0; touch-action: none; }
   .osmtile { position: absolute; width: 256px; height: 256px; }
   .osmsvg { position: absolute; left: 0; top: 0; }
-  .osmzoom { position: absolute; right: 10px; top: 10px; display: flex; flex-direction: column; gap: 6px; }
-  .osmzoom button { width: 36px; height: 36px; border-radius: 8px; border: 1px solid var(--line);
-            background: var(--card); font-size: 20px; font-weight: 700; color: var(--ink);
-            cursor: pointer; font-family: inherit; line-height: 1; }
-  .osmzoom button.wide { width: auto; padding: 0 10px; font-size: 15px; }
+  /* Map hint + controls (Nov 18 map cleanup): the hint pill sits
+     top-centre of the map (pointer-events none, so it never blocks a
+     pan); the three controls stack top-to-bottom — North, Info,
+     GPS-centre — on the right side CLOSE TO THE BOTTOM, just above the
+     tab bar, within easy thumb reach (his Nov 18 22:23 call). The
+     stack's bottom edge clears the OSM attribution (~24 px tall) with
+     room to spare. All three are inline SVG buttons, no raster images. */
+  .osmhint { position: absolute; left: 50%; top: 12px; transform: translateX(-50%); background: rgba(255,255,255,.94);
+             border: 1.5px solid var(--ink); border-radius: 999px; padding: 6px 14px; font-size: 15px; font-weight: 700;
+             color: var(--ink); white-space: nowrap; box-shadow: 0 2px 10px rgba(0,0,0,.18);
+             pointer-events: none; z-index: 5; }
+  .osmcontrols { position: absolute; right: 10px; bottom: 34px; display: flex; flex-direction: column; gap: 8px; z-index: 5; }
+  .osmctl { width: 44px; height: 44px; border-radius: 12px; border: 1px solid var(--line);
+            background: var(--card); color: var(--ink); cursor: pointer; font-family: inherit;
+            display: flex; align-items: center; justify-content: center; padding: 0;
+            box-shadow: 0 2px 10px rgba(0,0,0,.18); }
+  .osmctl:focus-visible { outline: none; border-color: var(--accent);
+            box-shadow: 0 0 0 2px rgba(49,196,141,.35); }
+  .osmctl svg { display: block; }
   .osmattrib { position: absolute; right: 0; bottom: 0; background: rgba(255,255,255,.85);
             font-size: 15px; color: var(--muted); padding: 2px 6px; border-radius: 6px 0 0 0; }
   .osmattrib a { color: inherit; }
@@ -103,7 +122,6 @@
   .maplayer[aria-pressed="true"] { background: var(--soft-green); border-color: var(--accent); color: var(--ink); }
   .maplayer:focus-visible { outline: none; border-color: var(--accent);
              box-shadow: 0 0 0 1px rgba(49,196,141,.35); }
-  .maplegend { font-size: 15px; color: var(--muted); margin-top: 10px; line-height: 1.7; }
   .mapsw { display: inline-block; width: 14px; height: 14px; border-radius: 4px; vertical-align: -2px; margin-right: 4px; }
   .mapdotsw { display: inline-block; width: 12px; height: 12px; border-radius: 50%; background: #d97706;
              border: 1.5px solid #fff; outline: 1px solid #d97706; vertical-align: -1px; margin-right: 4px; }
@@ -221,7 +239,8 @@
      no reload. */
   .tabpanel.hidden { display: none; }
   /* Bottom sheets (Nov 18, his call — JSM Radio's .menu-sheet pattern,
-     copied literally): the four non-Map tabs slide up from the bottom over
+     copied literally): the four non-Map tabs — plus the map-info and
+     curb-detail sheets, which have no tab — slide up from the bottom over
      the map instead of swapping in place. Closed = translateY(102%) +
      visibility:hidden; open (.open) = translateY(0) + visible;
      transition transform .5s ease, visibility .5s (none under
@@ -235,11 +254,11 @@
      class (the suites read visibility off it) but is never display:none —
      the ID rule below beats .tabpanel.hidden and keeps it rendered
      off-screen, invisible — or the slide could not animate. */
-  #tab-move, #tab-park, #tab-destination, #tab-settings { position: fixed; left: 0; right: 0; bottom: calc(76px + env(safe-area-inset-bottom)); max-height: calc(85dvh - 76px - env(safe-area-inset-bottom)); overflow-y: auto; overscroll-behavior: none; touch-action: pan-y; background: var(--card); border-top: 1px solid var(--line); border-radius: 24px 24px 0 0; padding: 20px 20px calc(20px + env(safe-area-inset-bottom)); z-index: 55; box-shadow: 0 -10px 40px rgba(0,0,0,.4); transform: translateY(102%); visibility: hidden; transition: transform .5s ease, visibility .5s; user-select: none; -webkit-user-select: none; }
+  #tab-move, #tab-park, #tab-destination, #tab-settings, #tab-info, #tab-curb { position: fixed; left: 0; right: 0; bottom: calc(76px + env(safe-area-inset-bottom)); max-height: calc(85dvh - 76px - env(safe-area-inset-bottom)); overflow-y: auto; overscroll-behavior: none; touch-action: pan-y; background: var(--card); border-top: 1px solid var(--line); border-radius: 24px 24px 0 0; padding: 20px 20px calc(20px + env(safe-area-inset-bottom)); z-index: 55; box-shadow: 0 -10px 40px rgba(0,0,0,.4); transform: translateY(102%); visibility: hidden; transition: transform .5s ease, visibility .5s; user-select: none; -webkit-user-select: none; }
   #tab-move input, #tab-move textarea, #tab-park input, #tab-park textarea, #tab-destination input, #tab-destination textarea, #tab-settings input, #tab-settings textarea { user-select: text; -webkit-user-select: text; }
-  #tab-move.open, #tab-park.open, #tab-destination.open, #tab-settings.open { transform: translateY(0); visibility: visible; }
-  #tab-move.hidden, #tab-park.hidden, #tab-destination.hidden, #tab-settings.hidden { display: block; }
-  @media (prefers-reduced-motion: reduce) { #tab-move, #tab-park, #tab-destination, #tab-settings, .tab-backdrop { transition: none; } }
+  #tab-move.open, #tab-park.open, #tab-destination.open, #tab-settings.open, #tab-info.open, #tab-curb.open { transform: translateY(0); visibility: visible; }
+  #tab-move.hidden, #tab-park.hidden, #tab-destination.hidden, #tab-settings.hidden, #tab-info.hidden, #tab-curb.hidden { display: block; }
+  @media (prefers-reduced-motion: reduce) { #tab-move, #tab-park, #tab-destination, #tab-settings, #tab-info, #tab-curb, .tab-backdrop { transition: none; } }
   .tab-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 45; opacity: 0; visibility: hidden; transition: opacity .5s ease, visibility .5s; }
   .tab-backdrop.open { opacity: 1; visibility: visible; }
   /* Marked tap zone at the top of every sheet — Radio's .menu-grab pill
@@ -252,12 +271,16 @@
   .sheet-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 0; margin-bottom: 0; }
   .sheet-head h2 { margin: 0; font-size: 24px; }
   .sheet-close { width: 44px; height: 44px; border-radius: 50%; background: var(--card); border: 1px solid var(--line); color: var(--ink); font-size: 18px; cursor: pointer; }
-  /* Home tab: the map fills the screen ParkUsher-style — taller than the
-     old 400 px card, up to 60% of the viewport. The base .osmmap rule
-     keeps height: 400px (the Node suites read OSM_MAP_H = 400); this
-     rule only grows the rendered map in the browser, and osmMapSize()
-     reads the live element height there. */
-  #tab-map .osmmap { height: min(60dvh, 620px); min-height: 400px; }
+  /* Home tab (Nov 18 map cleanup): the map IS the screen — full-bleed
+     from the top of the viewport to the tab bar. The panel breaks out of
+     the body's 16 px side padding; the card loses its border/padding so
+     no dead gap survives. The base .osmmap rule keeps height: 400px (the
+     Node suites read OSM_MAP_H = 400); this rule only grows the rendered
+     map in the browser, and osmMapSize() reads the live element height
+     there. */
+  #tab-map { margin: 0 -16px; }
+  #tab-map #mapCard { margin: 0; padding: 0; border: 0; border-radius: 0; background: transparent; }
+  #tab-map .osmmap { height: calc(100vh - 76px - env(safe-area-inset-bottom)); height: calc(100dvh - 76px - env(safe-area-inset-bottom)); min-height: 400px; border-radius: 0; }
   /* Destination lookup: the address field. */
   .destinput { flex: 1 1 0; min-width: 0; font-family: inherit; font-size: 18px;
              padding: 12px 10px; border: 2px solid var(--line); border-radius: 12px;
@@ -265,21 +288,25 @@
   .destinput:focus-visible { outline: none; border-color: var(--accent);
              box-shadow: 0 0 0 1px rgba(49,196,141,.35); }
   .hidden { display: none; }
+  /* The Details view keeps the 16 px top padding the body used to give
+     the whole page (body padding-top is 0 now, so the full-screen map
+     reaches the top of the screen). */
+  #detailsView { padding-top: 16px; }
 </style>
 </head>
 <body>
 <div class="wrap">
   <div id="mainView">
-  <h1 id="mainTitle" tabindex="-1">Ticket Saver</h1>
-
   <section id="tab-map" class="tabpanel" aria-label="Map">
-  <!-- OSM map (Nov 18): the home screen, ParkUsher-style — the map is the
-       dominant view, always visible (no collapsed row, no toggle). A real
+  <!-- OSM map (Nov 18 map cleanup): the home screen — a full-screen real
        OpenStreetMap tile base with the verdict-coloured curb overlay on
-       top: each curb line is colored by the verdict in effect right now on
-       that side. Pan to move around the nearby streets, zoom in/out, or
-       tap Centre to come back to your position. Tapping a curb opens a
-       detail card only — it never changes the parked side or the timer. -->
+       top, always visible (no collapsed row, no toggle, no title, no
+       chips, no bottom block). Each curb line is colored by the verdict
+       in effect right now on that side. One-finger / mouse drag pans,
+       two-finger pinch / wheel / double-click zooms; North re-centres on
+       home, GPS on your location, (i) opens the map info. Tapping a curb
+       opens its detail sheet only — it never changes the parked side or
+       the timer. -->
   <div class="card" id="mapCard">
     <div id="mapBody"></div>
   </div>
@@ -434,6 +461,48 @@
     <div id="destResult" style="font-size:17px;margin-top:10px">Type an address above &mdash; the rules come from the city&rsquo;s data, live.</div>
     <div class="note" style="margin-top:8px">Live city-data lookup &mdash; not a verified page. If the rules can&rsquo;t be established, the app says so instead of guessing.</div>
   </div>
+  </section>
+
+  <!-- Map info sheet (Nov 18 map cleanup): the legend, moved off the
+       bottom of the Map tab into the (i) sheet — same sheet pattern as
+       the other tabs. The wording stays generic (no hardcoded street),
+       so it reads true on every street the app shows. -->
+  <section id="tab-info" class="tabpanel hidden" aria-label="Map info">
+  <div class="sheet-top">
+    <div class="sheet-grab" aria-hidden="true"></div>
+    <div class="sheet-head">
+      <h2>Map info</h2>
+      <button class="sheet-close" id="sheetClose-info" type="button" aria-label="Close">&#10005;</button>
+    </div>
+  </div>
+  <div class="card">
+    <div class="label">What the colours mean</div>
+    <div style="font-size:17px;text-align:left;margin-top:4px;line-height:1.7"><span class="mapsw" style="background:var(--accent)"></span>Green &mdash; you can stay until the deadline<br><span class="mapsw" style="background:var(--fine-ink)"></span>Red &mdash; cannot park / stay now<br><span class="mapsw" style="background:#b3beb6"></span>Grey &mdash; not established<br><span class="mapdotsw"></span>Orange dot &mdash; a metered spot</div>
+  </div>
+  <div class="card">
+    <div class="label">Markers</div>
+    <div style="font-size:17px;text-align:left;margin-top:4px">The green dot with a house number above it is home. Orange dots are the metered spots on this street, where it has any.</div>
+  </div>
+  <div class="card">
+    <div class="label">Tap a color line for details</div>
+    <div style="font-size:17px;text-align:left;margin-top:4px">Tap any coloured curb line to see that side&rsquo;s rule &mdash; its cleaning window, limit, and paid status.</div>
+  </div>
+  </section>
+
+  <!-- Curb detail sheet (Nov 18 map cleanup): a curb tap opens the same
+       detail-card content (mapDetailHtml) as a sheet sliding up from the
+       bottom, instead of the card under the map. Filled by
+       renderCurbSheet(); the card's own &#10005; and "Report a sign here"
+       are wired from the sheet (see init). -->
+  <section id="tab-curb" class="tabpanel hidden" aria-label="Curb details">
+  <div class="sheet-top">
+    <div class="sheet-grab" aria-hidden="true"></div>
+    <div class="sheet-head">
+      <h2>Curb details</h2>
+      <button class="sheet-close" id="sheetClose-curb" type="button" aria-label="Close">&#10005;</button>
+    </div>
+  </div>
+  <div id="curbSheetBody"></div>
   </section>
 
   <!-- Bottom-sheet backdrop (Nov 18, Radio pattern): dims the map while a
@@ -2199,6 +2268,7 @@ function renderGpsRow() {
 }
 function checkGps() {
   if (!("geolocation" in navigator)) {
+    _gpsCentrePending = false;
     setGpsStatusText("📍 No location — home block (" + DATA.street.address_number + ")");
     return;
   }
@@ -2209,6 +2279,9 @@ function checkGps() {
     lastFix = { lat: pos.coords.latitude, lon: pos.coords.longitude, dist: s.dist,
                 homeDist: Math.round(Math.sqrt(hp[0] * hp[0] + hp[1] * hp[1])),
                 accuracy: pos.coords.accuracy };
+    /* A manual GPS-centre tap is waiting on this fix — follow it. The
+       auto-refresh never sets the flag, so it never yanks the map. */
+    if (_gpsCentrePending) { _gpsCentrePending = false; osmSetView(pos.coords.latitude, pos.coords.longitude, osmView().zoom); }
     renderGpsRow();
     var swSlug = shouldSwitchStreet(pos.coords.latitude, pos.coords.longitude, pos.coords.accuracy);
     var willSwitch = (typeof liveWillSwitch === "function") ? liveWillSwitch(swSlug) : !!swSlug;
@@ -2218,6 +2291,7 @@ function checkGps() {
     });
     maybeSwitchStreet(pos.coords.latitude, pos.coords.longitude, pos.coords.accuracy);
   }, function () {
+    _gpsCentrePending = false;
     setGpsStatusText("📍 Location unavailable — home block (" + DATA.street.address_number + ")");
   }, { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 });
 }
@@ -2278,7 +2352,11 @@ function updateDots() {
    the other four open as JSM Radio-style bottom sheets sliding up over the
    map (Nov 18, his call). Entering Move opens the where-to-move list and
    entering Park opens the limit timer, so the tab always shows its
-   content — the collapsed rows stay collapsed in the HTML for the suites. */
+   content — the collapsed rows stay collapsed in the HTML for the suites.
+   Two more sheets ride the same pattern without a tab (Nov 18 map
+   cleanup): the map-info sheet (the (i) control) and the curb-detail
+   sheet (a curb tap) — both close back to Map, and neither is a tab
+   (currentTab stays "map" while one is open). */
 var tab = "map";
 var TABS = ["map", "move", "park", "destination", "settings"];
 function currentTab() { return tab; }
@@ -2293,7 +2371,7 @@ function currentTab() { return tab; }
    never display:none, or the slide could not animate: the ID rule in the
    stylesheet beats .tabpanel.hidden and keeps it rendered off-screen,
    invisible. Closing a sheet returns to Map via showTab("map"). */
-var SHEET_TABS = ["move", "park", "destination", "settings"];
+var SHEET_TABS = ["move", "park", "destination", "settings", "info", "curb"];
 function sheetIsOpen(name) {
   var p = el("tab-" + name);
   return !!p && p.classList.contains("open");
@@ -2311,31 +2389,43 @@ function renderSettingsLayers() {
   });
 }
 function showTab(name) {
-  if (TABS.indexOf(name) < 0) name = "map";
+  /* Sheet-only names (info, curb) open a sheet without a tab: the Map tab
+     stays active and currentTab stays "map" while one is open. A bogus
+     name still falls back to Map. */
+  if (TABS.indexOf(name) < 0 && SHEET_TABS.indexOf(name) < 0) name = "map";
   if (view === "details") showMain();
-  tab = name;
-  TABS.forEach(function (t) {
+  var wasCurb = sheetIsOpen("curb");
+  tab = (TABS.indexOf(name) >= 0) ? name : "map";
+  /* Map is the base and stays underneath an open sheet — it is never
+     hidden by a tab switch (its panel hides only with the main view). */
+  var mp = el("tab-map");
+  if (mp) mp.classList.remove("hidden");
+  SHEET_TABS.forEach(function (t) {
     var p = el("tab-" + t);
     if (p) {
-      /* Map is the base and stays underneath an open sheet — it is never
-         hidden by a tab switch (its panel hides only with the main view). */
-      if (t === "map") p.classList.remove("hidden");
-      else p.classList.toggle("hidden", t !== name);
-      if (SHEET_TABS.indexOf(t) >= 0) p.classList.toggle("open", t === name);
+      p.classList.toggle("hidden", t !== name);
+      p.classList.toggle("open", t === name);
     }
+  });
+  TABS.forEach(function (t) {
     var b = el("tabbtn-" + t);
     if (b) {
-      b.classList.toggle("active", t === name);
-      b.setAttribute("aria-selected", t === name ? "true" : "false");
+      b.classList.toggle("active", t === tab);
+      b.setAttribute("aria-selected", t === tab ? "true" : "false");
     }
   });
   var bd = el("tabBackdrop");
   if (bd) bd.classList.toggle("open", name !== "map");
+  /* A curb detail that was open is gone once its sheet closes — clear the
+     selection so the next tap on the same curb re-opens it instead of
+     silently toggling it off. */
+  if (wasCurb && name !== "curb" && _mapSelected) { _mapSelected = null; }
   if (name === "move") setWhereOpen(true);
   else if (name === "park") setLimitOpen(true);
   else if (name === "map") { try { renderMap(); } catch (e) { /* sizing only */ } }
   else if (name === "destination") destRender();
   else if (name === "settings") renderSettingsLayers();
+  else if (name === "curb") renderCurbSheet();
   if (typeof window !== "undefined" && window.scrollTo) window.scrollTo(0, 0);
 }
 /* Drag a sheet down to close + tap its top zone to close — Radio's
@@ -2416,7 +2506,6 @@ function showMain() {
   el("mainView").classList.remove("hidden");
   updateDots();
   if (typeof window !== "undefined" && window.scrollTo) window.scrollTo(0, 0);
-  var t = el("mainTitle"); if (t && t.focus) t.focus();
 }
 
 function init() {
@@ -2472,10 +2561,10 @@ function init() {
       }
     });
   }
-  /* Curb taps + layer toggles + the detail close button all delegate from
-     the map body (its innerHTML is rebuilt on change, so the listeners
-     live on the container, not the rebuilt nodes). A curb tap only ever
-     opens its detail card — it never touches the parked side or the timer. */
+  /* Curb taps + the three map controls delegate from the map body (its
+     innerHTML is rebuilt on change, so the listeners live on the
+     container, not the rebuilt nodes). A curb tap only ever opens its
+     detail sheet — it never touches the parked side or the timer. */
   var mapBodyEl = el("mapBody");
   if (mapBodyEl) {
     mapBodyEl.addEventListener("click", function (e) {
@@ -2483,16 +2572,11 @@ function init() {
       var t = e.target || e.srcElement;
       while (t && t !== mapBodyEl) {
         if (t.getAttribute) {
-          var zm = t.getAttribute("data-osm-zoom");
-          if (zm) { osmZoomBy(+zm); return; }
-          if (t.getAttribute("data-osm-recentre") !== null) { osmRecentre(); return; }
-          var rep = t.getAttribute("data-report-side");
-          if (rep) { openReportForm(rep); return; }
-          var layer = t.getAttribute("data-map-layer");
-          if (layer) { mapToggleLayer(layer); return; }
+          if (t.getAttribute("data-map-north") !== null) { osmRecentre(); return; }
+          if (t.getAttribute("data-map-info") !== null) { showTab("info"); return; }
+          if (t.getAttribute("data-map-gps") !== null) { osmCentreOnGps(); return; }
           var side = t.getAttribute("data-map-side");
           if (side) { mapSelectCurb(side); return; }
-          if (t.getAttribute("data-map-close") !== null) { _mapSelected = null; renderMap(); return; }
         }
         t = t.parentNode;
       }
@@ -2547,6 +2631,25 @@ function init() {
     var c = el("sheetClose-" + name);
     if (c) c.addEventListener("click", function () { closeSheet(); });
   });
+  /* The curb sheet's own buttons (its detail card's &#10005; and "Report a
+     sign here") delegate from the sheet — the card no longer lives in the
+     map body, so the map body's delegation never sees them. Closing the
+     sheet clears the selection (showTab does that); reporting jumps to
+     the Settings tab, as before. */
+  var curbPanel = el("tab-curb");
+  if (curbPanel) {
+    curbPanel.addEventListener("click", function (e) {
+      var t = e.target || e.srcElement;
+      while (t && t !== curbPanel) {
+        if (t.getAttribute) {
+          if (t.getAttribute("data-map-close") !== null) { closeSheet(); return; }
+          var rep = t.getAttribute("data-report-side");
+          if (rep) { openReportForm(rep); return; }
+        }
+        t = t.parentNode;
+      }
+    });
+  }
   var bd = el("tabBackdrop");
   if (bd) bd.addEventListener("click", function () { closeSheet(); });
   document.addEventListener("keydown", function (e) {
@@ -5415,9 +5518,11 @@ function mapDetailHtml(key, nowMs) {
    work with no tiles), and the projection is pure functions the Node
    suites can drive without a browser. Tiles: tile.openstreetmap.org,
    attribution "© OpenStreetMap contributors" on the map.
-   The map is pannable (pointer drag, one finger / mouse), zoomable
-   (+/- buttons, wheel, double-click, two-finger pinch), and re-centres
-   on the position with the Centre button. The home marker sits at the
+   The map is pannable (one-finger / mouse drag) and zoomable
+   (two-finger pinch, wheel, double-click) — the standard map gestures,
+   the only way to navigate now the +/- buttons are gone (Nov 18 map
+   cleanup). North re-centres on the position at the default zoom, GPS
+   on your location. The home marker sits at the
    exact centre of the view on load and after Centre (the view centres
    on the snapped marker, not the raw address — the snap is ~25 m off
    on the home street) — the rendered centring the verifier checks is the
@@ -5535,6 +5640,17 @@ function osmRecentre() {
   renderMap();
   return _osmView;
 }
+/* GPS-centre button (Nov 18 map cleanup): centre the map on the last GPS
+   fix at once, then ask for a fresh fix — when it lands, the map follows
+   it (see checkGps). The auto-refresh (boot + visibilitychange + 90 s)
+   never recentres on its own; only this manual tap does. */
+var _gpsCentrePending = false;
+function osmCentreOnGps() {
+  if (lastFix) osmSetView(lastFix.lat, lastFix.lon, osmView().zoom);
+  _gpsCentrePending = true;
+  checkGps();
+  return osmView();
+}
 /* Container size: the real element in the browser, the 614 px card width
    in the Node suites (whose stubs carry no offsetWidth). */
 function osmMapSize() {
@@ -5648,20 +5764,23 @@ function osmNearbyColor(sides, key, nowMs) {
   if (!v) v = limitOnlyVerdictForSideData(side, null, nowMs, null);
   return curbColorForVerdict(v);
 }
-/* The OSM map HTML: tiles + verdict overlay + controls + legend. The
-   overlay SVG is sized in container pixels (viewBox 0 0 W H), so the
-   rendered centring is the marker at the container centre — checkable
-   from the projected home point, not from a viewBox. */
+/* The OSM map HTML: tiles + verdict overlay + the hint pill + the three
+   controls (North / Info / GPS-centre). The legend, junction line and
+   detail card used to ride here too; they moved to the (i) sheet and the
+   curb sheet (Nov 18 map cleanup). The overlay SVG is sized in container
+   pixels (viewBox 0 0 W H), so the rendered centring is the marker at the
+   container centre — checkable from the projected home point, not from a
+   viewBox. */
 function mapSvgHtml(nowMs, geom, colors) {
   nowMs = nowMs || Date.now();
   if (!geom) geom = mapGeometry();
   if (!colors) colors = mapCurbColors(nowMs);
   var view = osmView();
   var size = osmMapSize();
-  var s = '<div style="display:flex;gap:8px;justify-content:center;margin-bottom:10px">'
-    + '<button class="maplayer" data-map-layer="paid" aria-pressed="' + MAP_LAYERS.paid + '">Paid</button>'
-    + '<button class="maplayer" data-map-layer="cleaning" aria-pressed="' + MAP_LAYERS.cleaning + '">Cleaning / no-parking</button>'
-    + '</div>';
+  /* No layer chips on the map any more (Nov 18 map cleanup): the toggles
+     live only in the Settings tab; both layers stay visible on the map
+     whenever their Settings toggle is on, as before. */
+  var s = "";
   if (!geom.ok) {
     return s + '<div class="note">' + esc(geom.message || "No street map here.") + '</div>';
   }
@@ -5718,33 +5837,35 @@ function mapSvgHtml(nowMs, geom, colors) {
     }
   }
   s += '</svg>';
-  s += '<div class="osmzoom"><button data-osm-zoom="1" aria-label="Zoom in">+</button>'
-    + '<button data-osm-zoom="-1" aria-label="Zoom out">&minus;</button>'
-    + '<button class="wide" data-osm-recentre aria-label="Centre on your position">Centre</button></div>';
+  /* Hint pill (top centre) + the three controls (right side, near the
+     bottom, North / Info / GPS-centre top-to-bottom — Nov 18 map cleanup).
+     All inline SVG, no raster images; the North arrow is a plain triangle
+     with an N, never the watermarked stock image. */
+  s += '<div class="osmhint" aria-hidden="true">Tap a color line for details</div>';
+  s += '<div class="osmcontrols">'
+    + '<button class="osmctl" data-map-north type="button" aria-label="North up — centre on home"><svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true"><text x="12" y="8.5" text-anchor="middle" font-size="9" font-weight="bold" fill="currentColor">N</text><path d="M12 11 L17.5 20 L12 17.5 L6.5 20 Z" fill="currentColor"/></svg></button>'
+    + '<button class="osmctl" data-map-info type="button" aria-label="Map info"><svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/><text x="12" y="16.5" text-anchor="middle" font-size="13" font-weight="bold" fill="currentColor">i</text></svg></button>'
+    + '<button class="osmctl" data-map-gps type="button" aria-label="Centre on my location"><svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="6.5" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="1.8" fill="currentColor"/><path d="M12 1.5 L12 4.5 M12 19.5 L12 22.5 M1.5 12 L4.5 12 M19.5 12 L22.5 12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>'
+    + '</div>';
   s += '<div class="osmattrib"><a href="' + OSM_ATTRIBUTION_URL + '">&copy; OpenStreetMap contributors</a></div>';
   s += '</div>';
-  s += '<div class="maplegend"><span class="mapsw" style="background:var(--accent)"></span>You can stay until the deadline'
-    + ' &nbsp; <span class="mapsw" style="background:var(--fine-ink)"></span>Cannot park / stay now'
-    + ' &nbsp; <span class="mapsw" style="background:#b3beb6"></span>Not established';
-  if (geom.dots.length) s += ' &nbsp; <span class="mapdotsw"></span>Metered spot';
-  s += '</div>';
+  /* No legend under the map any more (Nov 18 map cleanup): the colour
+     meanings moved into the (i) map-info sheet. */
   /* Stale-frame label (map fix, Nov 18): a cached frame shown while the
      fresh lookup re-runs says so, on the map itself — never as current. */
   if (liveMode() && LIVE.cacheStale) {
     s += '<div class="note" style="margin-top:6px">Last known map — saved ' + esc(LIVE.cacheStale.label || "")
       + ", checking the city\u2019s signs now.</div>";
   }
-  /* No junction in range (map fix, Nov 18): the 40 m rule is unchanged —
-     the nearest junction here is 134.9 m away, so nothing is drawn — but
-     the map says plainly which junction is nearest and how far, instead
-     of showing nothing. When a junction IS drawn, this line stays off. */
-  if (!geom.junction && geom.nearestJunction) {
-    s += '<div class="note" style="margin-top:6px">No junction within 40 m — nearest: '
-      + esc(geom.nearestJunction.name) + ", " + Math.round(geom.nearestJunction.distanceM)
-      + " m away.</div>";
-  }
-  s += '<div class="note" style="margin-top:6px">Curbs drawn from the street&rsquo;s centreline, on the real map. Tap a curb for its rule.</div>';
-  if (_mapSelected) s += mapDetailHtml(_mapSelected, nowMs);
+  /* No junction line under the map any more (Nov 18 map cleanup): the
+     40 m rule is unchanged — the nearest junction here is 134.9 m away,
+     so nothing is drawn — and the nearest junction is still computed
+     (geometry.nearestJunction), with the junction curbs' detail sheets
+     naming it. Only the display line under the map is gone. */
+  /* No "Curbs drawn..." line any more (Nov 18 map cleanup): the tap hint
+     lives in the pill at the top of the map and in the (i) sheet. */
+  /* No inline detail card any more (Nov 18 map cleanup): a selected curb
+     opens the curb-detail sheet (mapSelectCurb -> openCurbSheet). */
   return s;
 }
 function mapBodyHtml(nowMs, geom, colors) { return mapSvgHtml(nowMs, geom, colors); }
@@ -5754,9 +5875,9 @@ function mapBodyHtml(nowMs, geom, colors) { return mapSvgHtml(nowMs, geom, color
    be closed. */
 function setMapOpen(open) { return mapOpen(); }
 function mapOpen() { return true; }
-/* Tapping a curb opens (or closes, on a second tap) its detail card — and
-   changes nothing else. Read-only info: never the parked side, never the
-   timer. */
+/* Tapping a curb opens (or closes, on a second tap) its detail sheet —
+   and changes nothing else. Read-only info: never the parked side, never
+   the timer. */
 /* The tap target's spoken label: the side's own label, or for a junction
    curb the detail card's label ("Even numbers side — Past Rue
    Jacques-Casault — the next block"). */
@@ -5782,7 +5903,26 @@ function mapSelectCurb(key) {
   if (!key || mapSelectableKeys().indexOf(key) < 0) return _mapSelected;
   _mapSelected = (_mapSelected === key) ? null : key;
   renderMap();
+  /* The detail is a bottom sheet now (Nov 18 map cleanup): selecting a
+     curb opens its sheet; tapping the same curb again closes it. */
+  if (_mapSelected) openCurbSheet();
+  else if (sheetIsOpen("curb")) closeSheet();
   return _mapSelected;
+}
+/* The curb detail sheet (Nov 18 map cleanup): the same detail-card
+   content (mapDetailHtml — side rule, cleaning window, limit, paid,
+   junction where applicable), in the same bottom-sheet pattern as the
+   other tabs. renderMap refreshes it while it is open, so the sheet
+   never goes stale relative to the map. */
+function renderCurbSheet(nowMs) {
+  var b = el("curbSheetBody");
+  if (!b) return;
+  b.innerHTML = _mapSelected ? mapDetailHtml(_mapSelected, nowMs || Date.now()) : "";
+}
+function openCurbSheet() {
+  if (!_mapSelected) return false;
+  showTab("curb");
+  return true;
 }
 function mapSelectedCurb() { return _mapSelected; }
 function mapLayers() { return { paid: MAP_LAYERS.paid, cleaning: MAP_LAYERS.cleaning }; }
@@ -5829,6 +5969,10 @@ function renderMap(nowMs) {
   if (sig === _mapSig) return;
   _mapSig = sig;
   body.innerHTML = mapBodyHtml(nowMs, geom, colors);
+  /* The curb sheet shows the same detail the map used to carry inline —
+     refresh it while it is open, so the sheet never goes stale relative
+     to the map. */
+  if (sheetIsOpen("curb")) renderCurbSheet(nowMs);
 }
 
 /* ---- Phase 5 piece 2 (Nov 17): where to move / where can I park ----
@@ -6758,6 +6902,7 @@ if (typeof window !== "undefined") {
     OSM_ZOOM_DEFAULT: OSM_ZOOM_DEFAULT, OSM_ZOOM_MIN: OSM_ZOOM_MIN, OSM_ZOOM_MAX: OSM_ZOOM_MAX,
     OSM_MAP_H: OSM_MAP_H,
     setMapOpen: setMapOpen, mapOpen: mapOpen, mapSelectCurb: mapSelectCurb,
+    openCurbSheet: openCurbSheet, renderCurbSheet: renderCurbSheet, osmCentreOnGps: osmCentreOnGps,
     mapSelectedCurb: mapSelectedCurb, mapLayers: mapLayers, mapSetLayer: mapSetLayer,
     mapToggleLayer: mapToggleLayer, MAP_CURB_M: MAP_CURB_M,
     curbColorForVerdict: curbColorForVerdict, stayUntilTextFor: stayUntilTextFor,
