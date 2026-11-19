@@ -56,17 +56,18 @@
   .now { background: var(--now-bg); border-color: #f3c98f; }
   .now .count, .now .big { color: var(--now-ink); }
   /* Phase 2 warnings: two visual steps as the binding deadline approaches
-     (30 min, then 15 min). In-palette amber only — warn15 is the deeper one. */
+     (30 min, then 10 min). warn30 is amber; warn10 is the deeper warning
+     red — the last warning before the deadline. */
   #heroCard.warn30 { border-color: #d97706; }
   #heroCard.warn30 .count, #heroCard.warn30 .big { color: var(--amber-ink); }
-  #heroCard.warn15 { background: var(--now-bg); border-color: #b45309; }
-  #heroCard.warn15 .count, #heroCard.warn15 .big { color: var(--now-ink); }
+  #heroCard.warn10 { background: var(--now-bg); border-color: var(--fine-ink); }
+  #heroCard.warn10 .count, #heroCard.warn10 .big { color: var(--fine-ink); }
   /* Phase 2 verdict: one plain bold line, body size, same as the rest. */
   #heroVerdict { font-size: 18px; font-weight: 700; margin-top: 8px; }
   /* Phase 4: the fine line under a verdict (own line, so the verdict text
      itself stays byte-identical). Presentation fix (Nov 17, his call): the
      fine is the stakes of the move warning, not permanent info — 13px soft
-     warning red, shown only while a warn30/warn15 move warning fires.
+     warning red, shown only while a warn30/warn10 move warning fires.
      The 13px is the ONE sanctioned exception to the 15px text floor (his
      explicit call); the floor stands for every other line on the page. */
   #heroFine { font-size: 13px; color: var(--fine-ink); margin-top: 6px; }
@@ -1127,7 +1128,7 @@ function buildLimitIcs(parkedAtMs, limitMin, nowMs, endMs, opts) {
    binding deadline (bindingDeadlineForSideData: sooner of cleaning / limit,
    tie → cleaning, with the limit-only fallback — the same deadline the hero
    counts to), alarmed by a one-off .ics the phone's calendar delivers. No
-   native push, no server: the hero's 30/15-minute warnings cover the app-open
+   native push, no server: the hero's 30/10-minute warnings cover the app-open
    case, the .ics alarm covers the phone. */
 var PIN_KEY = "ticketSaver.pin.v1";
 /* "Far" is the app's own radius: the street auto-switch already uses 300 m
@@ -1965,7 +1966,7 @@ function paidRateText(p) {
    the paid block leaves Details text; in their place ONE compact paid-zone
    warning (a row + an expandable strip map) sits between the hero and the
    side buttons, on paid sides only. The fine stays under the verdict but
-   only while a move warning fires (warn30/warn15) — it is the stakes of
+   only while a move warning fires (warn30/warn10) — it is the stakes of
    the warning, not permanent info. Exception: a whole-side no-stopping
    verdict IS itself the warning, so its art. 4 fine shows whenever that
    verdict shows, even though a no-stop side has no deadline to count a
@@ -2192,17 +2193,18 @@ function bindingDeadlineForSide(key, evalMs, parkedAtMs) {
   return bindingDeadlineForSideData(liveActiveSides()[key], limitForSideKey(key), evalMs, parkedAtMs);
 }
 /* Two visual warning states on the hero countdown, at exactly 30 and again
-   at 15 minutes before the binding deadline (cleaning start/end or limit
-   expiry, whichever binds). Visual only — the app has no push. Outside the
-   30-minute zone the hero is unchanged (in particular no far-future
-   counter: his Nov 17 ruling stands). */
+   at 10 minutes before the binding deadline (cleaning start/end or limit
+   expiry, whichever binds) — the 10-minute one is the last warning.
+   Visual only — the app has no push. Outside the 30-minute zone the hero
+   is unchanged (in particular no far-future counter: his Nov 17 ruling
+   stands). */
 function heroWarningStateForData(side, lim, nowMs, parkedAtMs) {
   var b = bindingDeadlineForSideData(side, lim, nowMs, parkedAtMs);
   if (!b) {
     /* A limit-only side has no binding deadline from the cleaning logic
        (not established) — but its posted limit IS the binding deadline:
        the sooner of nothing and the limit expiry is the limit expiry.
-       Same 30/15 thresholds, same "limit ends" detail, same fine gating
+       Same 30/10 thresholds, same "limit ends" detail, same fine gating
        as any limit-bound curb — no special case for short limits. (His
        Nov 18 ruling: a parked 15-minute warning firing at parking, with
        the fine line showing right away, is fine.) */
@@ -2211,7 +2213,7 @@ function heroWarningStateForData(side, lim, nowMs, parkedAtMs) {
   }
   if (!b) return { level: "none", deadlineMs: null, binds: null, remainingMs: null };
   var rem = b.deadlineMs - nowMs;
-  var level = rem <= 15 * 60000 ? "warn15" : (rem <= 30 * 60000 ? "warn30" : "none");
+  var level = rem <= 10 * 60000 ? "warn10" : (rem <= 30 * 60000 ? "warn30" : "none");
   return { level: level, deadlineMs: b.deadlineMs, binds: b.binds, remainingMs: rem };
 }
 function heroWarningState(key, nowMs, parkedAtMs) {
@@ -2356,7 +2358,7 @@ function renderHero() {
     hero.classList.remove("now");
     hero.classList.remove("next");
     hero.classList.remove("warn30");
-    hero.classList.remove("warn15");
+    hero.classList.remove("warn10");
     var hv0 = el("heroVerdict");
     if (hv0) { hv0.textContent = ""; hv0.classList.add("hidden"); }
     var hf0 = el("heroFine");
@@ -2387,7 +2389,7 @@ function renderHero() {
     hero.classList.remove("now");
     hero.classList.remove("next");
     hero.classList.remove("warn30");
-    hero.classList.remove("warn15");
+    hero.classList.remove("warn10");
     var hv0 = el("heroVerdict");
     if (hv0) { hv0.textContent = ""; hv0.classList.add("hidden"); }
     var hf0 = el("heroFine");
@@ -2412,7 +2414,7 @@ function renderHero() {
   hero.classList.toggle("now", st.mode === "now");
   hero.classList.toggle("next", st.mode === "next");
   hero.classList.toggle("warn30", warn.level === "warn30");
-  hero.classList.toggle("warn15", warn.level === "warn15");
+  hero.classList.toggle("warn10", warn.level === "warn10");
   el("heroTitle").textContent = st.title || "—";
   var hc = el("heroCount");
   hc.textContent = st.count || "";
@@ -2431,7 +2433,7 @@ function renderHero() {
     hv.classList.toggle("hidden", !v);
   }
   /* The fine is the stakes of the move warning, not permanent info: it
-     shows only while a warn30/warn15 warning fires (Phase 4 fix, Nov 17).
+     shows only while a warn30/warn10 warning fires (Phase 4 fix, Nov 17).
      A whole-side no-stopping verdict IS itself the warning — "Cannot park
      here at all" — so its art. 4 fine shows whenever that verdict shows, even
      though a no-stop side has no deadline to count a warning from. */
