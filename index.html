@@ -1201,7 +1201,14 @@ function nextWindowForSide(key, now) { return nextWindowForSideData(liveActiveSi
    each panel's reach is set by its arrow (FLECHE_PAN, undecodable) — the
    data cannot say whether they cover the whole side or only short
    stretches, and the SE panels cluster at the segment end near the
-   intersection. A whole-side ban needs whole-side evidence in the data. */
+   intersection. A whole-side ban needs whole-side evidence in the data.
+   The live pipeline sets the flag only on that evidence
+   (live-lookup.js liveWholeSideBan, Nov 19 — Ducharme even side: an
+   in-segment \A anchor, no parking-permitting sign on the side in the
+   block, and >=3 ban poles spanning >=100 m along the curb). A flagged
+   side is established with windows [] by construction, so
+   verdictForSideData checks the flag BEFORE the windows-length
+   requirement below. */
 function limitForSideKey(key) {
   if (liveMode()) return null; /* live streets have no limits in the lookup — manual timer only */
   var lims = (typeof DATA !== "undefined" && DATA) ? DATA.limits : null;
@@ -1595,11 +1602,12 @@ function renderPaidWarn() {
   card.classList.remove("hidden");
 }
 function verdictForSideData(side, lim, evalMs, parkedAtMs, isFuture) {
-  if (!side || side.status !== "established" || !side.windows || !side.windows.length) return null;
+  if (!side || side.status !== "established") return null;
   if (side.no_stopping_whole_side) {
     return { kind: "no_stop", text: "Cannot park here at all — no stopping at any time.",
              fine: fineForKind("no_stopping"), deadlineMs: null, binds: null };
   }
+  if (!side.windows || !side.windows.length) return null;
   var moveNow = isFuture ? "Move then — " : "Move now — ";
   var parked = (typeof parkedAtMs === "number") ? parkedAtMs : evalMs;
   var r = nextWindowForSideData(side, new Date(evalMs));
@@ -1804,6 +1812,15 @@ function heroState(key, now, parkedAtMs) {
     return { mode: "no_window", showIcs: false,
              title: "No verified window",
              detail: "No verified window — check the physical sign." };
+  }
+  if (s.no_stopping_whole_side) {
+    /* Whole-side ban (Nov 19, Ducharme even): the side is established
+       with windows [], so nextWindowForSideData below would return null
+       and the hero would say "No window found" — the opposite of the
+       verdict line ("Cannot park here at all"), which renderHero shows
+       separately with its art. 4 fine. The hero title states the ban. */
+    return { mode: "no_window", showIcs: false, title: "Cannot park here at all",
+             detail: "No stopping at any time on this side." };
   }
   var r = nextWindowForSide(key, now);
   if (!r) return { mode: "error", showIcs: false, title: "No window found",
@@ -3273,7 +3290,56 @@ function liveBanNote(bans) {
   if (a.length) parts.push(a.length + " no-stopping panel(s) (\\A EN TOUT TEMPS) also stand on this side.");
   return parts.join(" ");
 }
-function liveAssembleSides(attributed) {
+/* ---- whole-side no-stopping (Nov 19, his call — the Ducharme even side):
+   a side is a whole-side no-stopping ban ONLY on the repeated-pattern
+   evidence, never on one panel. All three must hold:
+   (i) an attributed \A EN TOUT TEMPS panel stands IN the segment (the
+       anchor — a \P panel alone never anchors it, because the no-stop
+       verdict text says "no stopping at any time", which is the \A
+       meaning; a \P panel allows stopping to drop off);
+   (ii) EVERY attributed row on the side in the segment is a permanent
+       ban — no cleaning, limit, 15-minute, débarcadère or permit plate
+       stands on this side in the block (any parking-permitting plate
+       vetoes: parking is evidently permitted there);
+   (iii) recurrence along the curb: >=3 distinct permanent-ban poles in
+       the 3-10 m band on this side (in-segment, junction-excluded or
+       out-of-segment — the fetched box), spanning >=100 m, so the ban is
+       a lining of the curb, not one local panel or one cluster.
+   Measured Nov 19 (fixture probes): Ducharme even has 13 in-band ban
+   poles spanning -253..+301 m with the in-segment anchor 182204 (+1.2 m)
+   and no other attributed row — FIRES. Des Pins SE has 3 in-segment
+   \A poles clustered in 38 m sharing poles with its established
+   cleaning window — fails (ii) via the window and (iii) via the span.
+   Des Pins NW has 7 in-segment ban poles but 10 in-segment 15-minute
+   plates — fails (ii). l'Épée stays ambiguous (the ambiguous veto runs
+   first, above this branch). The ban evidence is computed in
+   liveBuildResult from the in-band rows and passed in as `banEvidence`;
+   callers that omit it (older tests) get the old behaviour — a side can
+   never be flagged without the evidence. */
+function liveBanSummary(byPole) {
+  var ids = Object.keys(byPole).sort();
+  var alongs = ids.map(function (id) { return byPole[id]; });
+  return { poles: ids, poleCount: ids.length,
+    minAlong: alongs.length ? Math.round(Math.min.apply(null, alongs) * 10) / 10 : null,
+    maxAlong: alongs.length ? Math.round(Math.max.apply(null, alongs) * 10) / 10 : null };
+}
+function liveWholeSideBan(srecs, banEv) {
+  if (!banEv || banEv.poleCount < 3) return null;
+  if (banEv.minAlong === null || banEv.maxAlong === null) return null;
+  if ((banEv.maxAlong - banEv.minAlong) < 100) return null;
+  var anchors = srecs.filter(function (r) {
+    return r.parsed.kind === "permanent_ban" &&
+      String(r.parsed.verbatim).replace(/^\s+/, "").indexOf("\\A") === 0;
+  });
+  if (!anchors.length) return null;
+  if (srecs.some(function (r) { return r.parsed.kind !== "permanent_ban"; })) return null;
+  var inSeg = [];
+  anchors.forEach(function (r) { if (inSeg.indexOf(r.poteau_id) < 0) inSeg.push(r.poteau_id); });
+  return { poles: banEv.poles, poleCount: banEv.poleCount,
+    spanM: Math.round((banEv.maxAlong - banEv.minAlong) * 10) / 10,
+    inSegmentPoles: inSeg };
+}
+function liveAssembleSides(attributed, banEvidence) {
   var sides = {};
   ["even", "odd"].forEach(function (sideKey) {
     var srecs = attributed.filter(function (r) { return r.side === sideKey; });
@@ -3318,9 +3384,26 @@ function liveAssembleSides(attributed) {
             fleche_pan: r.fleche_pan, distance_to_centreline_m: r.distance_to_centreline_m,
             along_track_from_home_block_m: r.along_track_from_home_block_m }; }) }] });
     } else {
-      var nClean = order.reduce(function (n, k) { return n + groups[k].length; }, 0);
-      sides[sideKey] = liveExtend(base, { status: "not_established", windows: [],
-        reason: "No cleaning sign for this side passed the segment + band + intersection checks in the city's signage data. Cleaning signs attributed to this side in the segment: " + nClean + ". The data may be incomplete." });
+      var ban = liveWholeSideBan(srecs, banEvidence ? banEvidence[sideKey] : null);
+      if (ban) {
+        /* Whole-side no-stopping (Nov 19): established, with NO cleaning
+           window — windows [] by construction. verdictForSideData checks
+           the flag before the windows-length requirement, so this side
+           reads "Cannot park here at all" (red) everywhere. */
+        sides[sideKey] = liveExtend(base, { status: "established", windows: [],
+          no_stopping_whole_side: true,
+          no_stopping_poles: ban.poles,
+          no_stopping_in_segment_poles: ban.inSegmentPoles,
+          reason: "No stopping at any time on this side: " + ban.poleCount +
+            " no-stopping poles stand on this side in the city's signage data, spanning " +
+            ban.spanM + " m along the street, including " + ban.inSegmentPoles.length +
+            " in this block (" + ban.inSegmentPoles.join(", ") +
+            "), and no parking-permitting sign stands on this side in this block." });
+      } else {
+        var nClean = order.reduce(function (n, k) { return n + groups[k].length; }, 0);
+        sides[sideKey] = liveExtend(base, { status: "not_established", windows: [],
+          reason: "No cleaning sign for this side passed the segment + band + intersection checks in the city's signage data. Cleaning signs attributed to this side in the segment: " + nClean + ". The data may be incomplete." });
+      }
     }
   });
   return sides;
@@ -3342,6 +3425,7 @@ function liveBuildResult(input) {
   }
   var seg = liveDeriveSegment(chain, input.crossWays, houseAlong, cum);
   var seen = {}, attributed = [];
+  var banPoles = { even: {}, odd: {} }; /* in-band permanent-ban poles per side (poteau -> along): the whole-side-ban evidence, liveWholeSideBan */
   var counts = { fetched_in_box: input.signs.length, in_band_3_10m: 0, in_segment: 0,
     attributed: 0, cleaning_in_segment: 0, duplicate_panneau_rows_skipped: 0,
     intersection_suspect_excluded: 0, too_close_to_centreline_flagged: 0 };
@@ -3357,6 +3441,10 @@ function liveBuildResult(input) {
     if (sn.dist < LIVE_BAND_MIN_M) { counts.too_close_to_centreline_flagged++; return; }
     if (sn.dist > LIVE_BAND_MAX_M) return;
     counts.in_band_3_10m++;
+    if (parsed.kind === "permanent_ban") {
+      var bp = banPoles[side];
+      if (bp[s.POTEAU_ID_POT] === undefined) bp[s.POTEAU_ID_POT] = along;
+    }
     if (along < seg.min || along > seg.max) return;
     if (along - seg.min < LIVE_INTERSECTION_M || seg.max - along < LIVE_INTERSECTION_M) {
       counts.intersection_suspect_excluded++; return;
@@ -3371,7 +3459,9 @@ function liveBuildResult(input) {
   });
   counts.attributed = attributed.length;
   var mapExtent = liveMapExtent(seg);
-  return { status: "ok", sides: liveAssembleSides(attributed), counts: counts,
+  var banEvidence = { even: liveBanSummary(banPoles.even), odd: liveBanSummary(banPoles.odd) };
+  return { status: "ok", sides: liveAssembleSides(attributed, banEvidence), counts: counts,
+    banEvidence: banEvidence,
     segment: { min: Math.round(seg.min * 10) / 10, max: Math.round(seg.max * 10) / 10,
       belowName: seg.belowName, aboveName: seg.aboveName,
       extMin: mapExtent.extMin, extMax: mapExtent.extMax,
