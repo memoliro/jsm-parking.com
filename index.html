@@ -4317,6 +4317,125 @@ function liveRpaCacheSave(codes) {
   } catch (e) { /* private mode */ }
 }
 
+/* ---- single-file Montreal signs store (Nov 19): montreal-signs.v1.json ----
+   The full "Stationnement sur rue — signalisation courante" dataset
+   (145,162 rows) compacted to one ~3.3 MB file: poles grouped, DESCRIPTION_RPA
+   / CODE_RPA dictionary-encoded, coordinates integer 1e-5 deg (~1 m)
+   delta-encoded from the previous pole (poles sorted by latitude), exact
+   duplicate PANNEAU_ID_PAN rows dropped at build time (8,258), and the RPA
+   canonical map (CODE_RPA -> canonical DESCRIPTION_RPA) for every code
+   present in the signage. The file is downloaded ONCE and cached by the
+   browser; every paint after that is a local bounding-box filter
+   (milliseconds) instead of a live CKAN SQL round-trip (~1 s).
+   File-first, live fallback: a lookup uses the file ONLY when it has
+   already loaded AND its asOf date still matches the signage package's
+   metadata_modified (a dataset change ships as a new file version, v2+).
+   Otherwise — not loaded yet, failed to load, or stale — the lookup runs
+   the existing live CKAN SQL path, untouched. The file replaces ONLY the
+   CKAN signage fetch (and the RPA fetch for codes it covers); Overpass,
+   Photon, Geobase and the paid-parking queries stay live.
+   The filter yields the SAME signs array shape the parser expects
+   (POTEAU_ID_POT / POSITION_POP / PANNEAU_ID_PAN / DESCRIPTION_RPA /
+   CODE_RPA / FLECHE_PAN / Latitude / Longitude, same value types as the
+   CKAN rows), in the same ORDER BY Latitude order, so liveBuildResult
+   sees no difference. PANNEAU_ID_PAN is synthesised (potId + panel
+   index): the file is already deduped, so the synthetic ids only feed
+   the parser's dedup bookkeeping with unique values. */
+var LIVE_SIGNS_FILE_URL = "montreal-signs.v1.json";
+var LIVE_SIGNS_FILE = null; /* decoded file, once loaded */
+var LIVE_SIGNS_FILE_PROMISE = null; /* in-flight load, for dedup */
+var LIVE_SIGNS_FILE_FAILED = false; /* a failed load never retries in-session */
+function liveSignsFileLoad() {
+  if (LIVE_SIGNS_FILE) return Promise.resolve(LIVE_SIGNS_FILE);
+  if (LIVE_SIGNS_FILE_PROMISE) return LIVE_SIGNS_FILE_PROMISE;
+  if (LIVE_SIGNS_FILE_FAILED || typeof fetch === "undefined") return Promise.resolve(null);
+  var p;
+  try {
+    p = fetch(LIVE_SIGNS_FILE_URL).then(function (res) {
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      return res.json();
+    }).then(function (j) {
+      if (!j || j.v !== 1 || !j.poles || !j.desc || !j.code || !j.rpa) throw new Error("bad signs file");
+      LIVE_SIGNS_FILE = j;
+      LIVE_SIGNS_FILE_CANON = null; /* rebuilt lazily from the new file */
+      return j;
+    });
+  } catch (e) { /* fetch itself threw (e.g. no network in a test harness) */
+    LIVE_SIGNS_FILE_FAILED = true;
+    return Promise.resolve(null);
+  }
+  p = p.catch(function () { LIVE_SIGNS_FILE_FAILED = true; return null; });
+  LIVE_SIGNS_FILE_PROMISE = p;
+  return p;
+}
+/* Usable only when loaded and still current: dataAsOf is the signage
+   package's metadata_modified date (or null when unknown — usable, same
+   rule as the live.v5 cache). */
+function liveSignsFileUsable(dataAsOf) {
+  if (!LIVE_SIGNS_FILE) return false;
+  if (!dataAsOf) return true;
+  return LIVE_SIGNS_FILE.asOf === dataAsOf;
+}
+/* Test/embedding seam: inject decoded file data without a network fetch. */
+function liveSignsFileSetData(j) {
+  LIVE_SIGNS_FILE = j || null;
+  LIVE_SIGNS_FILE_FAILED = false;
+  LIVE_SIGNS_FILE_CANON = null;
+  LIVE_SIGNS_FILE_PROMISE = j ? Promise.resolve(j) : null;
+}
+/* Local bounding-box filter — the same ±250 m box the live CKAN SQL used,
+   same Latitude/Longitude range semantics, poles in latitude order.
+   Returns the CKAN-shaped signs array, or null when the file is not loaded. */
+function liveSignsFileBox(lat, lon) {
+  var f = LIVE_SIGNS_FILE;
+  if (!f || !f.poles || !f.desc || !f.code) return null;
+  var dLat = 250 / 110540;
+  var dLon = 250 / (111320 * Math.cos(lat * Math.PI / 180));
+  var latMin = lat - dLat, latMax = lat + dLat, lonMin = lon - dLon, lonMax = lon + dLon;
+  var out = [];
+  var plat = 0, plon = 0;
+  var poles = f.poles, desc = f.desc, code = f.code;
+  for (var i = 0; i < poles.length; i++) {
+    var p = poles[i];
+    plat += p[1]; plon += p[2];
+    var la = plat / 1e5, lo = plon / 1e5;
+    if (la > latMax) break; /* poles are sorted by latitude */
+    if (la < latMin || lo < lonMin || lo > lonMax) continue;
+    var flat = p[3], pot = String(p[0]);
+    for (var j = 0; j < flat.length; j += 4) {
+      out.push({ POTEAU_ID_POT: pot, POSITION_POP: String(flat[j + 3]),
+        PANNEAU_ID_PAN: pot + "-" + (j / 4),
+        DESCRIPTION_RPA: desc[flat[j]], CODE_RPA: code[flat[j + 1]],
+        FLECHE_PAN: String(flat[j + 2]), Latitude: la, Longitude: lo });
+    }
+  }
+  return out;
+}
+var LIVE_SIGNS_FILE_CANON = null; /* { CODE_RPA: canonical DESCRIPTION_RPA }, built lazily */
+function liveSignsFileCanon() {
+  if (LIVE_SIGNS_FILE_CANON) return LIVE_SIGNS_FILE_CANON;
+  var out = {};
+  var f = LIVE_SIGNS_FILE;
+  if (f && f.rpa && f.code && f.desc) {
+    f.rpa.forEach(function (pair) { out[f.code[pair[0]]] = f.desc[pair[1]]; });
+  }
+  LIVE_SIGNS_FILE_CANON = out;
+  return out;
+}
+/* The file's canon for the requested codes only — codes absent from the
+   file's RPA map (277 sign codes have no RPA row) stay absent, exactly
+   as the live path reports them when the RPA query returns nothing. */
+function liveSignsFileCanonForCodes(codes) {
+  var all = liveSignsFileCanon(), out = {};
+  codes.forEach(function (c) { if (all[c] !== undefined) out[c] = all[c]; });
+  return out;
+}
+/* Kick the download off in the background at script load: it never blocks
+   the first paint or the first lookup (a lookup that runs before the file
+   lands simply takes the live CKAN path). Guarded — a harness without
+   fetch (or a fetch that throws synchronously) just never loads it. */
+try { liveSignsFileLoad(); } catch (e) { /* file stays unloaded; live fallback */ }
+
 /* ---- page integration: live mode, side keys, chrome, gating ---- */
 function liveMode() { return typeof LIVE !== "undefined" && LIVE && LIVE.status !== "idle"; }
 function liveActiveSides() {
@@ -4987,6 +5106,39 @@ function liveClearStaleIfMine(gen) {
     if (typeof renderAll === "function") renderAll();
   }
 }
+/* ---- signs + canon, file-first with live fallback (Nov 19) ----
+   Returns { signs, canon, fromFile }. When the single-file store is
+   loaded and current for dataAsOf, the signs come from the local
+   bounding-box filter and the canon from the file's RPA map — no CKAN
+   round-trip at all. Otherwise the existing live path runs untouched
+   (CKAN signage SQL, then the localStorage RPA cache + CKAN for the
+   codes still missing). A file-filter throw also falls back to live:
+   the file path must never fail a lookup the live path could serve. */
+async function liveFetchSignsAndCanon(lat, lon, dataAsOf) {
+  if (liveSignsFileUsable(dataAsOf)) {
+    try {
+      var fileSigns = liveSignsFileBox(lat, lon);
+      if (fileSigns) {
+        var fileCodes = [];
+        fileSigns.forEach(function (s) { if (s.CODE_RPA && fileCodes.indexOf(s.CODE_RPA) < 0) fileCodes.push(s.CODE_RPA); });
+        return { signs: fileSigns, canon: liveSignsFileCanonForCodes(fileCodes), fromFile: true };
+      }
+    } catch (e) { /* fall through to the live path below */ }
+  }
+  var signs = await liveCkanSql(liveCkanSignsSql(lat, lon));
+  var codes = [];
+  signs.forEach(function (s) { if (s.CODE_RPA && codes.indexOf(s.CODE_RPA) < 0) codes.push(s.CODE_RPA); });
+  var canon = liveRpaCacheGet(codes);
+  var missing = codes.filter(function (c) { return canon[c] === undefined; });
+  if (missing.length) {
+    try {
+      var rows = await liveCkanSql(liveRpaSql(missing));
+      rows.forEach(function (r) { canon[r.CODE_RPA] = r.DESCRIPTION_RPA; });
+      liveRpaCacheSave(canon);
+    } catch (e) { /* keep the cached subset — codes still missing stay ambiguous, honestly */ }
+  }
+  return { signs: signs, canon: canon, fromFile: false };
+}
 function liveRunLookup(fix) {
   var key = liveSlug(fix.streetName) + "|" + fix.houseNumber;
   if (LIVE_LOADING && LIVE_LOADING.key === key) return LIVE_LOADING.promise;
@@ -5089,18 +5241,8 @@ async function liveRunLookupInner(fix) {
       return !chain.streetWayIds[w.id] && (t.name || "").toLowerCase() !== String(fix.streetName).toLowerCase()
         && ["footway", "path", "cycleway", "steps", "pedestrian"].indexOf(t.highway) < 0;
     });
-    var signs = await liveCkanSql(liveCkanSignsSql(fix.lat, fix.lon));
-    var codes = [];
-    signs.forEach(function (s) { if (s.CODE_RPA && codes.indexOf(s.CODE_RPA) < 0) codes.push(s.CODE_RPA); });
-    var canon = liveRpaCacheGet(codes);
-    var missing = codes.filter(function (c) { return canon[c] === undefined; });
-    if (missing.length) {
-      try {
-        var rows = await liveCkanSql(liveRpaSql(missing));
-        rows.forEach(function (r) { canon[r.CODE_RPA] = r.DESCRIPTION_RPA; });
-        liveRpaCacheSave(canon);
-      } catch (e) { /* keep the cached subset — codes still missing stay ambiguous, honestly */ }
-    }
+    var fetched = await liveFetchSignsAndCanon(fix.lat, fix.lon, dataAsOf);
+    var signs = fetched.signs, canon = fetched.canon;
     var result = liveBuildResult({ signs: signs, canonByCode: canon, chain: chain,
       crossWays: crossWays, houseLat: houseLat, houseLon: houseLon,
       houseNumber: fix.houseNumber, streetName: fix.streetName, dataAsOf: dataAsOf, geoHit: geoHit });
@@ -5326,18 +5468,8 @@ async function liveNearbyLookupOne(fixLat, fixLon, cand, areaWays, dataAsOf, cac
       return !chain.streetWayIds[w.id] && (t.name || "").toLowerCase() !== cand.name.toLowerCase()
         && ["footway", "path", "cycleway", "steps", "pedestrian"].indexOf(t.highway) < 0;
     });
-    var signs = await liveCkanSql(liveCkanSignsSql(pt.lat, pt.lon));
-    var codes = [];
-    signs.forEach(function (s) { if (s.CODE_RPA && codes.indexOf(s.CODE_RPA) < 0) codes.push(s.CODE_RPA); });
-    var canon = liveRpaCacheGet(codes);
-    var missing = codes.filter(function (c) { return canon[c] === undefined; });
-    if (missing.length) {
-      try {
-        var rows = await liveCkanSql(liveRpaSql(missing));
-        rows.forEach(function (r) { canon[r.CODE_RPA] = r.DESCRIPTION_RPA; });
-        liveRpaCacheSave(canon);
-      } catch (e) { /* keep the cached subset — codes still missing stay ambiguous, honestly */ }
-    }
+    var fetched = await liveFetchSignsAndCanon(pt.lat, pt.lon, dataAsOf);
+    var signs = fetched.signs, canon = fetched.canon;
     var result = liveBuildResult({ signs: signs, canonByCode: canon, chain: chain,
       crossWays: crossWays, houseLat: pt.lat, houseLon: pt.lon,
       houseNumber: pt.number, streetName: cand.name, dataAsOf: dataAsOf, geoHit: geoHit });
@@ -8825,6 +8957,10 @@ if (typeof window !== "undefined") {
     liveMarkSideButtons: liveMarkSideButtons, liveRenderChrome: liveRenderChrome,
     liveSideCardsHtml: liveSideCardsHtml, liveVerifyBannerHtml: liveVerifyBannerHtml, liveOverpassQuery: liveOverpassQuery,
     liveCkanSignsSql: liveCkanSignsSql, liveRpaSql: liveRpaSql, liveGeobaseSql: liveGeobaseSql,
+    liveSignsFileLoad: liveSignsFileLoad, liveSignsFileBox: liveSignsFileBox,
+    liveSignsFileSetData: liveSignsFileSetData, liveSignsFileUsable: liveSignsFileUsable,
+    liveSignsFileCanonForCodes: liveSignsFileCanonForCodes,
+    liveFetchSignsAndCanon: liveFetchSignsAndCanon,
     liveGeobaseHit: liveGeobaseHit, liveSnap: liveSnap, liveCumAlong: liveCumAlong,
     livePaidCityNorm: livePaidCityNorm, livePaidSql: livePaidSql,
     livePaidMatchPlaces: livePaidMatchPlaces, livePaidBuildSide: livePaidBuildSide,
