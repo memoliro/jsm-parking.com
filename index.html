@@ -2788,27 +2788,129 @@ function checkGps() {
     return;
   }
   setGpsStatusText("📍 Waiting for a fix…");
-  navigator.geolocation.getCurrentPosition(function (pos) {
-    var s = snap(pos.coords.latitude, pos.coords.longitude);
-    var hp = toXY(pos.coords.latitude, pos.coords.longitude);
-    lastFix = { lat: pos.coords.latitude, lon: pos.coords.longitude, dist: s.dist,
-                homeDist: Math.round(Math.sqrt(hp[0] * hp[0] + hp[1] * hp[1])),
-                accuracy: pos.coords.accuracy };
-    /* A manual GPS-centre tap is waiting on this fix — follow it. The
-       auto-refresh never sets the flag, so it never yanks the map. */
-    if (_gpsCentrePending) { _gpsCentrePending = false; osmSetView(pos.coords.latitude, pos.coords.longitude, osmView().zoom); }
+  navigator.geolocation.getCurrentPosition(onGpsFix, onGpsError, { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 });
+}
+/* Record a fix (the same snap math checkGps always used): the phone's
+   position snapped onto the current street, plus the distance from the
+   baked home street. Pure state — no render, no switch, no lookup. */
+function gpsRecordFix(pos) {
+  if (!pos || !pos.coords || typeof pos.coords.latitude !== "number"
+      || typeof pos.coords.longitude !== "number") return null;
+  var s = snap(pos.coords.latitude, pos.coords.longitude);
+  var hp = toXY(pos.coords.latitude, pos.coords.longitude);
+  lastFix = { lat: pos.coords.latitude, lon: pos.coords.longitude, dist: s.dist,
+              homeDist: Math.round(Math.sqrt(hp[0] * hp[0] + hp[1] * hp[1])),
+              accuracy: pos.coords.accuracy };
+  return lastFix;
+}
+/* The shared success handling for every GPS read (the boot read and the
+   15 s check): record the fix, follow a pending manual GPS-centre tap,
+   name the street, and hand the fix to the lookup / street switch. */
+function onGpsFix(pos) {
+  if (!gpsRecordFix(pos)) return;
+  /* A manual GPS-centre tap is waiting on this fix — follow it. The
+     auto-refresh never sets the flag, so it never yanks the map. */
+  if (_gpsCentrePending) { _gpsCentrePending = false; osmSetView(pos.coords.latitude, pos.coords.longitude, osmView().zoom); }
+  renderGpsRow();
+  var swSlug = shouldSwitchStreet(pos.coords.latitude, pos.coords.longitude, pos.coords.accuracy);
+  var willSwitch = (typeof liveWillSwitch === "function") ? liveWillSwitch(swSlug) : !!swSlug;
+  reverseGeocode(pos.coords.latitude, pos.coords.longitude, function (feature) {
+    if (willSwitch) return; /* switching away — the other page owns this fix */
+    if (typeof liveMaybeLookup === "function") liveMaybeLookup(pos.coords.latitude, pos.coords.longitude, feature);
+  });
+  maybeSwitchStreet(pos.coords.latitude, pos.coords.longitude, pos.coords.accuracy);
+}
+function onGpsError() {
+  _gpsCentrePending = false;
+  setGpsStatusText("📍 Location unavailable — home block (" + DATA.street.address_number + ")");
+}
+
+/* ---- GPS-first first paint (Nov 19; his call: the first paint should
+   centre on the GPS fix, not on the baked home street) ----
+   init() asks for a fix BEFORE the first render and holds only the map's
+   first tile paint until it lands or the bounded wait ends. Everything
+   else paints at once, and the map area shows a loading line while it
+   waits — never a blank frame, never a hang waiting for GPS. A fix that
+   lands in the wait centres the first paint on the fix itself; the
+   existing switch / lookup then takes over from there exactly as today
+   (a fix on another known street switches to that street, a fix on an
+   unknown street starts the live lookup whose house point centres the
+   map). A fix older than GPS_FIRST_FRESH_MS only centres the paint — a
+   cached fix must never drive a street switch or a lookup, so the fresh
+   15 s check runs instead and owns those. Denied, unavailable, timed
+   out, or still pending when the wait ends: paint home, as today, and
+   the 15 s check still runs (a slow cold fix may yet land). */
+var GPS_FIRST_WAIT_MS = 3000; /* longest the map's first paint waits for a fix */
+var GPS_FIRST_FRESH_MS = 10000; /* a fix older than this centres the paint only */
+var GPS_FIRST_MAX_AGE_MS = 60000; /* a cached fix up to this old may centre the first paint */
+var _bootMapHeld = false; /* true only between the boot GPS request and its fix-or-timeout */
+function gpsFixIsFresh(pos) {
+  if (!pos || typeof pos.timestamp !== "number") return true; /* no timestamp — treat the just-delivered fix as fresh */
+  return (Date.now() - pos.timestamp) <= GPS_FIRST_FRESH_MS;
+}
+function gpsFirstPaintFix(pos) {
+  var lat = pos && pos.coords ? pos.coords.latitude : null;
+  var lon = pos && pos.coords ? pos.coords.longitude : null;
+  if (typeof lat === "number" && typeof lon === "number" && isFinite(lat) && isFinite(lon)) {
+    /* Seed the first-paint centre on the fix itself (street level, the
+       same zoom the area layer needs) — the first osmView() reads this,
+       not the baked home default. */
+    _osmView = { lat: lat, lon: lon, zoom: OSM_ZOOM_DEFAULT, bearing: 0 };
+    _osmStreetKey = osmStreetKey();
+  }
+  if (gpsFixIsFresh(pos)) {
+    onGpsFix(pos);
+  } else {
+    /* A cached fix still centres the first paint on the right area, but
+       it must not drive a street switch or a lookup — those belong to a
+       fresh fix, so the 15 s check below owns them. Record it for
+       display only (the pin and the GPS row read lastFix). */
+    gpsRecordFix(pos);
     renderGpsRow();
-    var swSlug = shouldSwitchStreet(pos.coords.latitude, pos.coords.longitude, pos.coords.accuracy);
-    var willSwitch = (typeof liveWillSwitch === "function") ? liveWillSwitch(swSlug) : !!swSlug;
-    reverseGeocode(pos.coords.latitude, pos.coords.longitude, function (feature) {
-      if (willSwitch) return; /* switching away — the other page owns this fix */
-      if (typeof liveMaybeLookup === "function") liveMaybeLookup(pos.coords.latitude, pos.coords.longitude, feature);
-    });
-    maybeSwitchStreet(pos.coords.latitude, pos.coords.longitude, pos.coords.accuracy);
-  }, function () {
-    _gpsCentrePending = false;
-    setGpsStatusText("📍 Location unavailable — home block (" + DATA.street.address_number + ")");
-  }, { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 });
+    checkGps();
+  }
+  try { renderMap(); } catch (e) { /* the paint must never throw the boot */ }
+  /* The coloured area follows the new centre, like a manual GPS-centre
+     tap: the fetch covers the visible rectangle around the fix. */
+  try { osmAreaScheduleRefresh(); } catch (e) { /* best-effort */ }
+}
+function gpsFirstPaintStart() {
+  if (typeof navigator === "undefined" || !navigator.geolocation
+      || !navigator.geolocation.getCurrentPosition) return false; /* nothing to wait for — init runs the 15 s check as today */
+  _bootMapHeld = true;
+  try { setGpsStatusText("📍 Finding your location…"); } catch (e) { /* never a gate */ }
+  var done = false;
+  function resolve(ok, pos) {
+    if (done) return;
+    done = true;
+    _bootMapHeld = false;
+    try {
+      if (ok && pos) {
+        gpsFirstPaintFix(pos);
+      } else {
+        /* No fix in the wait: paint home, as today — and still run the
+           15 s check, which may yet land a slow cold fix. */
+        try { renderMap(); } catch (e0) { /* the paint must never throw the boot */ }
+        checkGps();
+      }
+    } catch (e) {
+      /* A GPS fault must never break the boot: home paint, as today. */
+      _bootMapHeld = false;
+      try { renderMap(); } catch (e2) { /* the paint must never throw the boot */ }
+    }
+  }
+  try {
+    navigator.geolocation.getCurrentPosition(
+      function (pos) { resolve(true, pos); },
+      function () { resolve(false, null); },
+      { enableHighAccuracy: true, timeout: GPS_FIRST_WAIT_MS, maximumAge: GPS_FIRST_MAX_AGE_MS });
+  } catch (e) { resolve(false, null); return true; }
+  /* A browser that never calls back (a hung prompt, a stalled provider)
+     must not hold the map forever: the guard paints home at the wait. */
+  if (typeof setTimeout === "function") {
+    setTimeout(function () { resolve(false, null); }, GPS_FIRST_WAIT_MS);
+  }
+  return true; /* a boot fix is outstanding — the resolve runs the 15 s check itself when the fix fails or is stale */
 }
 
 
@@ -3058,6 +3160,11 @@ function init() {
      already running (and visible) with no tap. */
   var armed = maybeAutoArmLimit(Date.now());
   if (armed) saveLimitTimer(armed.parkedAt, armed.limitMin);
+  /* GPS-first first paint: ask for a fix before the first render. While
+     a boot fix is outstanding the resolve runs the 15 s check itself when
+     the fix fails or is stale; when there is nothing to wait for, init
+     runs the check as today. */
+  var bootGpsPending = gpsFirstPaintStart();
   renderAll();
   try { renderMap(); } catch (e) { /* sizing only — the first render ran on an empty map body */ }
   /* A running timer must not hide behind the collapsed tiles. */
@@ -3277,7 +3384,7 @@ function init() {
     if (t === "details") showDetails();
     else if (t === "main") showMain();
   });
-  checkGps();
+  if (!bootGpsPending) checkGps();
   /* The row must not show the previous position after he moves: re-check when
      the page becomes visible again, and every 90 s while it stays visible. */
   if (typeof document !== "undefined" && document.addEventListener) {
@@ -7665,6 +7772,18 @@ function renderMap(nowMs) {
   if (!card) return;
   var body = el("mapBody");
   if (!body) return;
+  /* GPS-first first paint: while the boot fix is outstanding the map area
+     shows a loading line, not tiles for the wrong place and not a blank
+     frame — the first tile paint centres on the fix (or on home once the
+     wait ends). The map signature is set to a hold sentinel, so the
+     paint after the hold always re-renders: without it, a home fallback
+     would compute the same signature as the pre-hold paint and the
+     loading line would stick. */
+  if (_bootMapHeld) {
+    body.innerHTML = '<div class="note" style="padding:12px 0">Finding your location…</div>';
+    _mapSig = "gpsfirst-hold";
+    return;
+  }
   nowMs = nowMs || Date.now();
   var geom = mapGeometry();
   var colors = mapCurbColors(nowMs, geom);
@@ -8769,6 +8888,12 @@ if (typeof window !== "undefined") {
     OSM_MAP_H: OSM_MAP_H,
     setMapOpen: setMapOpen, mapOpen: mapOpen, mapSelectCurb: mapSelectCurb,
     openCurbSheet: openCurbSheet, renderCurbSheet: renderCurbSheet, osmCentreOnGps: osmCentreOnGps,
+    checkGps: checkGps, onGpsFix: onGpsFix, onGpsError: onGpsError,
+    gpsFirstPaintStart: gpsFirstPaintStart, gpsFirstPaintFix: gpsFirstPaintFix,
+    gpsFirstPaintHeld: function () { return _bootMapHeld; },
+    gpsFixIsFresh: gpsFixIsFresh, gpsRecordFix: gpsRecordFix,
+    GPS_FIRST_WAIT_MS: GPS_FIRST_WAIT_MS, GPS_FIRST_FRESH_MS: GPS_FIRST_FRESH_MS,
+    GPS_FIRST_MAX_AGE_MS: GPS_FIRST_MAX_AGE_MS,
     mapSelectedCurb: mapSelectedCurb, mapLayers: mapLayers, mapSetLayer: mapSetLayer,
     mapToggleLayer: mapToggleLayer, MAP_CURB_M: MAP_CURB_M,
     curbColorForVerdict: curbColorForVerdict, stayUntilTextFor: stayUntilTextFor,
