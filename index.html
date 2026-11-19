@@ -106,6 +106,14 @@
              color: var(--ink); white-space: nowrap; box-shadow: 0 2px 10px rgba(0,0,0,.18);
              pointer-events: none; z-index: 5; }
   .osmcontrols { position: absolute; right: 10px; bottom: 34px; display: flex; flex-direction: column; gap: 8px; z-index: 5; }
+  /* Too-zoomed-out prompt (Nov 19 area paint, ParkUsher-style): the
+     area paint is tied to a zoomed-in view, so at a zoomed-out view the
+     hint pill is replaced by this amber pill instead of painting a
+     misleadingly small patch. Same seat as .osmhint, top-centre. */
+  .osmzoomhint { position: absolute; left: 50%; top: 12px; transform: translateX(-50%); background: var(--amber-bg);
+             border: 1.5px solid var(--amber-line); border-radius: 999px; padding: 6px 14px; font-size: 15px; font-weight: 700;
+             color: var(--amber-ink); white-space: nowrap; box-shadow: 0 2px 10px rgba(0,0,0,.18);
+             pointer-events: none; z-index: 5; }
   .osmctl { width: 44px; height: 44px; border-radius: 12px; border: 1px solid var(--line);
             background: var(--card); color: var(--ink); cursor: pointer; font-family: inherit;
             display: flex; align-items: center; justify-content: center; padding: 0;
@@ -3478,6 +3486,8 @@ function liveCacheSaveEntry(key, value) {
 var LIVE_RPA_KEY = "ticketSaver.rpa.v1";
 var LIVE_NEARBY_RADIUS_M = 500; /* nearby-streets lookup (Nov 18): where-to-move suggests the closest streets around the fix, from city data -- proximity filters the candidates, the listing logic ranks them */
 var LIVE_NEARBY_MAX_STREETS = 8; /* landed cap (Nov 18 cap raise): the sweep suggests at most 8 nearby streets -- it keeps trying candidates in distance order until 8 have landed; each landed street costs a Photon + Geobase + signs round trip and a row in the list; 8 streets is 16 curbs, the ones you would actually walk or drive to */
+var LIVE_PREFETCH_MAX_STREETS = 12; /* landed cap for the AREA prefetch only (Nov 19 area paint): the visible area on a wide screen holds more streets than the where-to-move list needs -- 12 landed covers a neighbourhood block (ParkUsher's Ducharme view paints ~9) while the 20-entry live.v5 LRU still bounds the total cache; the GPS sweep keeps its own 8 */
+var LIVE_PREFETCH_MAX_TRIES = 20; /* try-cap for the AREA prefetch only (Nov 19 area paint): a candidate that yields nothing consumes a try, never a slot, exactly as in the sweep */
 var LIVE_NEARBY_MAX_TRIES = 15; /* try-cap (Nov 18 cap raise): the sweep never attempts a 16th lookup -- a candidate that yields nothing (no house, no centreline, no signs, a fetch failure) consumes a try, never a suggestion slot, so a neighbourhood where every street yields nothing stays bounded */
 var LIVE_NEARBY_CACHE_PREFIX = "ticketSaver.nearby.v1."; /* separate cache from the current-street lookup: a nearby result carries no paid data (the where-to-move rows never read it), so it must never be mistaken for a complete current-street entry */
 var LIVE_NEARBY_ENABLED = true; /* the live-repro suite disables the auto-sweep -- its Overpass fixture answers every area query with the des-pins ways, which would be wrong-fix candidates */
@@ -5002,9 +5012,16 @@ function liveApplyResult(result, dataAsOf) {
 function liveNearbyFixKey(lat, lon) {
   return lat.toFixed(3) + "," + lon.toFixed(3); /* ~111 m — the candidate set is stable within a block; re-sweeping on every 11 m move would churn the list */
 }
-function liveNearbyAreaQuery(lat, lon) {
+function liveNearbyAreaQuery(lat, lon, radiusM) {
+  /* radiusM (Nov 19 area paint): the area prefetch passes the visible
+     area's half-diagonal so the query covers the whole screen; callers
+     that pass nothing get the nearby radius (500 m), exactly as before.
+     Clamped to 100..2000 m -- the fetch must cover the screen, never a
+     whole city. */
+  var r = (typeof radiusM === "number" && isFinite(radiusM)) ? Math.round(radiusM) : LIVE_NEARBY_RADIUS_M;
+  r = Math.max(100, Math.min(2000, r));
   var q = '[out:json][timeout:60];way[highway~"^(' + LIVE_CARRIAGEWAY.join("|") +
-    ')$"][name](around:' + LIVE_NEARBY_RADIUS_M + ',' +
+    ')$"][name](around:' + r + ',' +
     lat.toFixed(6) + ',' + lon.toFixed(6) + ');out geom;';
   var opts = { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: "data=" + encodeURIComponent(q) };
@@ -5044,7 +5061,12 @@ function liveNearbyClosestPoint(fixLat, fixLon, geometry) {
    what it tries (landed 5, tries 10); this list is only proximity
    filtering, so a farther street with data is reachable once a nearer
    one yields nothing. */
-function liveNearbyCandidates(ways, currentName, fixLat, fixLon) {
+function liveNearbyCandidates(ways, currentName, fixLat, fixLon, radiusM) {
+  /* radiusM (Nov 19 area paint): the area prefetch passes the visible
+     area's half-diagonal so streets at the screen's corners are
+     candidates; callers that pass nothing get the nearby radius (500 m),
+     exactly as before. */
+  var radius = (typeof radiusM === "number" && isFinite(radiusM) && radiusM > 0) ? radiusM : LIVE_NEARBY_RADIUS_M;
   var byName = {}, order = [];
   (ways || []).forEach(function (w) {
     var t = w.tags || {};
@@ -5073,7 +5095,7 @@ function liveNearbyCandidates(ways, currentName, fixLat, fixLon) {
       if (p && (!best || p.distM < best.distM)) best = p;
     });
     if (!best) return;
-    if (best.distM > LIVE_NEARBY_RADIUS_M) return; /* proximity filters the candidates */
+    if (best.distM > radius) return; /* proximity filters the candidates */
     out.push({ name: c.name, slug: liveSlug(c.name), distM: Math.round(best.distM * 10) / 10,
       anchorLat: best.lat, anchorLon: best.lon });
   });
@@ -5203,16 +5225,20 @@ function liveNearbySweep(fixLat, fixLon, currentStreetName, city) {
 }
 /* The candidate loop shared by the nearby sweep and the background
    prefetch (livePrefetchAround): candidates in distance order, one
-   liveNearbyLookupOne each, until LIVE_NEARBY_MAX_STREETS have LANDED or
-   LIVE_NEARBY_MAX_TRIES have been TRIED. stillValid() abandons the loop
+   liveNearbyLookupOne each, until the caps have been reached -- the sweep's
+   own 8 landed / 15 tried, or the area prefetch's wider 12 / 20 when
+   opts carries them (Nov 19 area paint). stillValid() abandons the loop
    when the user moved on; onLand(r) is called for each landed result
    (the sweep records it into LIVE_NEARBY and renders; the prefetch
    passes null - the live.v5 save already happened inside
    liveNearbyLookupOne). Returns { landed, tried }. Never throws. */
 async function liveNearbySweepLoop(fixLat, fixLon, currentStreetName, areaWays, dataAsOf, opts, stillValid, onLand) {
-  var cands = liveNearbyCandidates(areaWays, currentStreetName, fixLat, fixLon);
+  var radiusM = (opts && typeof opts.radiusM === "number") ? opts.radiusM : LIVE_NEARBY_RADIUS_M;
+  var maxStreets = (opts && typeof opts.maxStreets === "number") ? opts.maxStreets : LIVE_NEARBY_MAX_STREETS;
+  var maxTries = (opts && typeof opts.maxTries === "number") ? opts.maxTries : LIVE_NEARBY_MAX_TRIES;
+  var cands = liveNearbyCandidates(areaWays, currentStreetName, fixLat, fixLon, radiusM);
   var landed = 0, tried = 0;
-  for (var i = 0; i < cands.length && landed < LIVE_NEARBY_MAX_STREETS && tried < LIVE_NEARBY_MAX_TRIES; i++) {
+  for (var i = 0; i < cands.length && landed < maxStreets && tried < maxTries; i++) {
     if (typeof stillValid === "function" && !stillValid()) return { landed: landed, tried: tried };
     tried++;
     var r = await liveNearbyLookupOne(fixLat, fixLon, cands[i], areaWays, dataAsOf, null, opts);
@@ -5279,25 +5305,31 @@ async function liveNearbySweepInner(fixLat, fixLon, currentStreetName, key, gen,
    data needed no network, and its neighbours are prefetched by the GPS
    sweep when the user actually arrives there. */
 var LIVE_PREFETCH = { status: "idle", fixKey: null, promise: null };
-function livePrefetchAround(lat, lon, streetName, city) {
+function livePrefetchAround(lat, lon, streetName, city, radiusM) {
   /* city: see liveNearbySweep - the destination fix's municipality, so the
-     prefetched paid verdict matches an on-demand lookup there. */
+     prefetched paid verdict matches an on-demand lookup there.
+     radiusM (Nov 19 area paint): the visible area's half-diagonal, so
+     the fetch covers the whole screen; callers that pass nothing get
+     the nearby radius (500 m), exactly as before. The dedup key carries
+     the radius bucket, so zooming to a wider view re-fetches instead of
+     short-circuiting on the narrower run. */
   if (typeof fetch === "undefined") return Promise.resolve(null);
   if (lat === null || lat === undefined || lon === null || lon === undefined) return Promise.resolve(null);
-  var key = liveNearbyFixKey(lat, lon) + "|" + liveSlug(streetName || "");
+  var radius = (typeof radiusM === "number" && isFinite(radiusM) && radiusM > 0) ? Math.round(radiusM) : LIVE_NEARBY_RADIUS_M;
+  var key = liveNearbyFixKey(lat, lon) + "|" + liveSlug(streetName || "") + "|r" + Math.round(radius / 100);
   if (LIVE_PREFETCH.promise && LIVE_PREFETCH.fixKey === key && LIVE_PREFETCH.status !== "idle") return LIVE_PREFETCH.promise;
   if (LIVE_PREFETCH.fixKey === key && LIVE_PREFETCH.status === "ready") return Promise.resolve(null);
   var gen = (typeof DEST_GEN !== "undefined") ? DEST_GEN : 0;
   LIVE_PREFETCH = { status: "loading", fixKey: key, promise: null };
-  var p = livePrefetchAroundInner(lat, lon, streetName, key, gen, city || null);
+  var p = livePrefetchAroundInner(lat, lon, streetName, key, gen, city || null, radius);
   LIVE_PREFETCH.promise = p;
   p.then(function () { if (LIVE_PREFETCH.promise === p) LIVE_PREFETCH.promise = null; },
     function () { if (LIVE_PREFETCH.promise === p) LIVE_PREFETCH.promise = null; });
   return p;
 }
-async function livePrefetchAroundInner(lat, lon, streetName, key, gen, city) {
+async function livePrefetchAroundInner(lat, lon, streetName, key, gen, city, radiusM) {
   try {
-    var area = await liveNearbyAreaQuery(lat, lon);
+    var area = await liveNearbyAreaQuery(lat, lon, radiusM);
     if (gen !== DEST_GEN || LIVE_PREFETCH.fixKey !== key) return null;
     var dataAsOf = null;
     try {
@@ -5311,7 +5343,8 @@ async function livePrefetchAroundInner(lat, lon, streetName, key, gen, city) {
     } catch (e) { paidAsOf = null; }
     if (gen !== DEST_GEN || LIVE_PREFETCH.fixKey !== key) return null;
     var loop = await liveNearbySweepLoop(lat, lon, streetName, area.ways, dataAsOf,
-      { paidAsOf: paidAsOf, prefetchLive: true, city: city || null },
+      { paidAsOf: paidAsOf, prefetchLive: true, city: city || null, radiusM: radiusM,
+        maxStreets: LIVE_PREFETCH_MAX_STREETS, maxTries: LIVE_PREFETCH_MAX_TRIES },
       function () { return gen === DEST_GEN && LIVE_PREFETCH.fixKey === key; },
       null);
     if (gen !== DEST_GEN || LIVE_PREFETCH.fixKey !== key) return null;
@@ -6718,7 +6751,7 @@ function osmZoomBy(d, cx, cy) {
    Colour around the centre (Nov 19): the sweep streets no longer draw
    from this section -- they draw from the area layer in mapSvgHtml
    (osmAreaEntries), which covers every street with fetched data in the
-   250 m area around the screen centre, tappably. osmNearbySigns /
+   visible area around the screen centre, tappably. osmNearbySigns /
    osmNearbyStreetPts / osmNearbyColor below are the shared geometry + colour
    helpers both layers use. */
 function osmNearbySigns(result) {
@@ -6779,12 +6812,32 @@ function osmNearbyColor(sides, key, nowMs) {
 /* ---- colour around the centre (Nov 19, his call: "it is colouring around
    the center of screen ... what matter is to show around, not only the
    street itself") ----
-   The map colours the verdict curbs of EVERY street with fetched data
-   inside the 250 m area around the SCREEN CENTRE -- not just the current
-   street, and not just the where-to-move sweep's streets. The area follows
-   the centre as the user pans: the derivation below re-runs from the
+   The map colours the verdict curbs of EVERY street with fetched data in
+   the VISIBLE AREA around the SCREEN CENTRE -- not just the current
+   street, and not just the where-to-move sweep's streets. The painted
+   window is the viewport itself (centre + surroundings), derived from
+   the screen on every render: a street paints when its verdict segment
+   touches the visible rectangle, plus a 50 m halo (LIVE_AREA_PAINT_MARGIN_M)
+   -- the "surroundings" of the centre in his words -- so a street just
+   at the frame edge does not pop in and out on a 1 px pan. A circle
+   would over-paint past the short edges (on a wide screen the corners
+   are far farther than the top/bottom edges), so the paint test is the
+   rectangle, not a radius: the old fixed 250 m circle is gone (Nov 19
+   area paint -- the refinement his PC screenshot asked for: only the
+   Ducharme segment was coloured while Wiseman, Stuart, McEachran and
+   the other streets in view were not). The window MOVES with the
+   centre as the user pans: the derivation below re-runs from the
    centre on every render, and the fetch for streets not yet in the cache
    runs debounced after the pan ends (osmAreaRefresh / osmAreaScheduleRefresh).
+   Old areas drop out by derivation -- a street whose segment no longer
+   touches the visible window is excluded on the next derivation; nothing
+   persists the old painted set (the DATA stays in the LRU cache, the
+   DRAWN set is re-derived from the new centre).
+   The paint is tied to a zoomed-in view (LIVE_AREA_MIN_ZOOM = 17, the
+   default street level): below it the area layer paints nothing and the
+   map shows a "Too zoomed out -- zoom in" prompt instead (ParkUsher-
+   style). The current street's own curbs are NOT gated -- they always
+   draw, at any zoom; only the area layer is.
    Data source: the background cache ONLY -- the live.v5 entries (index
    ticketSaver.live.v5.index, same LRU/TTL as the on-demand lookup) plus
    the in-memory sweep streets (liveNearbyMapEntries), which are the same
@@ -6796,7 +6849,9 @@ function osmNearbyColor(sides, key, nowMs) {
    even/odd keys); baked streets other than the current one are never area
    candidates (the sweep never prefetches them, and the area layer reads
    only the live cache + the sweep). */
-var LIVE_AREA_RADIUS_M = 250; /* the coloured area around the screen centre */
+var LIVE_AREA_MIN_ZOOM = 17; /* the area paint is a zoomed-in view: street level (the default) or closer */
+var LIVE_AREA_PAINT_MARGIN_M = 50; /* the halo around the visible rectangle: a street just off-screen still paints */
+var LIVE_AREA_FETCH_MAX_M = 1000; /* the area fetch never covers more than a neighbourhood block */
 var LIVE_AREA_GRID_M = 25; /* the derivation memo is keyed by ~25 m centre cell */
 var LIVE_AREA_PREFETCH_MIN_MOVE_M = 50; /* a nudge under 50 m never re-fetches */
 var LIVE_AREA_PREFETCH_DEBOUNCE_MS = 400; /* ms after the last centre change */
@@ -6804,6 +6859,78 @@ var _areaMemo = null; /* { key, entries } -- entries carry their clipped pts */
 var _areaPrefetchAt = null; /* { lat, lon } the last area prefetch ran for */
 var _areaPrefetchPromise = null; /* the in-flight area prefetch, if any */
 var _areaTimer = null; /* the pending debounced refresh, if any */
+/* Metres per container pixel at a view (Web Mercator, tile size 256) --
+   the same projection osmLatLngToWorld uses, so the paint window and the
+   tiles agree. At Montreal's latitude and zoom 17 this is ~0.84 m/px. */
+function osmMetresPerPx(lat, zoom) {
+  return 156543.03392 * Math.cos(lat * Math.PI / 180) / Math.pow(2, zoom);
+}
+/* Half the diagonal of the visible viewport, in metres: the radius the
+   area FETCH must cover so the Overpass query returns every street that
+   could touch the visible rectangle (corners included). */
+function osmVisibleHalfDiagM(view, size) {
+  if (!view || !size) { view = osmView(); size = osmMapSize(); }
+  var mPerPx = osmMetresPerPx(view.lat, view.zoom);
+  return Math.sqrt(Math.pow(size.w / 2, 2) + Math.pow(size.h / 2, 2)) * mPerPx;
+}
+/* The radius the area prefetch passes to livePrefetchAround: the visible
+   half-diagonal, never narrower than the nearby radius (500 m -- a small
+   phone screen's half-diagonal is ~230 m, and the fetch must not shrink
+   below what the sweep already covers) and never wider than a
+   neighbourhood block (1000 m). On the 614x400 suite viewport this is
+   500 m (half-diagonal ~307 m); on a 1200x800 PC screen at zoom 17 it
+   is ~600 m. */
+function osmVisibleFetchRadiusM() {
+  var r = osmVisibleHalfDiagM(osmView(), osmMapSize());
+  var floor = (typeof LIVE_NEARBY_RADIUS_M === "number") ? LIVE_NEARBY_RADIUS_M : 500;
+  if (!(r > 0) || !isFinite(r)) return floor;
+  return Math.max(floor, Math.min(LIVE_AREA_FETCH_MAX_M, r));
+}
+/* The zoom gate: the area layer paints only at street level or closer. */
+function osmAreaZoomOk() { return osmView().zoom >= LIVE_AREA_MIN_ZOOM; }
+/* Segment-vs-rectangle, in screen offsets from the view centre: true when
+   any part of the segment (local-metre points, centre c = [cx, cy]) lies
+   inside the visible rectangle expanded by the 50 m halo, or crosses
+   one of its edges. Pure -- the suites drive it without a browser.
+   The screen offset of a local-metre point un-rotates by the bearing
+   (the inverse of osmPanBy's un-rotation, verified by substitution):
+   the map is north-up at bearing 0 and the test is exact there; a
+   rotated view rotates the rectangle with it, so the painted window
+   follows the turned map. */
+function osmSegHitsRect(x1, y1, x2, y2, cx, cy, view, size) {
+  var mPerPx = osmMetresPerPx(view.lat, view.zoom);
+  var b = osmNormBearing(view.bearing || 0) * Math.PI / 180;
+  var cosb = Math.cos(b), sinb = Math.sin(b);
+  var mg = LIVE_AREA_PAINT_MARGIN_M / mPerPx; /* the halo, in pixels */
+  var rx = size.w / 2 + mg, ry = size.h / 2 + mg;
+  function toScreen(x, y) {
+    var wx = (x - cx) / mPerPx, wy = -(y - cy) / mPerPx;
+    return [cosb * wx - sinb * wy, sinb * wx + cosb * wy];
+  }
+  var p = toScreen(x1, y1), q = toScreen(x2, y2);
+  function inside(pt) { return Math.abs(pt[0]) <= rx && Math.abs(pt[1]) <= ry; }
+  if (inside(p) || inside(q)) return true;
+  function orient(a, b2, c2) { return (b2[0] - a[0]) * (c2[1] - a[1]) - (b2[1] - a[1]) * (c2[0] - a[0]); }
+  var corners = [[-rx, -ry], [rx, -ry], [rx, ry], [-rx, ry]];
+  for (var i = 0; i < 4; i++) {
+    var a = corners[i], b2 = corners[(i + 1) % 4];
+    var d1 = orient(a, b2, p), d2 = orient(a, b2, q), d3 = orient(p, q, a), d4 = orient(p, q, b2);
+    if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))) return true;
+  }
+  return false;
+}
+/* Does this clipped centreline (local-metre points) touch the visible
+   window? The paint test: any segment of the polyline hits the visible
+   rectangle (plus halo). A non-finite point never paints. */
+function osmAreaPaintsPts(pts, c, view, size) {
+  if (!pts || pts.length < 2 || !c) return false;
+  for (var i = 0; i < pts.length - 1; i++) {
+    var a = pts[i], b = pts[i + 1];
+    if (!a || !b || !isFinite(a.x) || !isFinite(a.y) || !isFinite(b.x) || !isFinite(b.y)) continue;
+    if (osmSegHitsRect(a.x, a.y, b.x, b.y, c[0], c[1], view, size)) return true;
+  }
+  return false;
+}
 /* Min distance (m) from a point to a polyline in local metres. */
 function osmAreaDistToPts(pts, cx, cy) {
   var best = null;
@@ -6818,20 +6945,26 @@ function osmAreaDistToPts(pts, cx, cy) {
   }
   return best;
 }
-/* The area streets for the CURRENT screen centre: every street with fetched
-   data whose verdict segment comes within LIVE_AREA_RADIUS_M of the centre.
-   Pure derivation (no fetch) -- the memo is keyed by the centre cell + the
-   live.v5 index + the sweep state, so a landed prefetch, a re-fetch, or a
-   pan into a new cell re-derives, and a render at the same centre re-uses
-   the list. Each entry is { slug, name, distM, result, pts } -- pts are the
-   segment-clipped centreline points in the home-street local-metre frame,
-   exactly what the draw code offsets into curbs, so the distance test and
-   the drawn curb agree: a street is in the area exactly when its drawn
-   curb is. */
+/* The area streets for the CURRENT screen: every street with fetched
+   data whose verdict segment touches the VISIBLE AREA -- the viewport
+   rectangle around the screen centre, plus the 50 m halo
+   (osmAreaPaintsPts) -- at a zoomed-in view (osmAreaZoomOk). Below the
+   zoom threshold the area is empty by derivation (the map shows the
+   "Too zoomed out" prompt instead). Pure derivation (no fetch) -- the
+   memo is keyed by the centre cell + zoom + size + bearing + the live.v5
+   index + the sweep state, so a landed prefetch, a re-fetch, a pan into
+   a new cell, a zoom or a resize re-derives, and a render at the same
+   view re-uses the list. Each entry is { slug, name, distM, result, pts }
+   -- pts are the segment-clipped centreline points in the home-street
+   local-metre frame, exactly what the draw code offsets into curbs, so
+   the paint test and the drawn curb agree: a street is in the area
+   exactly when its drawn curb is. distM is still the centre distance,
+   kept for the nearest-first sort. */
 function osmAreaEntries() {
   var view = osmView();
   var ref = osmRefLatLon();
   var refLat = ref.lat, refLon = ref.lon;
+  var size = osmMapSize();
   var curName = null;
   try {
     var g0 = mapGeometry();
@@ -6845,8 +6978,9 @@ function osmAreaEntries() {
   } catch (e) { nbState = ""; }
   var cellLat = Math.round(view.lat / (LIVE_AREA_GRID_M / 110540));
   var cellLon = Math.round(view.lon / (LIVE_AREA_GRID_M / (111320 * Math.cos(view.lat * Math.PI / 180))));
-  var key = cellLat + "," + cellLon + "|" + idx + "|" + nbState;
+  var key = cellLat + "," + cellLon + "|z" + view.zoom + ":" + size.w + "x" + size.h + ":b" + Math.round(osmNormBearing(view.bearing || 0)) + "|" + idx + "|" + nbState;
   if (_areaMemo && _areaMemo.key === key) return _areaMemo.entries;
+  if (!osmAreaZoomOk()) { _areaMemo = { key: key, entries: [] }; return []; } /* too zoomed out: no area paint, the prompt shows instead */
   var cands = {}; /* slug -> { slug, name, result }: the cache first, the in-memory sweep wins on a clash (freshest in-session) */
   var prefix = (typeof LIVE_CACHE_PREFIX === "string") ? LIVE_CACHE_PREFIX : "ticketSaver.live.v5.";
   if (idx) {
@@ -6877,8 +7011,9 @@ function osmAreaEntries() {
     var pts = null;
     try { pts = osmNearbyStreetPts(cand.result, refLat, refLon); } catch (e) { return; }
     if (!pts || pts.length < 2) return;
-    var d = osmAreaDistToPts(pts, c[0], c[1]); /* mapXY returns [x, y], not {x, y} */
-    if (d === null || !(d <= LIVE_AREA_RADIUS_M)) return; /* a non-finite distance excludes the street: NaN must never slip past the radius test (NaN > 250 is false) */
+    var d = osmAreaDistToPts(pts, c[0], c[1]); /* mapXY returns [x, y], not {x, y}; kept for the nearest-first sort below */
+    if (d === null || !isFinite(d)) return; /* a non-finite distance excludes the street: NaN must never slip into the area */
+    if (!osmAreaPaintsPts(pts, c, view, size)) return; /* the paint test: the segment must touch the visible rectangle (+ 50 m halo) */
     out.push({ slug: slug, name: cand.name, distM: Math.round(d * 10) / 10, result: cand.result, pts: pts });
   });
   out.sort(function (a, b) { return a.distM - b.distM || (a.slug < b.slug ? -1 : 1); });
@@ -6904,8 +7039,10 @@ function osmAreaSig(nowMs) {
    when there is nothing to do). Centres closer than 50 m to the last
    trigger re-use the in-flight / finished prefetch instead of fetching
    again; a finished prefetch for the same fixKey short-circuits inside
-   livePrefetchAround. The street excluded from the candidates is the
-   street the map is showing. City is null: the map centre has no
+   livePrefetchAround, with the visible area's fetch radius (never below
+   the 500 m nearby radius, never above 1000 m). The street excluded
+   from the candidates is the street the map is showing. City is null:
+   the map centre has no
    reverse-geocoded municipality, and inventing one would misstate the
    paid lookup -- without a city the paid verdict falls back to "unknown",
    honestly (the bgcache (b) note); sides, segments and verdicts do not
@@ -6913,6 +7050,7 @@ function osmAreaSig(nowMs) {
    area signature changed). Never throws. */
 function osmAreaRefresh() {
   var v = osmView();
+  if (v.zoom < LIVE_AREA_MIN_ZOOM) return Promise.resolve(null); /* too zoomed out: nothing paints, so nothing fetches -- zooming in re-triggers via the gesture-end schedule */
   var c = { lat: v.lat, lon: v.lon };
   if (_areaPrefetchAt) {
     try {
@@ -6932,7 +7070,12 @@ function osmAreaRefresh() {
   }
   var p = Promise.resolve(null);
   try {
-    if (typeof livePrefetchAround === "function") p = livePrefetchAround(c.lat, c.lon, name, null) || Promise.resolve(null);
+    /* The fetch covers the visible area: the half-diagonal of the
+       viewport (never below the 500 m nearby radius, never above a
+       1000 m neighbourhood block), through the identical shared pipeline
+       -- same area query, candidates, parser + guards, caps, and live.v5
+       save as the GPS sweep and the destination prefetch. */
+    if (typeof livePrefetchAround === "function") p = livePrefetchAround(c.lat, c.lon, name, null, osmVisibleFetchRadiusM()) || Promise.resolve(null);
   } catch (e) { p = Promise.resolve(null); }
   _areaPrefetchPromise = p;
   return p.then(function (r) {
@@ -6953,6 +7096,7 @@ function osmAreaRefresh() {
 function osmAreaScheduleRefresh() {
   try {
     if (typeof setTimeout !== "function") return;
+    if (osmView().zoom < LIVE_AREA_MIN_ZOOM) return; /* too zoomed out: nothing paints, so nothing is scheduled -- the zoom-in gesture itself schedules again at the new zoom */
     /* Only schedule when the centre moved >= 50 m from the last area fetch
        (or, before any fetch, from the default view -- the home area is the
        GPS sweep's / destination prefetch's job, not this timer's). A no-op
@@ -7019,15 +7163,16 @@ function mapSvgHtml(nowMs, geom, colors) {
   s += '<svg class="osmsvg" width="' + fsize.w + '" height="' + fsize.h + '" viewBox="0 0 ' + fsize.w + ' ' + fsize.h + '" role="img" aria-label="Map of '
     + esc(geom.streetName || "this street") + ' with parking rules by side">';
   /* Area streets first (under the current street): every street with
-     fetched data in the 250 m area around the screen centre, in its
+     fetched data in the VISIBLE AREA around the screen centre, in its
      verdict colours -- the same data, same verdicts as where-to-move,
      but centred on the view, not on the home street. This REPLACES the
      old nearby-sweep block (baseline section 4.3): sweep streets inside
-     the area now draw here, TAPPABLE (the 18 px hit path, same as the
-     current street's curbs); a sweep street outside the 250 m area
+     the visible area now draw here, TAPPABLE (the 18 px hit path, same as the
+     current street's curbs); a sweep street outside the visible area
      does not draw at all -- its where-to-move row is unchanged. A
      street with no fetched data is not in the list and draws nothing:
-     never grey, never a guess. */
+     never grey, never a guess. Below the zoom threshold the area is
+     empty by derivation (the prompt below shows instead). */
   var area = (typeof osmAreaEntries === "function") ? osmAreaEntries() : [];
   area.forEach(function (a) {
     var signs = osmNearbySigns(a.result);
@@ -7093,7 +7238,14 @@ function mapSvgHtml(nowMs, geom, colors) {
      bottom, North / Info / GPS-centre top-to-bottom — Nov 18 map cleanup).
      All inline SVG, no raster images; the North arrow is a plain triangle
      with an N, never the watermarked stock image. */
-  s += '<div class="osmhint" aria-hidden="true">Tap a color line for details</div>';
+  /* Zoomed out: the hint pill is replaced by the "Too zoomed out" prompt
+     (ParkUsher-style) -- the area paint is tied to a zoomed-in view, so
+     a zoomed-out view says so instead of painting a misleadingly small
+     patch. The current street's own curbs still draw; only the area
+     layer is gated. */
+  s += osmAreaZoomOk()
+    ? '<div class="osmhint" aria-hidden="true">Tap a color line for details</div>'
+    : '<div class="osmzoomhint" aria-hidden="true">Too zoomed out \u2014 zoom in to see parking rules</div>';
   s += '<div class="osmcontrols">'
     + '<button class="osmctl" data-map-north type="button" aria-label="North up — centre on home"><svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true"><text x="12" y="8.5" text-anchor="middle" font-size="9" font-weight="bold" fill="currentColor">N</text><path d="M12 11 L17.5 20 L12 17.5 L6.5 20 Z" fill="currentColor"/></svg></button>'
     + '<button class="osmctl" data-map-info type="button" aria-label="Map info"><svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/><text x="12" y="16.5" text-anchor="middle" font-size="13" font-weight="bold" fill="currentColor">i</text></svg></button>'
@@ -7239,9 +7391,10 @@ function renderMap(nowMs) {
   if (sig === _mapSig) return;
   _mapSig = sig;
   body.innerHTML = mapBodyHtml(nowMs, geom, colors);
-  /* An area curb that fell out of the 250 m area (the user panned away)
-     leaves no sheet behind: a selected area key that is no longer drawn
-     is cleared and its sheet closed, instead of showing a blank sheet. */
+  /* An area curb that fell out of the visible area (the user panned away
+     or zoomed out) leaves no sheet behind: a selected area key that is
+     no longer drawn is cleared and its sheet closed, instead of showing
+     a blank sheet. */
   if (_mapSelected && _mapSelected.indexOf("area:") === 0
       && mapSelectableKeys().indexOf(_mapSelected) < 0) {
     _mapSelected = null;
@@ -8224,6 +8377,8 @@ if (typeof window !== "undefined") {
     liveNearbyAreaQuery: liveNearbyAreaQuery, liveNearbyLookupOne: liveNearbyLookupOne,
     liveNearbySweepLoop: liveNearbySweepLoop,
     livePrefetchAround: livePrefetchAround,
+    LIVE_PREFETCH_MAX_STREETS: LIVE_PREFETCH_MAX_STREETS,
+    LIVE_PREFETCH_MAX_TRIES: LIVE_PREFETCH_MAX_TRIES,
     livePrefetchGetState: function () { return LIVE_PREFETCH; },
     livePrefetchSetState: function (s) { LIVE_PREFETCH = s; },
     liveNearbySetEnabled: function (b) { LIVE_NEARBY_ENABLED = !!b; },
@@ -8297,7 +8452,11 @@ if (typeof window !== "undefined") {
     osmAreaEntries: osmAreaEntries, osmAreaEntry: osmAreaEntry, osmAreaSig: osmAreaSig,
     osmAreaDistToPts: osmAreaDistToPts, osmAreaRefresh: osmAreaRefresh,
     osmAreaScheduleRefresh: osmAreaScheduleRefresh,
-    LIVE_AREA_RADIUS_M: LIVE_AREA_RADIUS_M, LIVE_AREA_GRID_M: LIVE_AREA_GRID_M,
+    osmMetresPerPx: osmMetresPerPx, osmVisibleHalfDiagM: osmVisibleHalfDiagM,
+    osmVisibleFetchRadiusM: osmVisibleFetchRadiusM, osmAreaZoomOk: osmAreaZoomOk,
+    osmSegHitsRect: osmSegHitsRect, osmAreaPaintsPts: osmAreaPaintsPts,
+    LIVE_AREA_MIN_ZOOM: LIVE_AREA_MIN_ZOOM, LIVE_AREA_PAINT_MARGIN_M: LIVE_AREA_PAINT_MARGIN_M,
+    LIVE_AREA_FETCH_MAX_M: LIVE_AREA_FETCH_MAX_M, LIVE_AREA_GRID_M: LIVE_AREA_GRID_M,
     LIVE_AREA_PREFETCH_MIN_MOVE_M: LIVE_AREA_PREFETCH_MIN_MOVE_M,
     LIVE_AREA_PREFETCH_DEBOUNCE_MS: LIVE_AREA_PREFETCH_DEBOUNCE_MS,
     osmEventInMap: osmEventInMap,
