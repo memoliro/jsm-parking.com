@@ -1208,6 +1208,17 @@ function limitForSideKey(key) {
   if (!lims) return null;
   return lims[key] || null;
 }
+/* Nov 18: does ANY side of the current street carry a posted limit? The
+   "Parking limit timer" section appears only when one does (the limit
+   street: both sides; the no-limit streets / live streets: none — no
+   timer section at all). Live mode has no limits by construction
+   (limitForSideKey returns null there), so it answers false there too. */
+function streetHasLimit() {
+  if (liveMode()) return false;
+  var lims = (typeof DATA !== "undefined" && DATA) ? DATA.limits : null;
+  if (!lims) return false;
+  return Object.keys(lims).some(function (k) { return !!lims[k]; });
+}
 /* ---- resident-permit memory (Phase 3): the vignette the user holds ----
    The sign's permit exception is street data (DATA.limits.<side>.exception
    = "SECTEUR N", same string code as a window exception); the permit the
@@ -1959,18 +1970,29 @@ function setLimitOpen(open) {
 }
 
 function renderLimit() {
+  /* Nov 18 gating: the section itself appears only on a street with a
+     posted limit (streetHasLimit); on a no-limit street the card stays
+     hidden and nothing below it can be tapped. */
+  var card = el("limitCard");
+  if (card) card.classList.toggle("hidden", !streetHasLimit());
   var t = getLimitTimer();
   var limRaw = limitForSide();
   var limEx = !!(limRaw && limitExempted(limRaw));
   if (limEx && t) { clearLimitTimer(); t = null; } /* a timer for a limit that no longer applies must not keep counting */
   var lim = limEx ? null : limRaw;
+  /* ACTIVE only while parked on the side that carries the limit: a timer
+     saved on the limit side keeps running through a side switch (never
+     restarted — the stored timer is untouched here), but the row goes idle
+     until the car is back on a limit side, so no countdown is shown for a
+     side the limit does not bind. */
+  var tShown = (t && limRaw) ? t : null;
   var tiles = document.querySelectorAll("#limitTiles .limittile");
   for (var i = 0; i < tiles.length; i++) {
-    tiles[i].classList.toggle("selected", !!t && +tiles[i].getAttribute("data-limit") === t.limitMin);
+    tiles[i].classList.toggle("selected", !!tShown && +tiles[i].getAttribute("data-limit") === tShown.limitMin);
   }
   el("limitToggleText").textContent = limEx
     ? "No limit — sector " + sectorOfException(limRaw.exception) + " permit"
-    : limitRowLabel(t, Date.now(), lim);
+    : limitRowLabel(tShown, Date.now(), lim);
   var an = el("limitAnchorNote");
   if (an) an.textContent = lim
     ? "If you tap before the posted hours start, the countdown starts when they start — the limit runs from the sign's hours, not from your tap."
@@ -1984,10 +2006,10 @@ function renderLimit() {
   var tilesWrap = el("limitTiles");
   if (tilesWrap) tilesWrap.classList.toggle("hidden", limEx);
   var running = el("limitRunning");
-  if (!t) { running.classList.add("hidden"); return; }
+  if (!tShown) { running.classList.add("hidden"); return; }
   running.classList.remove("hidden");
-  var dl = lim ? limitDeadlineMs(lim, t.parkedAt) : null;
-  var st = limitState(t.parkedAt, t.limitMin, Date.now(), dl);
+  var dl = lim ? limitDeadlineMs(lim, tShown.parkedAt) : null;
+  var st = limitState(tShown.parkedAt, tShown.limitMin, Date.now(), dl);
   el("limitDetail").textContent = "Ends " + fmtTimeToronto(st.end) + ".";
   var warn = el("limitWarn");
   if (st.state === "expired") {
@@ -1995,7 +2017,7 @@ function renderLimit() {
     warn.classList.remove("hidden");
     warn.textContent = "Limit reached — move the car.";
   } else if (st.state === "waiting") {
-    el("limitCount").textContent = "Starts " + fmtTimeToronto(new Date(t.parkedAt));
+    el("limitCount").textContent = "Starts " + fmtTimeToronto(new Date(tShown.parkedAt));
     warn.classList.add("hidden");
   } else {
     /* No pre-warning: the countdown already shows single-digit minutes. */
@@ -2928,11 +2950,16 @@ var LIVE_MONTHS = { JANVIER: 1, FEVRIER: 2, "FÉVRIER": 2, MARS: 3, AVRIL: 4, MA
   DECEMBRE: 12, "DÉCEMBRE": 12, JANV: 1, FEVR: 2, AVR: 4, JUIL: 7, SEPT: 9, OCT: 10, NOV: 11, DEC: 12 };
 var LIVE_WEEKDAY_FR = { 1: "LUNDI", 2: "MARDI", 3: "MERCREDI", 4: "JEUDI", 5: "VENDREDI", 6: "SAMEDI", 7: "DIMANCHE" };
 var LIVE_HOUR = "([01]?\\d|2[0-3])H([0-5]\\d)?";
-var LIVE_SEASON = "(\\d{1,2}) ([A-ZÉÛ]+) AU (\\d{1,2}) ([A-ZÉÛ]+)";
-var LIVE_STRICT_RE = new RegExp("^\\\\P " + LIVE_HOUR + "-" + LIVE_HOUR +
+/* Season (Nov 18, Outremont dialect — ported from build_data.py, keep in
+   sync): the borough writes "1ER AVRIL - 30 NOV" (ordinal 1ER, dash
+   separator) where the old grammar only accepted "1 AVRIL AU 30 NOVEMBRE".
+   The (?:ER)? / (?:AU|-) groups are non-capturing so the season stays
+   groups 6-9 and liveParseWindowParts' m[6..9] indices don't move. */
+var LIVE_SEASON = "(\\d{1,2})(?:ER)? ([A-ZÉÛ]+) (?:AU|-) (\\d{1,2})(?:ER)? ([A-ZÉÛ]+)";
+var LIVE_STRICT_RE = new RegExp("^\\\\P " + LIVE_HOUR + " ?- ?" + LIVE_HOUR +
   " ((?:LUNDI|MARDI|MERCREDI|JEUDI|VENDREDI|SAMEDI|DIMANCHE)" +
   "(?: (?:LUNDI|MARDI|MERCREDI|JEUDI|VENDREDI|SAMEDI|DIMANCHE))*) " + LIVE_SEASON + "$");
-var LIVE_CANON_RE = new RegExp("^\\\\P " + LIVE_HOUR + "-" + LIVE_HOUR +
+var LIVE_CANON_RE = new RegExp("^\\\\P " + LIVE_HOUR + " ?- ?" + LIVE_HOUR +
   " ((?:LUNDI|MARDI|MERCREDI|JEUDI|VENDREDI|SAMEDI|DIMANCHE|LUN\\.?|MAR\\.?|MER\\.?|JEU\\.?|VEN\\.?|SAM\\.?|DIM\\.?)" +
   "(?: (?:LUNDI|MARDI|MERCREDI|JEUDI|VENDREDI|SAMEDI|DIMANCHE|LUN\\.?|MAR\\.?|MER\\.?|JEU\\.?|VEN\\.?|SAM\\.?|DIM\\.?))*) " +
   LIVE_SEASON + "\\.?$");
@@ -5615,7 +5642,7 @@ function osmStreetKey() {
 }
 function osmDefaultView() {
   var h = osmHomeLatLon();
-  return { lat: h.lat, lon: h.lon, zoom: OSM_ZOOM_DEFAULT };
+  return { lat: h.lat, lon: h.lon, zoom: OSM_ZOOM_DEFAULT, bearing: 0 };
 }
 /* The current view; a street change (or a live lookup landing on a new
    street) re-centres on the new position at the default zoom. */
@@ -5624,12 +5651,15 @@ function osmView() {
   if (!_osmView || _osmStreetKey !== k) { _osmView = osmDefaultView(); _osmStreetKey = k; }
   return _osmView;
 }
-function osmSetView(lat, lon, zoom) {
+function osmSetView(lat, lon, zoom, bearing) {
   if (typeof lat !== "number" || typeof lon !== "number") return osmView();
   zoom = (typeof zoom === "number") ? Math.max(OSM_ZOOM_MIN, Math.min(OSM_ZOOM_MAX, Math.round(zoom))) : osmView().zoom;
   lat = Math.max(-85, Math.min(85, lat));
   lon = ((lon + 180) % 360 + 360) % 360 - 180;
-  _osmView = { lat: lat, lon: lon, zoom: zoom };
+  /* The bearing survives a pan/zoom unless the caller passes one: a
+     rotated map stays rotated while it moves. */
+  _osmView = { lat: lat, lon: lon, zoom: zoom,
+    bearing: (typeof bearing === "number") ? osmNormBearing(bearing) : osmNormBearing(osmView().bearing || 0) };
   _osmStreetKey = osmStreetKey();
   renderMap();
   return _osmView;
@@ -5639,6 +5669,39 @@ function osmRecentre() {
   _osmStreetKey = osmStreetKey();
   renderMap();
   return _osmView;
+}
+/* Free map rotation (Nov 18): bearing in degrees, clockwise from
+   north-up; 0 = north-up. The bearing is visual only — pan/zoom math
+   un-rotates screen deltas by it, so gestures keep working while the map
+   is turned. North (osmRecentre, the N button) resets it to 0 along with
+   the centre and zoom, as before. */
+function osmNormBearing(b) {
+  if (typeof b !== "number" || !isFinite(b)) return 0;
+  b = b % 360;
+  if (b < 0) b += 360;
+  return b;
+}
+function osmSetBearing(deg) {
+  var v = osmView();
+  _osmView = { lat: v.lat, lon: v.lon, zoom: v.zoom, bearing: osmNormBearing(deg) };
+  _osmStreetKey = osmStreetKey();
+  renderMap();
+  return _osmView;
+}
+function osmRotateBy(dDeg) {
+  return osmSetBearing((osmView().bearing || 0) + dDeg);
+}
+/* Screen angle (degrees, y-down so positive = clockwise, matching CSS
+   rotate) of the vector (x1,y1)->(x2,y2); and a delta normalised to
+   [-180, 180] so a twist across the ±180 seam rotates the short way. */
+function osmAngleDeg(x1, y1, x2, y2) {
+  return Math.atan2(y2 - y1, x2 - x1) * 180 / Math.PI;
+}
+function osmNormDeltaDeg(d) {
+  d = d % 360;
+  if (d > 180) d -= 360;
+  if (d < -180) d += 360;
+  return d;
 }
 /* GPS-centre button (Nov 18 map cleanup): centre the map on the last GPS
    fix at once, then ask for a fresh fix — when it lands, the map follows
@@ -5677,24 +5740,35 @@ function osmPathD(list, refLat, refLon, view, size) {
   return d;
 }
 /* Pan by container pixels: dragging the map right moves the centre west,
-   so the content follows the finger / mouse. */
+   so the content follows the finger / mouse. With the map rotated, a
+   screen drag is not a world drag — un-rotate the screen delta by the
+   bearing first (bearing 0 = the old path, byte for byte). */
 function osmPanBy(dx, dy) {
   var v = osmView(), size = osmMapSize();
   var c = osmLatLngToWorld(v.lat, v.lon, v.zoom);
-  var ll = osmWorldToLatLng(c[0] - dx, c[1] - dy, v.zoom);
+  var b = osmNormBearing(v.bearing || 0) * Math.PI / 180;
+  var wx = Math.cos(b) * dx + Math.sin(b) * dy;
+  var wy = -Math.sin(b) * dx + Math.cos(b) * dy;
+  var ll = osmWorldToLatLng(c[0] - wx, c[1] - wy, v.zoom);
   return osmSetView(ll[0], ll[1], v.zoom);
 }
 /* Zoom around a container point (px, py): the place under that point
-   stays under it. */
+   stays under it. The point under the cursor is found in the rotated
+   frame — un-rotate its screen offset by the bearing first (bearing 0 =
+   the old path). */
 function osmZoomAt(px, py, zoom) {
   var v = osmView(), size = osmMapSize();
   zoom = Math.max(OSM_ZOOM_MIN, Math.min(OSM_ZOOM_MAX, zoom));
   if (zoom === v.zoom) return v;
   var c = osmLatLngToWorld(v.lat, v.lon, v.zoom);
-  var wx = c[0] + px - size.w / 2, wy = c[1] + py - size.h / 2;
+  var b = osmNormBearing(v.bearing || 0) * Math.PI / 180;
+  var ox = px - size.w / 2, oy = py - size.h / 2;
+  var rox = Math.cos(b) * ox + Math.sin(b) * oy;
+  var roy = -Math.sin(b) * ox + Math.cos(b) * oy;
+  var wx = c[0] + rox, wy = c[1] + roy;
   var ll = osmWorldToLatLng(wx, wy, v.zoom);
   var nc = osmLatLngToWorld(ll[0], ll[1], zoom);
-  var cll = osmWorldToLatLng(nc[0] - (px - size.w / 2), nc[1] - (py - size.h / 2), zoom);
+  var cll = osmWorldToLatLng(nc[0] - rox, nc[1] - roy, zoom);
   return osmSetView(cll[0], cll[1], zoom);
 }
 function osmZoomBy(d, cx, cy) {
@@ -5786,12 +5860,28 @@ function mapSvgHtml(nowMs, geom, colors) {
   }
   var ref = osmRefLatLon();
   var refLat = ref.lat, refLon = ref.lon;
-  var tiles = osmTilesForView(view.lat, view.lon, view.zoom, size.w, size.h);
-  s += '<div class="osmmap" id="osmMap">';
+  /* Free rotation (Nov 18): tiles + overlay rotate together inside one
+     wrapper; the hint pill, the three controls and the attribution stay
+     OUTSIDE it, so they stay upright. At bearing 0 there is no wrapper
+     and no oversize — the frame is exactly the old one, so north-up
+     rendering is unchanged. At a non-zero bearing the frame is the
+     container's diagonal square, centred on the same centre, so no corner
+     goes blank at any angle. */
+  var bearing = osmNormBearing(view.bearing || 0);
+  var fsize = size, rotOpen = "", rotClose = "";
+  if (bearing) {
+    var diag = Math.ceil(Math.sqrt(size.w * size.w + size.h * size.h));
+    fsize = { w: diag, h: diag };
+    rotOpen = '<div class="osmrotate" style="position:absolute;left:50%;top:50%;width:' + diag
+      + 'px;height:' + diag + 'px;transform:translate(-50%,-50%) rotate(' + bearing + 'deg)">';
+    rotClose = "</div>";
+  }
+  var tiles = osmTilesForView(view.lat, view.lon, view.zoom, fsize.w, fsize.h);
+  s += '<div class="osmmap" id="osmMap">' + rotOpen;
   tiles.forEach(function (t) {
     s += '<img class="osmtile" src="' + t.url + '" alt="" draggable="false" style="left:' + t.left.toFixed(0) + 'px;top:' + t.top.toFixed(0) + 'px">';
   });
-  s += '<svg class="osmsvg" width="' + size.w + '" height="' + size.h + '" viewBox="0 0 ' + size.w + ' ' + size.h + '" role="img" aria-label="Map of '
+  s += '<svg class="osmsvg" width="' + fsize.w + '" height="' + fsize.h + '" viewBox="0 0 ' + fsize.w + ' ' + fsize.h + '" role="img" aria-label="Map of '
     + esc(geom.streetName || "this street") + ' with parking rules by side">';
   /* Nearby streets first (under the current street), from the nearby
      sweep's own results — same data, same verdicts as where-to-move. */
@@ -5807,7 +5897,7 @@ function mapSvgHtml(nowMs, geom, colors) {
         var nn = osmNearbyNormal(pts, j);
         return { x: pt.x + nn[0] * MAP_CURB_M * signs[k], y: pt.y + nn[1] * MAP_CURB_M * signs[k] };
       });
-      s += '<path d="' + osmPathD(curb, refLat, refLon, view, size) + '" fill="none" style="stroke:'
+      s += '<path d="' + osmPathD(curb, refLat, refLon, view, fsize) + '" fill="none" style="stroke:'
         + mapColorStroke(osmNearbyColor(n.result.sides, k, nowMs))
         + '" stroke-width="4" stroke-linecap="round"/>';
     });
@@ -5815,7 +5905,7 @@ function mapSvgHtml(nowMs, geom, colors) {
   /* Current street's curbs, coloured by the verdict in effect right now. */
   Object.keys(geom.curbs).forEach(function (k) {
     var color = colors[k] || "grey";
-    var d = osmPathD(geom.curbs[k], refLat, refLon, view, size);
+    var d = osmPathD(geom.curbs[k], refLat, refLon, view, fsize);
     s += '<path d="' + d + '" fill="none" style="stroke:' + mapColorStroke(color) + '" stroke-width="4.5" stroke-linecap="round"/>';
     s += '<path class="mapcurb-hit" data-map-side="' + esc(k) + '" tabindex="0" role="button" aria-label="'
       + esc(mapCurbAriaLabel(k, nowMs)) + ' — '
@@ -5823,12 +5913,12 @@ function mapSvgHtml(nowMs, geom, colors) {
       + '" d="' + d + '" fill="none" stroke="rgba(0,0,0,0)" stroke-width="18" stroke-linecap="round"/>';
   });
   geom.dots.forEach(function (dot) {
-    var q = osmProjectLocal(dot.x, dot.y, refLat, refLon, view, size);
+    var q = osmProjectLocal(dot.x, dot.y, refLat, refLon, view, fsize);
     s += '<circle cx="' + q[0].toFixed(1) + '" cy="' + q[1].toFixed(1)
       + '" r="4.5" fill="#d97706" stroke="#fff" stroke-width="1.5"/>';
   });
   if (geom.home) {
-    var hq = osmProjectLocal(geom.home.x, geom.home.y, refLat, refLon, view, size);
+    var hq = osmProjectLocal(geom.home.x, geom.home.y, refLat, refLon, view, fsize);
     s += '<circle cx="' + hq[0].toFixed(1) + '" cy="' + hq[1].toFixed(1)
       + '" r="7" fill="var(--accent)" stroke="#fff" stroke-width="2"/>';
     if (geom.home.label) {
@@ -5836,7 +5926,7 @@ function mapSvgHtml(nowMs, geom, colors) {
         + '" font-size="11" font-weight="bold" style="fill:var(--ink)" text-anchor="middle">' + esc(geom.home.label) + '</text>';
     }
   }
-  s += '</svg>';
+  s += '</svg>' + rotClose;
   /* Hint pill (top centre) + the three controls (right side, near the
      bottom, North / Info / GPS-centre top-to-bottom — Nov 18 map cleanup).
      All inline SVG, no raster images; the North arrow is a plain triangle
@@ -5962,6 +6052,7 @@ function renderMap(nowMs) {
   var _osmV = osmView(), _osmSize = osmMapSize();
   var sig = (liveMode() ? "live:" + (LIVE.streetSlug || "") : "baked:" + currentSlug())
     + "|osm:" + _osmV.lat.toFixed(5) + "," + _osmV.lon.toFixed(5) + "," + _osmV.zoom
+    + "," + (_osmV.bearing || 0)
     + "," + _osmSize.w + "x" + _osmSize.h
     + "|" + JSON.stringify(colors) + "|" + (MAP_LAYERS.paid ? "P" : "p") + (MAP_LAYERS.cleaning ? "C" : "c")
     + "|" + paidSig + "|" + (_mapSelected || "-") + "|" + jSig + "|" + staleSig + "|"
@@ -6038,7 +6129,8 @@ function moveEntryFor(slug, name, side, key, lim, isCurrent, nowMs) {
   var e = { streetSlug: slug, streetName: name, sideKey: key, side: side,
     sideLabel: side.label || key, isCurrent: !!isCurrent, verdict: v, lim: lim,
     color: curbColorForVerdict(v), stayMs: null, binds: null,
-    cannotPark: false, notEstablished: false, limitOnly: !!(v && v.limitOnly), resumeMs: null };
+    cannotPark: false, notEstablished: false, limitOnly: !!(v && v.limitOnly), resumeMs: null,
+    banNote: (side && side.permanent_ban_note) || null };
   if (!v) {
     e.notEstablished = true;
     if (lim && typeof lim.minutes === "number") e.limitOnly = true;
@@ -6143,10 +6235,18 @@ function whereRowText(e, nowMs) {
      would be noise — the permit does not help while cleaning is running. */
   var permitNote = (e.lim && limitExempted(e.lim)) ? permitLimitStatement(e.lim).replace(/^\s+/, "") : "";
   if (e.notEstablished) {
-    return { head: head, line: "Not established — check the physical sign.",
-      note: e.limitOnly
-        ? "Posted " + limitAdjective(e.lim.minutes) + " limit — but cleaning is not established here, so no stay time can be given."
-        : "" };
+    /* Nov 18 (Ducharme): the city data can carry a no-stopping ban for a
+       side whose cleaning rule is not established — the \A EN TOUT TEMPS
+       panels are a note, never a verdict (one panel's arrow scope is
+       undecodable), but they must not stay invisible on a row that
+       otherwise says only "Not established". The ban note rides on the
+       row's note, after any limit note; the line itself is unchanged. */
+    var banNote = e.banNote || "";
+    var neNote = e.limitOnly
+      ? "Posted " + limitAdjective(e.lim.minutes) + " limit — but cleaning is not established here, so no stay time can be given."
+      : "";
+    if (banNote) neNote = neNote ? neNote + " " + banNote : banNote;
+    return { head: head, line: "Not established — check the physical sign.", note: neNote };
   }
   if (e.cannotPark) {
     if (e.verdict && e.verdict.kind === "cleaning_now") {
@@ -6741,6 +6841,12 @@ function osmMapRect() {
   }
   return { left: 0, top: 0 };
 }
+/* Screen angle (degrees, y-down so positive = clockwise) from the map
+   centre to the cursor — the mouse rotation path (Shift+drag). */
+function osmCursorAngle(e) {
+  var r = osmMapRect(), size = osmMapSize();
+  return Math.atan2(e.clientY - (r.top + size.h / 2), e.clientX - (r.left + size.w / 2)) * 180 / Math.PI;
+}
 function osmOnPointerDown(e) {
   if (!osmEventInMap(e) || typeof e.pointerId === "undefined") return;
   var body = el("mapBody");
@@ -6750,9 +6856,16 @@ function osmOnPointerDown(e) {
   if (ids.length === 2) {
     var a = _osmPointers[ids[0]], b = _osmPointers[ids[1]];
     _osmDrag = { moved: 0, pinch: { d0: Math.hypot(a.x - b.x, a.y - b.y),
-      midX: (a.x + b.x) / 2, midY: (a.y + b.y) / 2, zoom0: osmView().zoom } };
+      midX: (a.x + b.x) / 2, midY: (a.y + b.y) / 2, zoom0: osmView().zoom,
+      /* Two-finger rotate: the twist is measured from the angle the two
+         fingers start at, against the bearing at that moment — so the map
+         follows the twist absolutely, with no drift from mid-gesture moves. */
+      a0: osmAngleDeg(a.x, a.y, b.x, b.y), bearing0: osmView().bearing || 0 } };
   } else if (ids.length === 1) {
-    _osmDrag = { moved: 0, lastX: e.clientX, lastY: e.clientY, pinch: null };
+    /* Shift+drag (mouse) rotates instead of panning — the desktop path
+       for free rotation. Plain drag still pans. */
+    _osmDrag = { moved: 0, lastX: e.clientX, lastY: e.clientY, pinch: null,
+      rotate: e.shiftKey ? { lastAngle: osmCursorAngle(e) } : null };
   }
 }
 function osmOnPointerMove(e) {
@@ -6767,12 +6880,24 @@ function osmOnPointerMove(e) {
     var midX = (a.x + b.x) / 2, midY = (a.y + b.y) / 2;
     _osmDrag.moved += Math.abs(dx) + Math.abs(dy);
     var r = osmMapRect();
+    osmSetBearing(_osmDrag.pinch.bearing0 + osmNormDeltaDeg(osmAngleDeg(a.x, a.y, b.x, b.y) - _osmDrag.pinch.a0));
     var nz = _osmDrag.pinch.zoom0 + Math.log(d / _osmDrag.pinch.d0) / Math.log(2);
     osmZoomAt(midX - r.left, midY - r.top, nz);
     osmPanBy(midX - _osmDrag.pinch.midX, midY - _osmDrag.pinch.midY);
     _osmDrag.pinch.midX = midX; _osmDrag.pinch.midY = midY;
     return;
   }
+  /* Shift+drag rotates (mouse path); releasing Shift mid-drag drops back
+     to panning, and the stored angle is cleared so re-pressing Shift
+     cannot jump the bearing. */
+  if (_osmDrag.rotate && e.shiftKey) {
+    var ang = osmCursorAngle(e);
+    _osmDrag.moved += Math.abs(dx) + Math.abs(dy);
+    osmRotateBy(osmNormDeltaDeg(ang - _osmDrag.rotate.lastAngle));
+    _osmDrag.rotate.lastAngle = ang;
+    return;
+  }
+  _osmDrag.rotate = null;
   _osmDrag.moved += Math.abs(dx) + Math.abs(dy);
   osmPanBy(dx, dy);
 }
@@ -6895,6 +7020,8 @@ if (typeof window !== "undefined") {
     osmTilesForView: osmTilesForView, osmProjectLocal: osmProjectLocal,
     osmRefLatLon: osmRefLatLon, osmHomeLatLon: osmHomeLatLon, osmStreetKey: osmStreetKey, osmDefaultView: osmDefaultView,
     osmView: osmView, osmSetView: osmSetView, osmRecentre: osmRecentre, osmMapSize: osmMapSize,
+    osmSetBearing: osmSetBearing, osmRotateBy: osmRotateBy, osmNormBearing: osmNormBearing,
+    osmOnPointerDown: osmOnPointerDown, osmOnPointerMove: osmOnPointerMove, osmOnPointerUp: osmOnPointerUp,
     osmPanBy: osmPanBy, osmZoomAt: osmZoomAt, osmZoomBy: osmZoomBy,
     osmNearbySigns: osmNearbySigns, osmNearbyStreetPts: osmNearbyStreetPts, osmNearbyColor: osmNearbyColor,
     osmEventInMap: osmEventInMap,
@@ -6913,7 +7040,7 @@ if (typeof window !== "undefined") {
     whereOpen: whereOpen, whereShowOnMap: whereShowOnMap,
     bindingDeadlineForSide: bindingDeadlineForSide, bindingDeadlineForSideData: bindingDeadlineForSideData,
     heroWarningState: heroWarningState, heroWarningStateForData: heroWarningStateForData,
-    limitForSideKey: limitForSideKey, anchorLimitStartFor: anchorLimitStartFor,
+    limitForSideKey: limitForSideKey, streetHasLimit: streetHasLimit, anchorLimitStartFor: anchorLimitStartFor,
     limitExpiryMs: limitExpiryMs, limitDeadlineMs: limitDeadlineMs, limitCloseMs: limitCloseMs,
     nextLimitOpenMs: nextLimitOpenMs,
     parkedAtForVerdict: parkedAtForVerdict,
