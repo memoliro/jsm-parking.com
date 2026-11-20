@@ -84,29 +84,39 @@
      Red is the fine-ink (the only red in the palette); green is the accent;
      grey is neutral. Curbs are schematic — offset 6 m from the centreline
      so the two sides read apart — the centreline itself is real geometry. */
-  /* OSM map (Nov 18): the home screen — a real OpenStreetMap tile base
-     with the verdict-coloured curb overlay drawn on top of it. The map
-     is the home screen: full-screen from the top of the viewport to the
-     tab bar, pannable and zoomable, centred on the position. Tiles are a
-     map fetch, not a data upload; the overlay
-     (curbs, dots, marker) is drawn from the same centreline + verdict
-     data as the old schematic map, so no verdict logic moved. */
-  .osmmap { position: relative; height: 400px; overflow: hidden; border-radius: 12px;
-            background: #e8eef0; touch-action: none; }
-  .osmtile { position: absolute; width: 256px; height: 256px; }
-  .osmsvg { position: absolute; left: 0; top: 0; }
+  /* Google map (Nov 19): the home screen — a Google Maps base with the
+     verdict-coloured curb overlay drawn on top of it as Google Maps
+     overlays (Polylines for curbs, Markers for dots / home / car).
+     The map is the home screen: full-screen from the top of the
+     viewport to the tab bar, pannable and zoomable, centred on the
+     position. The base map is a Google fetch, not a data upload; the
+     overlay is drawn from the same centreline + verdict data as the
+     old schematic map, so no verdict logic moved. Google handles
+     pan / pinch / zoom natively; the map is always north-up (the
+     Google Maps JS API has no rotation). */
+  #mapBody { position: relative; height: 400px; overflow: hidden; border-radius: 12px;
+             background: #e8eef0; }
+  #gmapDiv { position: absolute; left: 0; top: 0; right: 0; bottom: 0; }
+  #mapChrome { position: absolute; left: 0; top: 0; right: 0; bottom: 0; pointer-events: none; z-index: 5; }
+  #mapNotes { margin-top: 6px; }
   /* Map hint + controls (Nov 18 map cleanup): the hint pill sits
      top-centre of the map (pointer-events none, so it never blocks a
      pan); the three controls stack top-to-bottom — North, Info,
      GPS-centre — on the right side CLOSE TO THE BOTTOM, just above the
      tab bar, within easy thumb reach (his Nov 18 22:23 call). The
-     stack's bottom edge clears the OSM attribution (~24 px tall) with
+     stack's bottom edge clears the Google attribution (~24 px tall) with
      room to spare. All three are inline SVG buttons, no raster images. */
   .osmhint { position: absolute; left: 50%; top: 12px; transform: translateX(-50%); background: rgba(255,255,255,.94);
              border: 1.5px solid var(--ink); border-radius: 999px; padding: 6px 14px; font-size: 15px; font-weight: 700;
              color: var(--ink); white-space: nowrap; box-shadow: 0 2px 10px rgba(0,0,0,.18);
              pointer-events: none; z-index: 5; }
-  .osmcontrols { position: absolute; right: 10px; bottom: 34px; display: flex; flex-direction: column; gap: 8px; z-index: 5; }
+  .osmcontrols { position: absolute; right: 10px; bottom: 34px; display: flex; flex-direction: column; gap: 8px; z-index: 5; pointer-events: auto; }
+  /* No-key / failed-load note (Google Maps switch, Nov 19): centred on
+     the empty map frame, pointer-events none so a drag still pans. */
+  .gmapkey { position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%); background: rgba(255,255,255,.94);
+             border: 1.5px solid var(--line); border-radius: 12px; padding: 10px 14px; font-size: 15px; font-weight: 700;
+             color: var(--ink); text-align: center; max-width: 82%; box-shadow: 0 2px 10px rgba(0,0,0,.18);
+             pointer-events: none; z-index: 5; }
   /* Too-zoomed-out prompt (Nov 19 area paint, ParkUsher-style): the
      area paint is tied to a zoomed-in view, so at a zoomed-out view the
      hint pill is replaced by this amber pill instead of painting a
@@ -123,7 +133,7 @@
   .osmaretry { position: absolute; left: 50%; top: 12px; transform: translateX(-50%); background: var(--amber-bg);
              border: 1.5px solid var(--amber-line); border-radius: 999px; padding: 6px 14px; font-size: 15px; font-weight: 700;
              color: var(--amber-ink); white-space: nowrap; box-shadow: 0 2px 10px rgba(0,0,0,.18);
-             cursor: pointer; font-family: inherit; z-index: 5; }
+             cursor: pointer; font-family: inherit; z-index: 5; pointer-events: auto; }
   .osmctl { width: 44px; height: 44px; border-radius: 12px; border: 1px solid var(--line);
             background: var(--card); color: var(--ink); cursor: pointer; font-family: inherit;
             display: flex; align-items: center; justify-content: center; padding: 0;
@@ -131,9 +141,6 @@
   .osmctl:focus-visible { outline: none; border-color: var(--accent);
             box-shadow: 0 0 0 2px rgba(49,196,141,.35); }
   .osmctl svg { display: block; }
-  .osmattrib { position: absolute; right: 0; bottom: 0; background: rgba(255,255,255,.85);
-            font-size: 15px; color: var(--muted); padding: 2px 6px; border-radius: 6px 0 0 0; }
-  .osmattrib a { color: inherit; }
   .maplayer { font-family: inherit; font-size: 16px; font-weight: 700; padding: 6px 14px;
              border-radius: 999px; border: 2px solid var(--line); background: var(--card);
              color: var(--muted); cursor: pointer; }
@@ -299,13 +306,13 @@
   /* Home tab (Nov 18 map cleanup): the map IS the screen — full-bleed
      from the top of the viewport to the tab bar. The panel breaks out of
      the body's 16 px side padding; the card loses its border/padding so
-     no dead gap survives. The base .osmmap rule keeps height: 400px (the
+     no dead gap survives. The base #mapBody rule keeps height: 400px (the
      Node suites read OSM_MAP_H = 400); this rule only grows the rendered
      map in the browser, and osmMapSize() reads the live element height
      there. */
   #tab-map { margin: 0 -16px; }
   #tab-map #mapCard { margin: 0; padding: 0; border: 0; border-radius: 0; background: transparent; }
-  #tab-map .osmmap { height: calc(100vh - 76px - env(safe-area-inset-bottom)); height: calc(100dvh - 76px - env(safe-area-inset-bottom)); min-height: 400px; border-radius: 0; }
+  #tab-map #mapBody { height: calc(100vh - 76px - env(safe-area-inset-bottom)); height: calc(100dvh - 76px - env(safe-area-inset-bottom)); min-height: 400px; border-radius: 0; }
   /* Destination lookup: the address field. */
   .destinput { flex: 1 1 0; min-width: 0; font-family: inherit; font-size: 18px;
              padding: 12px 10px; border: 2px solid var(--line); border-radius: 12px;
@@ -323,17 +330,21 @@
 <div class="wrap">
   <div id="mainView">
   <section id="tab-map" class="tabpanel" aria-label="Map">
-  <!-- OSM map (Nov 18 map cleanup): the home screen — a full-screen real
-       OpenStreetMap tile base with the verdict-coloured curb overlay on
-       top, always visible (no collapsed row, no toggle, no title, no
-       chips, no bottom block). Each curb line is colored by the verdict
-       in effect right now on that side. One-finger / mouse drag pans,
-       two-finger pinch / wheel / double-click zooms; North re-centres on
-       home, GPS on your location, (i) opens the map info. Tapping a curb
-       opens its detail sheet only — it never changes the parked side or
-       the timer. -->
+  <!-- Google map (Nov 19): the home screen — a full-screen Google Maps
+       base with the verdict-coloured curb overlay on top (Google Maps
+       Polylines / Markers), always visible (no collapsed row, no toggle,
+       no title, no chips, no bottom block). Each curb line is colored by
+       the verdict in effect right now on that side. Drag pans, pinch /
+       wheel / double-click zooms (Google handles the gestures); North
+       re-centres on home, GPS on your location, (i) opens the map info.
+       The map is always north-up — the Google Maps JS API has no
+       rotation. Tapping a curb opens its detail sheet only — it never
+       changes the parked side or the timer. The map needs the Google
+       Maps API key (GOOGLE_MAPS_API_KEY in the script); without one the
+       map area shows a note and everything else still works. -->
   <div class="card" id="mapCard">
-    <div id="mapBody"></div>
+    <div id="mapBody"><div id="gmapDiv"></div><div id="mapChrome"></div></div>
+    <div id="mapNotes"></div>
   </div>
 
 
@@ -477,7 +488,7 @@
        ends the whole session (pin + reminder + parked side + timer).
        Directions shows the route overview (you + the car); Find my car
        centres the map on the pin. No external directions URL exists in
-       the build's allowlist, so both stay inside the app's own OSM map. -->
+       the build's allowlist, so both stay inside the app's own Google map. -->
   <div class="card hidden" id="pinCard">
     <div class="label">Pinned car</div>
     <div class="big" id="pinCount" style="margin-top:4px">—</div>
@@ -1442,7 +1453,7 @@ function renderPin(nowMs) {
 function stopPinSession() {
   setSelectedSide(null);
 }
-/* Find my car: centre the OSM map on the pin at street level and show the map. */
+/* Find my car: centre the Google map on the pin at street level and show the map. */
 function findMyCar() {
   var pin = getPin();
   if (!pin) return osmView();
@@ -1452,7 +1463,7 @@ function findMyCar() {
 }
 /* Directions: the route overview — the midpoint of you and the car, zoomed
    out to fit both. No external directions URL is in the build's allowlist,
-   so this stays inside the app's own OSM map, like Find my car. */
+   so this stays inside the app's own Google map, like Find my car. */
 function directionsToCar() {
   var pin = getPin();
   if (!pin) return osmView();
@@ -3248,14 +3259,16 @@ function init() {
       }
     });
   }
-  /* Curb taps + the three map controls delegate from the map body (its
-     innerHTML is rebuilt on change, so the listeners live on the
-     container, not the rebuilt nodes). A curb tap only ever opens its
-     detail sheet — it never touches the parked side or the timer. */
+  /* The three map controls + the retry pill delegate from the map body
+     (the chrome is rebuilt on change, so the listeners live on the
+     container, not the rebuilt nodes). Curb taps come from the Google
+     Maps overlay click listeners, not from here — Google owns pan /
+     pinch / zoom, so no pointer, wheel or double-click handlers ship
+     any more. A tap only ever opens its detail sheet — it never touches
+     the parked side or the timer. */
   var mapBodyEl = el("mapBody");
   if (mapBodyEl) {
     mapBodyEl.addEventListener("click", function (e) {
-      if (_osmSuppressClick) return; /* a drag just ended — not a tap */
       var t = e.target || e.srcElement;
       while (t && t !== mapBodyEl) {
         if (t.getAttribute) {
@@ -3263,34 +3276,13 @@ function init() {
           if (t.getAttribute("data-map-info") !== null) { showTab("info"); return; }
           if (t.getAttribute("data-map-gps") !== null) { osmCentreOnGps(); return; }
           if (t.getAttribute("data-area-retry") !== null) { osmAreaRetryNow(); return; } /* the "didn't load — tap to retry" pill re-fetches at once */
-          var side = t.getAttribute("data-map-side");
-          if (side) { mapSelectCurb(side); return; }
         }
         t = t.parentNode;
       }
     });
-    mapBodyEl.addEventListener("keydown", function (e) {
-      if (e.key !== "Enter" && e.key !== " ") return;
-      var t = e.target || e.srcElement;
-      if (t && t.getAttribute) {
-        var side2 = t.getAttribute("data-map-side");
-        if (side2) { e.preventDefault(); mapSelectCurb(side2); }
-      }
-    });
-    /* OSM pan / zoom: pointer drag (one finger / mouse), two-finger pinch,
-       wheel, double-click. Listeners live on the stable mapBody (its
-       innerHTML is rebuilt on view change, so nothing inside it may own
-       them). Pointer capture is set on mapBody, with a try/catch — an
-       unguarded setPointerCapture can throw and kill the whole gesture
-       (jsm-radio lesson, Nov 5). A drag suppresses the click that follows
-       it, so a pan never opens a curb detail card. */
-    mapBodyEl.addEventListener("pointerdown", osmOnPointerDown);
-    mapBodyEl.addEventListener("pointermove", osmOnPointerMove);
-    mapBodyEl.addEventListener("pointerup", osmOnPointerUp);
-    mapBodyEl.addEventListener("pointercancel", osmOnPointerUp);
-    mapBodyEl.addEventListener("wheel", osmOnWheel, { passive: false });
-    mapBodyEl.addEventListener("dblclick", osmOnDblClick);
   }
+  /* Google Maps (Nov 19): load the API script once, at boot. */
+  gmapsLoad();
   var po = el("permitOptions");
   if (po) po.addEventListener("change", function (e) {
     var t = e.target || e.srcElement;
@@ -6063,8 +6055,8 @@ function liveJunctionForMap() {
 }
 
 
-/* ---- Phase 5: the colored map (Nov 17; OSM base Nov 18) ----
-   A real OpenStreetMap tile base with the verdict overlay drawn on top,
+/* ---- Phase 5: the colored map (Nov 17; Google base Nov 19) ----
+   A real Google Maps base with the verdict overlay drawn on top,
    the overlay from the REAL centreline geometry (the same along-track
    snaps the paid strip already uses). Two curb lines, one per side,
    colored by the rule in effect RIGHT NOW, computed by REUSING the Phase 2
@@ -6664,7 +6656,7 @@ function mapGeometry() {
   if (home) home.fontSize = homeFs;
   /* Nearest junction at any distance (map fix, Nov 18): the 40 m junction
      display still decides what is DRAWN, but the map can now name the
-     nearest junction even when it is too far to draw — see mapSvgHtml. */
+     nearest junction even when it is too far to draw — see mapOverlays. */
   var nearestJunction = null;
   if (typeof liveNearestJunction === "function") {
     nearestJunction = liveNearestJunction({ min: segMin, max: segMax,
@@ -6889,49 +6881,90 @@ function mapDetailHtml(key, nowMs) {
   if (d.reportable !== false) s += '<div style="margin-top:8px"><button class="linkbtn" data-report-side="' + esc(d.key) + '">Report a sign here</button></div>';
   return s + '</div>';
 }
-/* ---- OSM map (Nov 18): the home screen, ParkUsher-style ----
-   The drawn SVG street-map base is replaced by a real OpenStreetMap tile
+/* ---- Google map (Nov 19): the home screen, ParkUsher-style ----
+   The drawn SVG street-map base is replaced by a real Google Maps
    base with the existing verdict-colour overlay drawn on top of it. The
    overlay is projected from the SAME centreline geometry the old map used
    (mapGeometry: road, curbs, paid dots, home, junction roads, nearby
    streets) — same colours, same verdict logic, same city-data rules — so
-   a curb never shows two colours and no verdict logic moved. The tiles
-   are a map fetch, not a data upload: no user data is sent anywhere, no
-   new server, light use (one 256 px tile per grid cell at the current
-   zoom). Hand-rolled tile layer, not Leaflet: the page stays a single
-   self-contained file with no external JS/CSS dependency (a CDN outage
-   must never blank the verdicts — the overlay + hero + lists all still
-   work with no tiles), and the projection is pure functions the Node
-   suites can drive without a browser. Tiles: tile.openstreetmap.org,
-   attribution "© OpenStreetMap contributors" on the map.
-   The map is pannable (one-finger / mouse drag) and zoomable
-   (two-finger pinch, wheel, double-click) — the standard map gestures,
-   the only way to navigate now the +/- buttons are gone (Nov 18 map
-   cleanup). North re-centres on the position at the default zoom, GPS
+   a curb never shows two colours and no verdict logic moved. The base
+   map is a Google Maps fetch, not a data upload: no user data is sent
+   anywhere, no new server. The Google Maps JS API is the only external
+   JS the page loads (one loader script, referrer-restricted browser key
+   — see GOOGLE_MAPS_API_KEY); an API outage must never blank the
+   verdicts — the overlay + hero + lists all still work with no map, and
+   the overlay descriptors are pure functions the Node suites can drive
+   without a browser. Base: Google Maps, attribution on the map itself.
+   The map is pannable (drag) and zoomable
+   (pinch, wheel, double-click) — the standard map gestures, handled by
+   Google, the only way to navigate now the +/- buttons are gone (Nov 18
+   map cleanup). The map is always north-up: the Google Maps JS API has
+   no rotation, so free rotation is gone and the North button is a
+   re-centre. North re-centres on the position at the default zoom, GPS
    on your location. The home marker sits at the
    exact centre of the view on load and after Centre (the view centres
    on the snapped marker, not the raw address — the snap is ~25 m off
    on the home street) — the rendered centring the verifier checks is the
    marker at the container centre,
-   not an SVG viewBox. The house label sits ABOVE the marker (the old
+   not a viewBox. The house label sits ABOVE the marker (the old
    SVG hung the house number 20 m below the tick, which read as a second, lower
    marker). The mini-map is subsumed: the main map IS the overview — the
-   tiles already show the surrounding streets, and the live nearby-sweep
+   Google base map already shows the surrounding streets, and the live nearby-sweep
    curbs are drawn on it in their verdict colours, as the mini-map did.
    Geometry note: mapGeometry's viewBox framing is retained as the
    geometry engine's bounding frame (its centring/aspect checks still
-   hold), but it is no longer rendered — the tiles carry the street
+   hold), but it is no longer rendered — the Google base map carries the street
    names, junctions and road shape, so the old title/subtitle/label
    placement has nothing to draw. */
-var OSM_TILE_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
-var OSM_ATTRIBUTION_URL = "https://www.openstreetmap.org/copyright";
+/* Google Maps (Nov 19): the base map is the Google Maps JavaScript API.
+   GOOGLE_MAPS_API_KEY is the browser key for the jsm-parking project
+   (Maps JavaScript API only, HTTP-referrer restricted to
+   jsm-parking.com / www.jsm-parking.com / jsm-parking-com.pages.dev).
+   It is meant to live in the page — a referrer-restricted browser key —
+   but it belongs NOWHERE else: no test file, no log, no other copy.
+   The key's project bills on a free trial (90 days from Nov 19, 2026);
+   before it ends the project must move to pay-as-you-go or the map
+   stops loading (usage stays inside the free 10,000 loads/month, so the
+   bill stays $0 — that upgrade is a separate step, not this build). */
+var GOOGLE_MAPS_API_KEY = "AIzaSyDwlA856wu8_Ktos1F94ReV1akxmltpEDc";
+var GMAPS_API_URL = "https://maps.googleapis.com/maps/api/js";
 var OSM_ZOOM_DEFAULT = 17; /* street level: ~0.85 m/px at Montreal's latitude */
 var OSM_ZOOM_MIN = 15, OSM_ZOOM_MAX = 19;
 var OSM_MAP_H = 400; /* the home-screen map is the dominant view */
-var _osmView = null; /* { lat, lon, zoom } — the view centre */
+var _osmView = null; /* { lat, lon, zoom } — the view centre (north-up only) */
 var _osmStreetKey = "";
-function osmTileUrl(z, x, y) {
-  return OSM_TILE_URL.replace("{z}", z).replace("{x}", x).replace("{y}", y);
+var _gmap = null; /* the google.maps.Map instance, once the API has loaded */
+var _gmapLoaded = false, _gmapLoading = false, _gmapFailed = false;
+var _gmapObjs = {}; /* overlay id -> google.maps overlay object on the map */
+var _gmapDescriptors = null; /* the last mapOverlays() result (tests read it) */
+var _gmapOvSig = null; /* the render signature the live overlays match */
+var _mapChromeHtml = null; /* the #mapChrome HTML of the last render */
+var _mapNotesHtml = null; /* the #mapNotes HTML of the last render */
+/* Load the API script once, at boot (called from init). The callback
+   name is fixed: the API calls window.__gmapsReady when it is ready,
+   which re-renders so the map is created and the overlays land. While
+   the key is empty or the script fails, gmapsLoad is a quiet no-op and
+   the chrome carries the note instead. */
+function gmapsLoad() {
+  if (_gmapLoading || _gmapLoaded || _gmapFailed) return _gmapLoaded;
+  if (!GOOGLE_MAPS_API_KEY) return false;
+  if (typeof document === "undefined" || !document.createElement || !document.head || !document.head.appendChild) return false;
+  _gmapLoading = true;
+  try {
+    var s = document.createElement("script");
+    s.src = GMAPS_API_URL + "?key=" + encodeURIComponent(GOOGLE_MAPS_API_KEY) + "&callback=__gmapsReady&loading=async";
+    s.async = true; s.defer = true;
+    s.onerror = function () { _gmapLoading = false; _gmapFailed = true; try { renderMap(); } catch (e) {} };
+    document.head.appendChild(s);
+  } catch (e) { _gmapLoading = false; _gmapFailed = true; }
+  return false;
+}
+function __gmapsReady() {
+  _gmapLoading = false; _gmapLoaded = true;
+  try { renderMap(); } catch (e) { /* the map render is best-effort here */ }
+}
+function gmapsApiReady() {
+  return _gmapLoaded && typeof google !== "undefined" && !!google.maps && !!google.maps.Map;
 }
 /* Web Mercator, pure: world pixels at a zoom (tile size 256). */
 function osmLatLngToWorld(lat, lon, zoom) {
@@ -6947,25 +6980,6 @@ function osmWorldToLatLng(x, y, zoom) {
   var n = Math.PI * (1 - 2 * y / s);
   var lat = 180 / Math.PI * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n)));
   return [lat, lon];
-}
-/* Which tiles cover the view, and where each sits in the container.
-   Pure — the suites drive it without a browser. x wraps at the
-   antimeridian; y is clamped to the valid tile range. */
-function osmTilesForView(lat, lon, zoom, w, h) {
-  var c = osmLatLngToWorld(lat, lon, zoom);
-  var left = c[0] - w / 2, top = c[1] - h / 2;
-  var n = Math.pow(2, zoom);
-  var x0 = Math.floor(left / 256), x1 = Math.floor((left + w - 1) / 256);
-  var y0 = Math.max(0, Math.floor(top / 256)), y1 = Math.min(n - 1, Math.floor((top + h - 1) / 256));
-  var out = [];
-  for (var ty = y0; ty <= y1; ty++) {
-    for (var tx = x0; tx <= x1; tx++) {
-      var wx = ((tx % n) + n) % n;
-      out.push({ z: zoom, x: wx, y: ty, url: osmTileUrl(zoom, wx, ty),
-                 left: tx * 256 - left, top: ty * 256 - top });
-    }
-  }
-  return out;
 }
 /* The reference point the local-metre geometry is anchored to (the
    current street's house, baked or live) — the origin the overlay
@@ -7026,12 +7040,12 @@ function osmSetView(lat, lon, zoom, bearing) {
   zoom = (typeof zoom === "number") ? Math.max(OSM_ZOOM_MIN, Math.min(OSM_ZOOM_MAX, Math.round(zoom))) : osmView().zoom;
   lat = Math.max(-85, Math.min(85, lat));
   lon = ((lon + 180) % 360 + 360) % 360 - 180;
-  /* The bearing survives a pan/zoom unless the caller passes one: a
-     rotated map stays rotated while it moves. */
-  _osmView = { lat: lat, lon: lon, zoom: zoom,
-    bearing: (typeof bearing === "number") ? osmNormBearing(bearing) : osmNormBearing(osmView().bearing || 0) };
+  /* North-up only (Google Maps switch, Nov 19): the Google Maps JS API
+     has no rotation, so the bearing is always 0. The bearing argument
+     is accepted and ignored, so old callers keep working. */
+  _osmView = { lat: lat, lon: lon, zoom: zoom, bearing: 0 };
   _osmStreetKey = osmStreetKey();
-  if (!_osmRenderHold) renderMap();
+  renderMap();
   return _osmView;
 }
 function osmRecentre() {
@@ -7041,39 +7055,19 @@ function osmRecentre() {
   osmAreaScheduleRefresh();
   return _osmView;
 }
-/* Free map rotation (Nov 18): bearing in degrees, clockwise from
-   north-up; 0 = north-up. The bearing is visual only — pan/zoom math
-   un-rotates screen deltas by it, so gestures keep working while the map
-   is turned. North (osmRecentre, the N button) resets it to 0 along with
-   the centre and zoom, as before. */
+/* North-up only (Google Maps switch, Nov 19): the bearing is always 0 —
+   the Google Maps JS API has no rotation. osmNormBearing stays: the
+   area memo key still normalises the (always 0) bearing. */
 function osmNormBearing(b) {
   if (typeof b !== "number" || !isFinite(b)) return 0;
   b = b % 360;
   if (b < 0) b += 360;
   return b;
 }
-function osmSetBearing(deg) {
-  var v = osmView();
-  _osmView = { lat: v.lat, lon: v.lon, zoom: v.zoom, bearing: osmNormBearing(deg) };
-  _osmStreetKey = osmStreetKey();
-  if (!_osmRenderHold) renderMap();
-  return _osmView;
-}
-function osmRotateBy(dDeg) {
-  return osmSetBearing((osmView().bearing || 0) + dDeg);
-}
-/* Screen angle (degrees, y-down so positive = clockwise, matching CSS
-   rotate) of the vector (x1,y1)->(x2,y2); and a delta normalised to
-   [-180, 180] so a twist across the ±180 seam rotates the short way. */
-function osmAngleDeg(x1, y1, x2, y2) {
-  return Math.atan2(y2 - y1, x2 - x1) * 180 / Math.PI;
-}
-function osmNormDeltaDeg(d) {
-  d = d % 360;
-  if (d > 180) d -= 360;
-  if (d < -180) d += 360;
-  return d;
-}
+/* Setting a bearing is a no-op: the map cannot rotate, so the view it
+   returns is always north-up. */
+function osmSetBearing(deg) { return osmView(); }
+function osmRotateBy(dDeg) { return osmView(); }
 /* GPS-centre button (Nov 18 map cleanup): centre the map on the last GPS
    fix at once, then ask for a fresh fix — when it lands, the map follows
    it (see checkGps). The auto-refresh (boot + visibilitychange + 90 s)
@@ -7103,18 +7097,10 @@ function osmProjectLocal(x, y, refLat, refLon, view, size) {
   var c = osmLatLngToWorld(view.lat, view.lon, view.zoom);
   return [w[0] - c[0] + size.w / 2, w[1] - c[1] + size.h / 2];
 }
-function osmPathD(list, refLat, refLon, view, size) {
-  var d = "";
-  list.forEach(function (pt, i) {
-    var q = osmProjectLocal(pt.x, pt.y, refLat, refLon, view, size);
-    d += (i === 0 ? "M" : "L") + q[0].toFixed(1) + " " + q[1].toFixed(1);
-  });
-  return d;
-}
 /* Pan by container pixels: dragging the map right moves the centre west,
-   so the content follows the finger / mouse. With the map rotated, a
-   screen drag is not a world drag — un-rotate the screen delta by the
-   bearing first (bearing 0 = the old path, byte for byte). */
+   so the content follows the finger / mouse. North-up only (Google Maps
+   switch, Nov 19): the bearing is always 0, so the un-rotate below is
+   the identity — kept so the math stays the same shape. */
 function osmPanBy(dx, dy) {
   var v = osmView(), size = osmMapSize();
   var c = osmLatLngToWorld(v.lat, v.lon, v.zoom);
@@ -7125,9 +7111,8 @@ function osmPanBy(dx, dy) {
   return osmSetView(ll[0], ll[1], v.zoom);
 }
 /* Zoom around a container point (px, py): the place under that point
-   stays under it. The point under the cursor is found in the rotated
-   frame — un-rotate its screen offset by the bearing first (bearing 0 =
-   the old path). */
+   stays under it. North-up only (Google Maps switch, Nov 19): the
+   bearing is always 0, so the un-rotate below is the identity. */
 function osmZoomAt(px, py, zoom) {
   var v = osmView(), size = osmMapSize();
   zoom = Math.max(OSM_ZOOM_MIN, Math.min(OSM_ZOOM_MAX, zoom));
@@ -7156,7 +7141,7 @@ function osmZoomBy(d, cx, cy) {
    then the limit-only fallback). In baked mode there is no sweep, so
    only the current street draws.
    Colour around the centre (Nov 19): the sweep streets no longer draw
-   from this section -- they draw from the area layer in mapSvgHtml
+   from this section -- they draw from the area layer in mapOverlays
    (osmAreaEntries), which covers every street with fetched data in the
    visible area around the screen centre, tappably. osmNearbySigns /
    osmNearbyStreetPts / osmNearbyColor below are the shared geometry + colour
@@ -7548,20 +7533,13 @@ function osmAreaState() {
     return "empty";
   } catch (e) { return "empty"; }
 }
-/* The pill state a render shows: while a drag/pinch is running, the
-   state frozen at drag start (_osmDragPill) — NOT the live state. The
-   video (Nov 19, PC mouse drag over Mount Royal): the pill flipped
-   "Checking nearby streets…" -> "Nearby streets didn't load — tap to
-   retry" MID-DRAG, because the area prefetch settled 0-landed while
-   the user was still dragging and every pointermove re-rendered the
-   pill from live state. Freezing it for the gesture keeps the pill
-   stable under the finger; the pointerup refresh (osmRefreshPill)
-   shows the live state once the gesture ends. The freeze is
-   presentation only — osmAreaState() and the prefetch state machine
-   are untouched, so the area-paint-phone tests (which drive mapSvgHtml
-   with no gesture running) read the live state exactly as before. */
-function osmPillState() {
-  if (_osmDrag && typeof _osmDragPill === "string") return _osmDragPill;
+/* The pill state a render shows: the live area state, always.
+   No drag freeze any more (Google Maps switch, Nov 19): the pill is
+   plain HTML above the Google map, and a prefetch settling
+   mid-gesture only repaints it on the next render — nothing is
+   destroyed mid-gesture, so there is nothing to freeze. The old
+   freeze existed because every pointermove rebuilt the tiles +
+   overlay; Google owns the gestures now. */function osmPillState() {
   try { return (typeof osmAreaState === "function") ? osmAreaState() : "ready"; } catch (e) { return "ready"; }
 }
 /* The map's status pill HTML for one state — the single place its
@@ -7575,29 +7553,6 @@ function osmAreaPillHtml(state) {
   if (state === "loading") return '<div class="osmhint" aria-hidden="true">Checking nearby streets\u2026</div>';
   if (state === "failed") return '<button class="osmaretry" data-area-retry type="button">Nearby streets didn\u2019t load \u2014 tap to retry</button>';
   return '<div class="osmhint" aria-hidden="true">Tap a color line for details</div>';
-}
-/* Refresh just the pill node after a gesture ends (called from
-   osmOnPointerUp once the freeze is lifted). A full renderMap here
-   would rebuild the tiles + overlay between pointerup and the click
-   that follows it — destroying the curb/button node the click targets
-   — so only this one node is swapped, and only when its content
-   actually changed. Real DOM only; in the Node suites (stub elements
-   with no querySelector) this is a no-op and the pill is read from
-   mapSvgHtml instead. Never throws. */
-function osmRefreshPill() {
-  var body = null;
-  try { body = el("mapBody"); } catch (e) { return; }
-  if (!body || typeof body.querySelector !== "function") return;
-  try {
-    var old = body.querySelector(".osmhint") || body.querySelector(".osmaretry") || body.querySelector(".osmzoomhint");
-    if (!old || !old.parentNode) return;
-    var html = osmAreaPillHtml(osmPillState());
-    if (old.outerHTML === html) return;
-    var tmp = document.createElement("div");
-    tmp.innerHTML = html;
-    var node = tmp.firstChild;
-    if (node) old.parentNode.replaceChild(node, old);
-  } catch (e) { /* the pill refresh is cosmetic; the next full render fixes it */ }
 }
 /* The diagnostic readout the phone probe needs (baseline report §7):
    the build, the zoom, what paints now, and the last prefetch run
@@ -7650,7 +7605,7 @@ function osmAreaRetryNow() {
 /* Debounced trigger for osmAreaRefresh: one 400 ms timer, reset on every
    call, so a drag that fires pointermove/render dozens of times fetches
    once, 400 ms after the last centre change. Called only from gesture-end
-   paths (pointer-up after a real pan, wheel, double-click, North,
+   paths (the Google map's idle event after a real pan/zoom, North,
    GPS-centre) -- never from osmSetView/renderMap, so a programmatic
    re-centre or a suite driving osmSetView never starts a fetch on its own. */
 function osmAreaScheduleRefresh() {
@@ -7700,65 +7655,47 @@ function osmAreaScheduleRefresh() {
    pixels (viewBox 0 0 W H), so the rendered centring is the marker at the
    container centre — checkable from the projected home point, not from a
    viewBox. */
-function mapSvgHtml(nowMs, geom, colors) {
+/* ---- Google Maps overlays (Nov 19) ----
+   The overlay is built as pure data first, then materialised onto the
+   Google map: mapOverlays() returns descriptors (curb Polylines with
+   their verdict colour + LatLng path, paid-dot / home / car Markers)
+   and gmapsSyncOverlays() diffs them onto the live map by id. The
+   descriptors are the test surface: the Node suites drive mapOverlays()
+   without a browser (no google object), exactly as they used to drive
+   mapSvgHtml's SVG string. Curb taps come from a hit Polyline's click
+   listener — an invisible 18 px-wide Polyline riding the visible one,
+   the same 18 px hit width the old SVG hit path had.
+   Local-metre geometry (mapGeometry frame, ref = the house) becomes
+   LatLng with osmLocalToLatLng — the inverse of mapXY, same flat-earth
+   constants osmProjectLocal uses, so the overlays sit on the same
+   streets the old SVG drew. */
+function osmLocalToLatLng(x, y, refLat, refLon) {
+  var coslat = Math.cos(refLat * Math.PI / 180);
+  return { lat: refLat + y / 110540, lon: refLon + x / (111320 * coslat) };
+}
+function mapOverlays(nowMs, geom, colors) {
   nowMs = nowMs || Date.now();
   if (!geom) geom = mapGeometry();
-  if (!colors) colors = mapCurbColors(nowMs);
+  if (!colors) colors = mapCurbColors(nowMs, geom);
   var view = osmView();
-  var size = osmMapSize();
-  /* No layer chips on the map any more (Nov 18 map cleanup): the toggles
-     live only in the Settings tab; both layers stay visible on the map
-     whenever their Settings toggle is on, as before. */
-  var s = "";
-  /* Map-loads fix (Nov 19): the base map is decoupled from the verdict
-     geometry. When geom.ok is false (loading, live-error, no-centreline /
-     no-segment / no-snap) the tile layer + hint pill + controls +
-     attribution still render — the error/loading note moves to a
-     non-map surface below the map (like the stale-frame label), so a
-     failed rules lookup can never again blank the map. Only the
-     parking-rules overlay (curbs, dots, home tick) is absent, honestly. */
   var ref = osmRefLatLon();
   var refLat = ref.lat, refLon = ref.lon;
-  /* Free rotation (Nov 18): tiles + overlay rotate together inside one
-     wrapper; the hint pill, the three controls and the attribution stay
-     OUTSIDE it, so they stay upright. At bearing 0 there is no wrapper
-     and no oversize — the frame is exactly the old one, so north-up
-     rendering is unchanged. At a non-zero bearing the frame is the
-     container's diagonal square, centred on the same centre, so no corner
-     goes blank at any angle. */
-  var bearing = osmNormBearing(view.bearing || 0);
-  var fsize = size, rotOpen = "", rotClose = "";
-  if (bearing) {
-    var diag = Math.ceil(Math.sqrt(size.w * size.w + size.h * size.h));
-    fsize = { w: diag, h: diag };
-    rotOpen = '<div class="osmrotate" style="position:absolute;left:50%;top:50%;width:' + diag
-      + 'px;height:' + diag + 'px;transform:translate(-50%,-50%) rotate(' + bearing + 'deg)">';
-    rotClose = "</div>";
-  }
-  var tiles = osmTilesForView(view.lat, view.lon, view.zoom, fsize.w, fsize.h);
-  /* The street name for the overlay label: the geometry's when it exists,
+  /* The street name for the overlay: the geometry's when it exists,
      else the live lookup's street (loading / error / no-geometry states
      have no geometry but do have a street name). */
-  var svgStreet = geom.streetName
+  var streetName = (geom && geom.streetName)
     || (typeof liveMode === "function" && liveMode() && typeof LIVE !== "undefined" && LIVE && LIVE.streetName)
     || "this street";
-  s += '<div class="osmmap" id="osmMap">' + rotOpen;
-  tiles.forEach(function (t) {
-    s += '<img class="osmtile" src="' + t.url + '" data-osm-z="' + t.z + '" alt="" draggable="false" style="left:' + t.left.toFixed(0) + 'px;top:' + t.top.toFixed(0) + 'px">';
-  });
-  s += '<svg class="osmsvg" width="' + fsize.w + '" height="' + fsize.h + '" viewBox="0 0 ' + fsize.w + ' ' + fsize.h + '" role="img" aria-label="Map of '
-    + esc(svgStreet) + ' with parking rules by side">';
+  var out = { streetName: streetName, view: { lat: view.lat, lon: view.lon, zoom: view.zoom },
+    curbs: [], dots: [], home: null, car: null };
+  function toLL(pt) { return osmLocalToLatLng(pt.x, pt.y, refLat, refLon); }
   /* Area streets first (under the current street): every street with
      fetched data in the VISIBLE AREA around the screen centre, in its
      verdict colours -- the same data, same verdicts as where-to-move,
-     but centred on the view, not on the home street. This REPLACES the
-     old nearby-sweep block (baseline section 4.3): sweep streets inside
-     the visible area now draw here, TAPPABLE (the 18 px hit path, same as the
-     current street's curbs); a sweep street outside the visible area
-     does not draw at all -- its where-to-move row is unchanged. A
-     street with no fetched data is not in the list and draws nothing:
-     never grey, never a guess. Below the zoom threshold the area is
-     empty by derivation (the prompt below shows instead). */
+     but centred on the view, not on the home street. A street with no
+     fetched data is not in the list and draws nothing: never grey,
+     never a guess. Below the zoom threshold the area is empty by
+     derivation (the prompt shows instead). */
   var area = (typeof osmAreaEntries === "function") ? osmAreaEntries() : [];
   area.forEach(function (a) {
     var signs = osmNearbySigns(a.result);
@@ -7770,136 +7707,248 @@ function mapSvgHtml(nowMs, geom, colors) {
       });
       var acolor = osmNearbyColor(a.result.sides, k, nowMs);
       var akey = "area:" + a.slug + ":" + k;
-      var ad = osmPathD(curb, refLat, refLon, view, fsize);
-      s += '<path d="' + ad + '" fill="none" style="stroke:' + mapColorStroke(acolor)
-        + '" stroke-width="4" stroke-linecap="round"/>';
-      s += '<path class="mapcurb-hit" data-map-side="' + esc(akey) + '" tabindex="0" role="button" aria-label="'
-        + esc(mapCurbAriaLabel(akey, nowMs)) + " \u2014 "
-        + (acolor === "red" ? "cannot park here now" : acolor === "green" ? "parking allowed until the deadline" : "no verified rule")
-        + '" d="' + ad + '" fill="none" stroke="rgba(0,0,0,0)" stroke-width="18" stroke-linecap="round"/>';
+      out.curbs.push({ key: akey, color: acolor, stroke: mapColorStroke(acolor), weight: 4,
+        path: curb.map(toLL), label: mapCurbAriaLabel(akey, nowMs) });
     });
   });
-  /* Current street's curbs, coloured by the verdict in effect right now.
-     Only when geometry exists — without it there is honestly nothing to
-     draw, and the base map underneath still shows. */
+  /* Current street's curbs (+ junction curbs, same keys as the geometry:
+     next-* past the junction, cross-* on the cross street), coloured by
+     the verdict in effect right now. Only when geometry exists —
+     without it there is honestly nothing to draw, and the base map
+     underneath still shows. */
   if (geom.ok && geom.curbs) {
-  Object.keys(geom.curbs).forEach(function (k) {
-    var color = colors[k] || "grey";
-    var d = osmPathD(geom.curbs[k], refLat, refLon, view, fsize);
-    s += '<path d="' + d + '" fill="none" style="stroke:' + mapColorStroke(color) + '" stroke-width="4.5" stroke-linecap="round"/>';
-    s += '<path class="mapcurb-hit" data-map-side="' + esc(k) + '" tabindex="0" role="button" aria-label="'
-      + esc(mapCurbAriaLabel(k, nowMs)) + ' — '
-      + (color === "red" ? "cannot park here now" : color === "green" ? "parking allowed until the deadline" : "no verified rule")
-      + '" d="' + d + '" fill="none" stroke="rgba(0,0,0,0)" stroke-width="18" stroke-linecap="round"/>';
-  });
+    Object.keys(geom.curbs).forEach(function (k) {
+      var color = colors[k] || "grey";
+      out.curbs.push({ key: k, color: color, stroke: mapColorStroke(color), weight: 4.5,
+        path: geom.curbs[k].map(toLL), label: mapCurbAriaLabel(k, nowMs) });
+    });
   }
   if (geom.ok && geom.dots) {
-  geom.dots.forEach(function (dot) {
-    var q = osmProjectLocal(dot.x, dot.y, refLat, refLon, view, fsize);
-    s += '<circle cx="' + q[0].toFixed(1) + '" cy="' + q[1].toFixed(1)
-      + '" r="4.5" fill="#d97706" stroke="#fff" stroke-width="1.5"/>';
-  });
+    geom.dots.forEach(function (dot) {
+      var ll = toLL(dot);
+      out.dots.push({ lat: ll.lat, lon: ll.lon, side: dot.side });
+    });
   }
   if (geom.ok && geom.home) {
-    var hq = osmProjectLocal(geom.home.x, geom.home.y, refLat, refLon, view, fsize);
-    s += '<circle cx="' + hq[0].toFixed(1) + '" cy="' + hq[1].toFixed(1)
-      + '" r="7" fill="var(--accent)" stroke="#fff" stroke-width="2"/>';
-    if (geom.home.label) {
-      s += '<text x="' + hq[0].toFixed(1) + '" y="' + (hq[1] - 12).toFixed(1)
-        + '" font-size="11" font-weight="bold" style="fill:var(--ink)" text-anchor="middle">' + esc(geom.home.label) + '</text>';
-    }
+    var hl = toLL(geom.home);
+    out.home = { lat: hl.lat, lon: hl.lon, label: geom.home.label || null };
   }
-  /* The pinned car (Nov 19): a blue teardrop at the pin's lat/lon, drawn as
-     a <path> — not a <circle> — so the overlay's circle count (4 metered
-     dots + the home marker) is unchanged. Only when a pin is saved. */
+  /* The pinned car (Nov 19): a Google Maps Marker at the pin's lat/lon
+     when parked; at the live GPS fix when not parked; nowhere with
+     neither — never a guessed position. */
   var pinM = null;
   try { pinM = getPin(); } catch (e) { pinM = null; }
   if (pinM) {
-    var pp = toXY(pinM.lat, pinM.lon);
-    var pq = osmProjectLocal(pp[0], pp[1], refLat, refLon, view, fsize);
-    var px = pq[0], py = pq[1];
-    s += '<path d="M ' + px.toFixed(1) + ' ' + (py + 12).toFixed(1)
-      + ' L ' + (px - 9).toFixed(1) + ' ' + (py - 2).toFixed(1)
-      + ' A 9 9 0 1 1 ' + (px + 9).toFixed(1) + ' ' + (py - 2).toFixed(1)
-      + ' Z" fill="#2563eb" stroke="#fff" stroke-width="1.5"/>';
-    s += '<text x="' + px.toFixed(1) + '" y="' + (py + 26).toFixed(1)
-      + '" font-size="11" font-weight="bold" style="fill:var(--ink)" text-anchor="middle">Your car</text>';
-    /* Tiny car glyph above the pin — the marker itself, small and
-       unobtrusive. No <circle>: the overlay circle count (4 metered dots
-       + home marker) stays exactly as the pin test asserts it. */
-    s += '<text x="' + px.toFixed(1) + '" y="' + (py - 20).toFixed(1)
-      + '" font-size="16" text-anchor="middle" dominant-baseline="central">🚗</text>';
+    out.car = { lat: pinM.lat, lon: pinM.lon, parked: true, label: "Your car" };
   } else {
-    /* Not parked: the car sits at the live GPS fix, so the driver sees
-       where the car (phone) is right now. No fix, no glyph — never a
-       guessed position. */
     var fix = null;
     try { fix = (typeof lastFix !== "undefined") ? lastFix : null; } catch (e) { fix = null; }
     if (fix && typeof fix.lat === "number" && typeof fix.lon === "number") {
-      var fp = toXY(fix.lat, fix.lon);
-      var fq = osmProjectLocal(fp[0], fp[1], refLat, refLon, view, fsize);
-      /* Only when the fix is actually in the visible frame: a fix
-         kilometres away would project thousands of pixels off-frame —
-         invisible in the browser (the SVG clips it) but an off-frame
-         label in the markup. */
-      if (fq[0] >= -20 && fq[0] <= fsize.w + 20 && fq[1] >= -20 && fq[1] <= fsize.h + 20) {
-        s += '<text x="' + fq[0].toFixed(1) + '" y="' + fq[1].toFixed(1)
-          + '" font-size="16" text-anchor="middle" dominant-baseline="central">🚗</text>';
-      }
+      out.car = { lat: fix.lat, lon: fix.lon, parked: false, label: null };
     }
   }
-  s += '</svg>' + rotClose;
-  /* Hint pill (top centre) + the three controls (right side, near the
-     bottom, North / Info / GPS-centre top-to-bottom — Nov 18 map cleanup).
-     All inline SVG, no raster images; the North arrow is a plain triangle
-     with an N, never the watermarked stock image. */
-  /* Zoomed out: the hint pill is replaced by the "Too zoomed out" prompt
-     (ParkUsher-style) -- the area paint is tied to a zoomed-in view, so
-     a zoomed-out view says so instead of painting a misleadingly small
-     patch. The current street's own curbs still draw; only the area
-     layer is gated.
-     Area state (Nov 19 area-paint phone fix): at a zoomed-in view the
-     pill says which of the three states the area is in — "Checking
-     nearby streets…" while a prefetch is in flight, a tap-to-retry
-     button when the last run finished with nothing landed, the tap hint
-     once streets paint (or before any run has been attempted). */
-  var areaPill = osmPillState();
-  s += osmAreaPillHtml(areaPill);
+  return out;
+}
+/* The map's HTML chrome — everything that is NOT the Google map itself:
+   the status pill, the three controls (North / Info / GPS-centre), and
+   the no-key note. renderMap writes this into #mapChrome when it
+   changes; the Google map div (#gmapDiv) is never rebuilt, so the map
+   instance survives renders. */
+function mapChromeHtml(nowMs, geom, colors) {
+  var s = osmAreaPillHtml(osmPillState());
   s += '<div class="osmcontrols">'
-    + '<button class="osmctl" data-map-north type="button" aria-label="North up — centre on home"><svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true"><text x="12" y="8.5" text-anchor="middle" font-size="9" font-weight="bold" fill="currentColor">N</text><path d="M12 11 L17.5 20 L12 17.5 L6.5 20 Z" fill="currentColor"/></svg></button>'
+    + '<button class="osmctl" data-map-north type="button" aria-label="Centre on home"><svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true"><text x="12" y="8.5" text-anchor="middle" font-size="9" font-weight="bold" fill="currentColor">N</text><path d="M12 11 L17.5 20 L12 17.5 L6.5 20 Z" fill="currentColor"/></svg></button>'
     + '<button class="osmctl" data-map-info type="button" aria-label="Map info"><svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/><text x="12" y="16.5" text-anchor="middle" font-size="13" font-weight="bold" fill="currentColor">i</text></svg></button>'
     + '<button class="osmctl" data-map-gps type="button" aria-label="Centre on my location"><svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="6.5" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="1.8" fill="currentColor"/><path d="M12 1.5 L12 4.5 M12 19.5 L12 22.5 M1.5 12 L4.5 12 M19.5 12 L22.5 12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>'
     + '</div>';
-  s += '<div class="osmattrib"><a href="' + OSM_ATTRIBUTION_URL + '">&copy; OpenStreetMap contributors</a></div>';
-  s += '</div>';
-  /* The honest note for a missing geometry, on a non-map surface BELOW
-     the map — never in place of it (Nov 19 map-loads fix). The wording
-     is unchanged: it is honest about the rules, and the map underneath
-     still shows. */
-  if (!geom.ok) {
+  /* No API key yet (or the script failed): the map div stays empty, so
+     the chrome says so plainly instead of showing a bare grey frame. */
+  if (!GOOGLE_MAPS_API_KEY) {
+    s += '<div class="gmapkey" role="note">Map needs a Google Maps API key \u2014 add it to GOOGLE_MAPS_API_KEY in the page script.</div>';
+  } else if (_gmapFailed) {
+    s += '<div class="gmapkey" role="note">Google Maps didn\u2019t load \u2014 check the connection and the API key.</div>';
+  }
+  return s;
+}
+/* The honest notes BELOW the map — never in place of it (Nov 19
+   map-loads fix): a missing geometry says so here, and a stale cached
+   frame labels itself here, while the base map underneath still shows. */
+function mapNotesHtml(nowMs, geom, colors) {
+  var s = "";
+  if (geom && !geom.ok) {
     s += '<div class="note" style="margin-top:6px">' + esc(geom.message || "No street map here.") + '</div>';
   }
-  /* No legend under the map any more (Nov 18 map cleanup): the colour
-     meanings moved into the (i) map-info sheet. */
-  /* Stale-frame label (map fix, Nov 18): a cached frame shown while the
-     fresh lookup re-runs says so, on the map itself — never as current. */
   if (liveMode() && LIVE.cacheStale) {
     s += '<div class="note" style="margin-top:6px">Last known map — saved ' + esc(LIVE.cacheStale.label || "")
       + ", checking the city\u2019s signs now.</div>";
   }
-  /* No junction line under the map any more (Nov 18 map cleanup): the
-     40 m rule is unchanged — the nearest junction here is 134.9 m away,
-     so nothing is drawn — and the nearest junction is still computed
-     (geometry.nearestJunction), with the junction curbs' detail sheets
-     naming it. Only the display line under the map is gone. */
-  /* No "Curbs drawn..." line any more (Nov 18 map cleanup): the tap hint
-     lives in the pill at the top of the map and in the (i) sheet. */
-  /* No inline detail card any more (Nov 18 map cleanup): a selected curb
-     opens the curb-detail sheet (mapSelectCurb -> openCurbSheet). */
   return s;
 }
-function mapBodyHtml(nowMs, geom, colors) { return mapSvgHtml(nowMs, geom, colors); }
-/* The OSM map is the home screen: always open, no toggle, no collapsed
+function mapBodyHtml(nowMs, geom, colors) { return mapChromeHtml(nowMs, geom, colors); }
+function setMapChrome(html) {
+  var c = null;
+  try { c = el("mapChrome"); } catch (e) { c = null; }
+  if (c) { try { c.innerHTML = html; } catch (e) { /* chrome is cosmetic */ } }
+}
+function setMapNotes(html) {
+  var n = null;
+  try { n = el("mapNotes"); } catch (e) { n = null; }
+  if (n) { try { n.innerHTML = html; } catch (e) { /* notes are cosmetic */ } }
+}
+/* ---- Google Maps materialisation ----
+   The descriptors above become real google.maps objects here, diffed by
+   id: a curb whose path or colour changed is updated in place, a curb
+   that left the area is removed from the map, a new one is created.
+   Nothing here runs without a loaded API (the Node suites never reach
+   it), and any fault is swallowed — an overlay fault must never break
+   the map or the app. */
+function gmapsCssColor(stroke) {
+  /* Google needs real colours, not CSS vars: the two var() strokes the
+     overlay uses, resolved to the same hex the stylesheet defines. */
+  if (stroke === "var(--accent)") return "#31c48d";
+  if (stroke === "var(--fine-ink)") return "#a63a2e";
+  return stroke || "#b3beb6";
+}
+function gmapsIcon(kind) {
+  try {
+    if (typeof google === "undefined" || !google.maps) return null;
+    var svg = null, w = 0, h = 0, ax = 0, ay = 0, lx = null, ly = null;
+    if (kind === "dot") {
+      svg = '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12"><circle cx="6" cy="6" r="4.5" fill="#d97706" stroke="#fff" stroke-width="1.5"/></svg>';
+      w = 12; h = 12; ax = 6; ay = 6;
+    } else if (kind === "home") {
+      svg = '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><circle cx="10" cy="10" r="7" fill="#31c48d" stroke="#fff" stroke-width="2"/></svg>';
+      w = 20; h = 20; ax = 10; ay = 10; lx = 10; ly = 1;
+    } else {
+      svg = '<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28"><circle cx="14" cy="14" r="13" fill="#2563eb" stroke="#fff" stroke-width="1.5"/><text x="14" y="19" font-size="13" text-anchor="middle">\uD83D\uDE97</text></svg>';
+      w = 28; h = 28; ax = 14; ay = 14; lx = 14; ly = 1;
+    }
+    var icon = { url: "data:image/svg+xml;charset=UTF-8," + encodeURIComponent(svg),
+      scaledSize: new google.maps.Size(w, h),
+      anchor: new google.maps.Point(ax, ay) };
+    if (lx !== null) icon.labelOrigin = new google.maps.Point(lx, ly);
+    return icon;
+  } catch (e) { return null; }
+}
+function gmapsEnsureMap() {
+  if (_gmap) return _gmap;
+  if (typeof google === "undefined" || !google.maps || !google.maps.Map) return null;
+  var div = null;
+  try { div = el("gmapDiv"); } catch (e) { div = null; }
+  if (!div) return null;
+  var v = osmView();
+  try {
+    _gmap = new google.maps.Map(div, {
+      center: { lat: v.lat, lng: v.lon },
+      zoom: v.zoom,
+      mapTypeId: google.maps.MapTypeId.ROADMAP,
+      disableDefaultUI: true, zoomControl: false, mapTypeControl: false,
+      streetViewControl: false, fullscreenControl: false, rotateControl: false,
+      clickableIcons: false, gestureHandling: "greedy", heading: 0
+    });
+    /* Google owns the gestures now: centre/zoom changes stream in
+       while the user drags (the view model follows, no repaint — the
+       overlays are LatLng-anchored, so they track the map for free);
+       idle fires when the gesture ends, and that is when the area
+       re-derives and repaints (the old pointerup schedule). */
+    _gmap.addListener("center_changed", function () { gmapsOnMapMove(false); });
+    _gmap.addListener("zoom_changed", function () { gmapsOnMapMove(false); });
+    _gmap.addListener("idle", function () { gmapsOnMapMove(true); });
+  } catch (e) { _gmap = null; return null; }
+  return _gmap;
+}
+function gmapsOnMapMove(idle) {
+  if (!_gmap) return;
+  try {
+    var c = _gmap.getCenter(), z = _gmap.getZoom();
+    if (!c || typeof z !== "number") return;
+    var lat = (typeof c.lat === "function") ? c.lat() : c.lat;
+    var lon = (typeof c.lng === "function") ? c.lng() : c.lng;
+    if (typeof lat !== "number" || typeof lon !== "number" || !isFinite(lat) || !isFinite(lon)) return;
+    z = Math.max(OSM_ZOOM_MIN, Math.min(OSM_ZOOM_MAX, Math.round(z)));
+    var v = osmView();
+    if (Math.abs(v.lat - lat) > 1e-9 || Math.abs(v.lon - lon) > 1e-9 || v.zoom !== z) {
+      _osmView = { lat: lat, lon: lon, zoom: z, bearing: 0 };
+      _osmStreetKey = osmStreetKey();
+    }
+    if (idle) { renderMap(); osmAreaScheduleRefresh(); }
+  } catch (e) { /* map events must never break the app */ }
+}
+function gmapsSyncView() {
+  if (!_gmap) return;
+  var v = osmView();
+  try {
+    var c = _gmap.getCenter();
+    var clat = c ? ((typeof c.lat === "function") ? c.lat() : c.lat) : null;
+    var clon = c ? ((typeof c.lng === "function") ? c.lng() : c.lng) : null;
+    if (clat === null || Math.abs(clat - v.lat) > 1e-9 || Math.abs(clon - v.lon) > 1e-9) {
+      _gmap.setCenter({ lat: v.lat, lng: v.lon });
+    }
+    if (_gmap.getZoom() !== v.zoom) _gmap.setZoom(v.zoom);
+  } catch (e) { /* a view sync fault must never break the render */ }
+}
+function gmapsSyncOverlays(ov) {
+  if (!_gmap || typeof google === "undefined" || !google.maps || !ov) return;
+  var want = {};
+  try {
+    ov.curbs.forEach(function (c) {
+      var path = c.path.map(function (p) { return { lat: p.lat, lng: p.lon }; });
+      if (path.length < 2) return;
+      want["curb:" + c.key] = { kind: "line", path: path,
+        strokeColor: gmapsCssColor(c.stroke), strokeWeight: c.weight || 4.5, strokeOpacity: 1, zIndex: 2 };
+      want["hit:" + c.key] = { kind: "line", path: path,
+        strokeColor: "#000000", strokeWeight: 18, strokeOpacity: 0, zIndex: 3, curbKey: c.key };
+    });
+    ov.dots.forEach(function (d, i) {
+      want["dot:" + i] = { kind: "marker", position: { lat: d.lat, lng: d.lon },
+        icon: gmapsIcon("dot"), label: null, title: "Metered spot" };
+    });
+    if (ov.home) {
+      want["home"] = { kind: "marker", position: { lat: ov.home.lat, lng: ov.home.lon },
+        icon: gmapsIcon("home"), label: ov.home.label, title: ov.home.label || "Home" };
+    }
+    if (ov.car) {
+      want["car"] = { kind: "marker", position: { lat: ov.car.lat, lng: ov.car.lon },
+        icon: gmapsIcon("car"), label: ov.car.parked ? "Your car" : null,
+        title: ov.car.parked ? "Your car" : "Your location" };
+    }
+    Object.keys(_gmapObjs).forEach(function (id) {
+      if (!want[id]) { try { _gmapObjs[id].obj.setMap(null); } catch (e) {} delete _gmapObjs[id]; }
+    });
+    Object.keys(want).forEach(function (id) {
+      var spec = want[id], rec = _gmapObjs[id];
+      if (spec.kind === "line") {
+        if (!rec || rec.kind !== "line") {
+          if (rec) { try { rec.obj.setMap(null); } catch (e) {} }
+          var line = new google.maps.Polyline({ path: spec.path, geodesic: false,
+            clickable: !!spec.curbKey, strokeColor: spec.strokeColor,
+            strokeOpacity: spec.strokeOpacity, strokeWeight: spec.strokeWeight,
+            zIndex: spec.zIndex, map: _gmap });
+          if (spec.curbKey) {
+            (function (key) { line.addListener("click", function () { mapSelectCurb(key); }); })(spec.curbKey);
+          }
+          _gmapObjs[id] = { kind: "line", obj: line };
+        } else {
+          try { rec.obj.setPath(spec.path);
+            rec.obj.setOptions({ strokeColor: spec.strokeColor, strokeOpacity: spec.strokeOpacity,
+              strokeWeight: spec.strokeWeight, zIndex: spec.zIndex }); } catch (e) {}
+        }
+      } else {
+        var label = spec.label ? { text: spec.label, color: "#1a1a1a", fontWeight: "bold", fontSize: "11px" } : null;
+        if (!rec || rec.kind !== "marker") {
+          if (rec) { try { rec.obj.setMap(null); } catch (e) {} }
+          var mk = new google.maps.Marker({ position: spec.position, map: _gmap,
+            icon: spec.icon, label: label, title: spec.title || "", clickable: false });
+          _gmapObjs[id] = { kind: "marker", obj: mk };
+        } else {
+          try { rec.obj.setPosition(spec.position); rec.obj.setIcon(spec.icon);
+            rec.obj.setLabel(label); rec.obj.setTitle(spec.title || ""); } catch (e) {}
+        }
+      }
+    });
+  } catch (e) { /* an overlay fault must never break the map */ }
+}
+/* The Google map is the home screen: always open, no toggle, no collapsed
    row. setMapOpen / mapOpen stay as no-op compatibility shims (callers
    such as whereShowOnMap still call setMapOpen(true)) — the map cannot
    be closed. */
@@ -7988,313 +8037,32 @@ function mapToggleLayer(name) {
    curb colors, layers, paid spots, selected curb, geometry) — the 30 s
    hero tick and the expand/collapse toggle must never wipe an open detail
    card. */
-/* Live pinch scale (Nov 19 map fix): between integer zooms the tile
-   layer is scaled by CSS transform about the pinch midpoint, so a pinch
-   zooms smoothly instead of snapping 2x at each integer step. The view
-   zoom stays integer (tiles fetch at that z); the transform carries the
-   fractional remainder 2^(nzFrac - zoom), which is continuous across
-   the commit threshold (at nzFrac = zoom+0.5 the z+1 tiles at scale
-   2^-0.5 render exactly where the z tiles at 2^+0.5 were). Cleared on
-   release, when the final integer zoom is committed, and by any render
-   outside a live pinch (see renderMap). The scale goes on the tile
-   imgs + the overlay svg ONLY — the hint pill, controls and
-   attribution live inside #osmMap too and must not grow with the pinch
-   (the pill even carries its own translateX(-50%) transform, which a
-   scale here would clobber). Rotation lives on the inner .osmrotate
-   wrapper, so these scales compose with the bearing. Real DOM only in
-   effect; in the Node suites el("osmMap") is a stub with no
-   querySelector, so the whole-map fallback runs there instead (which
-   is what the pinch test observes). Never throws. */
-function osmApplyPinchScale(px, py, scale) {
-  var m = null;
-  try { m = el("osmMap"); } catch (e) { m = null; }
-  if (!m || !m.style) return;
-  if (!isFinite(scale) || scale <= 0) scale = 1;
-  var tf = (scale === 1) ? "" : "scale(" + scale.toFixed(4) + ")";
-  try {
-    if (typeof m.querySelectorAll === "function" && typeof m.querySelector === "function") {
-      var svg = m.querySelector(".osmsvg");
-      if (svg && svg.style) {
-        svg.style.transformOrigin = px.toFixed(1) + "px " + py.toFixed(1) + "px";
-        svg.style.transform = tf;
-      }
-      var imgs = m.querySelectorAll(".osmtile");
-      for (var i = 0; i < imgs.length; i++) {
-        var im = imgs[i];
-        if (!im || !im.style) continue;
-        /* Each tile scales about the pinch midpoint in its own frame.
-           A tile's scale depends on its own zoom: the live scale is
-           2^(nzFrac - zoom), so a kept old-layer tile (z = zoom-1 after
-           a zoom-in commit) scales twice as much and stays registered
-           with the new layer instead of shrinking to half size. */
-        var iz = osmView().zoom;
-        try {
-          var zv = im.getAttribute ? im.getAttribute("data-osm-z") : null;
-          if (zv !== null && zv !== "" && isFinite(parseInt(zv, 10))) iz = parseInt(zv, 10);
-        } catch (e) { /* keep the view zoom */ }
-        var sc = scale * Math.pow(2, osmView().zoom - iz);
-        var tfi = (sc === 1) ? "" : "scale(" + sc.toFixed(4) + ")";
-        var left = parseFloat(im.style.left) || 0;
-        var top = parseFloat(im.style.top) || 0;
-        im.style.transformOrigin = (px - left).toFixed(1) + "px " + (py - top).toFixed(1) + "px";
-        im.style.transform = tfi;
-      }
-      if (m.style.transform) m.style.transform = "";
-      return;
-    }
-    m.style.transformOrigin = px.toFixed(1) + "px " + py.toFixed(1) + "px";
-    m.style.transform = tf;
-  } catch (e) { /* a style fault must never break the gesture */ }
-}
-var _mapChromeHtml = null; /* the mapBody chrome (pill + controls + attribution + notes) HTML of the last incremental paint — the chrome is only re-created when this changes */
-/* Incremental map paint (Nov 19 map fix): the old renderMap destroyed
-   and recreated every tile img node on EVERY pointermove —
-   the sig's lat/lon moves every move — forcing a re-decode/repaint of
-   every tile each frame, which is the map jumping/blinking in the
-   video (plus the pill div<->button swap and the overlay SVG rebuild
-   on top). This keeps the tile img nodes across paints: a tile whose
-   z/x/y is still in view only moves (style left/top); new tiles are
-   created once; tiles that scrolled out are dropped. The overlay SVG
-   is one vector repaint (outerHTML swap, no image decode), and the
-   chrome inside #osmMap is only touched when its HTML changed — during
-   a drag the frozen pill keeps it identical, so the pill node is never
-   touched mid-drag. A bearing 0<->non-zero transition moves the live
-   tiles + overlay into (or out of) the rotation wrapper instead of
-   rebuilding them. Returns true when it painted, false to fall back
-   to the wholesale innerHTML rebuild (first paint, any fault). Real DOM only: the Node suites' stub
-   elements have no querySelector, so they always take the fallback
-   and every suite assertion about mapBody.innerHTML is unchanged.
-   Never throws — any fault returns false and the caller rebuilds. */
-function renderMapIncremental(body, html) {
-  try {
-    if (!body || typeof body.querySelector !== "function"
-        || typeof document === "undefined" || !document.createElement) return false;
-    var mapEl = body.querySelector("#osmMap");
-    if (!mapEl) return false;
-    var tmp = document.createElement("div");
-    /* Parse without the tile imgs: a detached parsed img still fetches
-       its src, so parsing the full HTML here would re-fetch every tile
-       on every move — the waste this function exists to remove. The
-       tile list comes from osmTilesForView below, never from tmp. */
-    tmp.innerHTML = html.replace(/<img\b[^>]*>/g, "");
-    var newMap = tmp.querySelector("#osmMap");
-    if (!newMap) return false;
-    /* Rotation wrapper must match: a bearing 0<->non-zero transition
-       changes the frame (diagonal square). The tiles + overlay move into
-       (or out of) the wrapper instead of rebuilding: a twist from
-       north-up mid-pinch used to destroy every tile img node here (one
-       wholesale innerHTML rebuild at gesture start — the pinch slip).
-       Moving nodes never re-fetches a tile. Any fault still falls back
-       to the wholesale rebuild. */
-    var oldRot = mapEl.querySelector(".osmrotate");
-    var newRot = newMap.querySelector(".osmrotate");
-    if (!!oldRot !== !!newRot) {
-      try {
-        if (newRot && !oldRot) {
-          var wrap = document.createElement("div");
-          wrap.className = "osmrotate";
-          if (newRot.getAttribute) wrap.setAttribute("style", newRot.getAttribute("style") || "");
-          var firstTile = mapEl.querySelector(".osmtile");
-          mapEl.insertBefore(wrap, firstTile || mapEl.querySelector(".osmsvg"));
-          var movers = mapEl.querySelectorAll(".osmtile");
-          for (var mi = 0; mi < movers.length; mi++) wrap.appendChild(movers[mi]);
-          wrap.appendChild(mapEl.querySelector(".osmsvg"));
-          oldRot = wrap;
-        } else if (oldRot && !newRot) {
-          var kids = [];
-          for (var ki = 0; ki < oldRot.childNodes.length; ki++) kids.push(oldRot.childNodes[ki]);
-          for (var kj = 0; kj < kids.length; kj++) mapEl.insertBefore(kids[kj], oldRot);
-          mapEl.removeChild(oldRot);
-          oldRot = null;
-        }
-      } catch (e) { return false; }
-    }
-    if (oldRot && newRot) {
-      /* Only the angle changes with the bearing (the frame size is the
-         container diagonal, constant per size); copy angle + frame size
-         so a twist repaints without rebuilding the tiles. */
-      oldRot.style.transform = newRot.style.transform;
-      oldRot.style.width = newRot.style.width;
-      oldRot.style.height = newRot.style.height;
-    }
-    var oldSvg = mapEl.querySelector(".osmsvg");
-    if (!oldSvg || !oldSvg.parentNode) return false;
-    var newSvg = newMap.querySelector(".osmsvg");
-    if (!newSvg) return false;
-    /* Tiles for this view (same frame mapSvgHtml used: the diagonal
-       square when rotated, the container when north-up). */
-    var view = osmView(), size = osmMapSize();
-    var bearing = osmNormBearing(view.bearing || 0);
-    var fsize = size;
-    if (bearing) {
-      var diag = Math.ceil(Math.sqrt(size.w * size.w + size.h * size.h));
-      fsize = { w: diag, h: diag };
-    }
-    var tiles = osmTilesForView(view.lat, view.lon, view.zoom, fsize.w, fsize.h);
-    var oldImgs = mapEl.querySelectorAll(".osmtile");
-    var bySrc = {};
-    var i, s0;
-    for (i = 0; i < oldImgs.length; i++) {
-      s0 = null;
-      try { s0 = oldImgs[i].getAttribute ? oldImgs[i].getAttribute("src") : oldImgs[i].src; } catch (e) { s0 = null; }
-      if (s0) bySrc[s0] = oldImgs[i];
-    }
-    /* Tile zoom level per img (data-osm-z, set at creation and in the
-       wholesale emission): the crossfade below reads it, and the live
-       pinch scale scales each layer by its own z. */
-    function osmTileZ(img) {
-      var z = -1;
-      try {
-        var v = img.getAttribute ? img.getAttribute("data-osm-z") : null;
-        if (v !== null && v !== "") z = parseInt(v, 10);
-      } catch (e) { z = -1; }
-      if (!isFinite(z) || z < 0) {
-        try {
-          var m = /\/(\d+)\/\d+\/\d+\.png$/.exec(img.getAttribute ? (img.getAttribute("src") || "") : (img.src || ""));
-          if (m) z = parseInt(m[1], 10);
-        } catch (e2) { z = -1; }
-      }
-      return (isFinite(z) && z >= 0) ? z : -1;
-    }
-    var tileParent = oldSvg.parentNode;
-    var seen = {};
-    function syncTileList(list, under) {
-      var createdAny = false;
-      list.forEach(function (t) {
-        var img = bySrc[t.url];
-        if (img) {
-          img.style.left = t.left.toFixed(0) + "px";
-          img.style.top = t.top.toFixed(0) + "px";
-        } else {
-          createdAny = true;
-          img = document.createElement("img");
-          img.className = "osmtile";
-          img.setAttribute("src", t.url);
-          img.setAttribute("data-osm-z", String(t.z));
-          img.setAttribute("alt", "");
-          img.setAttribute("draggable", "false");
-          img.style.left = t.left.toFixed(0) + "px";
-          img.style.top = t.top.toFixed(0) + "px";
-          /* Before the overlay SVG, never after it: tiles are opaque, so
-             an appended-after tile would paint over the curb overlay.
-             The old layer (under=true) goes under the new layer: before
-             the first tile, so a loaded new tile is never hidden by the
-             blurrier cover beneath it. */
-          tileParent.insertBefore(img, under ? (tileParent.querySelector(".osmtile") || oldSvg) : oldSvg);
-        }
-        seen[t.url] = true;
-      });
-      return createdAny;
-    }
-    var createdNewLayer = syncTileList(tiles);
-    /* Pinch-zoom crossfade: an integer zoom commit used to destroy every
-       tile img node and create the new zoom's set in the same paint — the
-       new tiles then re-fetched from the network while the gesture ran,
-       which is the map going blank / slipping at each integer step. While
-       a pinch is live, the previous zoom's layer stays in the DOM under
-       the new one (positioned for the current centre at its own z, scaled
-       by the live pinch scale for its z) until every new tile has loaded
-       — the old layer covers the frame while the new one arrives, so no
-       move event ever shows a blank tile. Only the previous layer closest
-       to the new zoom is kept (a fast fling can cross two levels before
-       the first new set loads; the older layer is redundant cover). A
-       render outside a pinch, or a finished new layer, drops the old one
-       via the unseen-removal below; the release path drops it explicitly
-       (osmDropOldTiles) so no stale layer survives the gesture. */
-    var pinchLive = !!(_osmDrag && _osmDrag.pinch);
-    var oldZ = -1;
-    if (pinchLive) {
-      for (i = 0; i < oldImgs.length; i++) {
-        var iz = osmTileZ(oldImgs[i]);
-        if (iz >= 0 && iz !== view.zoom && (oldZ < 0 || Math.abs(iz - view.zoom) < Math.abs(oldZ - view.zoom))) oldZ = iz;
-      }
-    }
-    if (oldZ >= 0) {
-      var newLoaded = true;
-      for (i = 0; i < oldImgs.length; i++) {
-        /* The new layer is the current-z imgs already synced above; a
-           tile counts as loaded only when decoded (complete + width).
-           Freshly created imgs are incomplete here, so the old layer is
-           kept for at least one more move. */
-        if (osmTileZ(oldImgs[i]) === view.zoom) {
-          var nim = oldImgs[i];
-          if (!nim.complete || !nim.naturalWidth) { newLoaded = false; break; }
-        }
-      }
-      /* New tiles created in THIS paint are not in oldImgs (they were
-         created after the snapshot) — they are incomplete by definition,
-         so the old layer stays until a later paint sees them loaded.
-         Only the NEW layer's creations count here: an old-layer edge tile
-         arriving mid-gesture says nothing about the new layer. */
-      if (!newLoaded || createdNewLayer) {
-        syncTileList(osmTilesForView(view.lat, view.lon, oldZ, fsize.w, fsize.h), true);
-      } else { oldZ = -1; /* new layer loaded: the unseen-removal drops the old one */ }
-    }
-    for (i = 0; i < oldImgs.length; i++) {
-      s0 = null;
-      try { s0 = oldImgs[i].getAttribute ? oldImgs[i].getAttribute("src") : oldImgs[i].src; } catch (e) { s0 = null; }
-      if (s0 && !seen[s0] && oldImgs[i].parentNode) oldImgs[i].parentNode.removeChild(oldImgs[i]);
-    }
-    /* Overlay SVG: one vector repaint, no image decode. */
-    oldSvg.outerHTML = newSvg.outerHTML;
-    /* Chrome INSIDE #osmMap (pill + controls + attribution + notes —
-       they are direct children of #osmMap, after the tiles + overlay):
-       replace only when its HTML changed. */
-    var curChrome = chromeHtmlOf(newMap);
-    if (curChrome !== _mapChromeHtml) {
-      var liveKids = [], newKids = [], k, kc;
-      for (i = 0; i < mapEl.childNodes.length; i++) liveKids.push(mapEl.childNodes[i]);
-      for (i = 0; i < newMap.childNodes.length; i++) newKids.push(newMap.childNodes[i]);
-      liveKids.forEach(function (kid) {
-        if (!isChromeNode(kid)) return;
-        if (kid.parentNode) kid.parentNode.removeChild(kid);
-      });
-      newKids.forEach(function (kid) {
-        if (!isChromeNode(kid)) return;
-        mapEl.appendChild(kid);
-      });
-      _mapChromeHtml = curChrome;
-    }
-    return true;
-  } catch (e) { return false; }
-}
-/* A #osmMap child is chrome (pill / controls / attribution / notes)
-   when it is neither a tile img, nor the overlay svg, nor the rotation
-   wrapper — the three paint layers renderMapIncremental syncs
-   separately. */
-function isChromeNode(kid) {
-  if (!kid || !kid.getAttribute) return false;
-  var cls = "";
-  try { cls = kid.getAttribute("class") || ""; } catch (e) { cls = ""; }
-  if (cls.indexOf("osmtile") >= 0 || cls.indexOf("osmsvg") >= 0 || cls.indexOf("osmrotate") >= 0) return false;
-  return true;
-}
-function chromeHtmlOf(mapNode) {
-  var out = "";
-  var kids = mapNode.childNodes || [];
-  for (var i = 0; i < kids.length; i++) {
-    if (!isChromeNode(kids[i])) continue;
-    out += kids[i].outerHTML || kids[i].textContent || "";
-  }
-  return out;
-}
 function renderMap(nowMs) {
   var card = el("mapCard");
   if (!card) return;
   var body = el("mapBody");
   if (!body) return;
   /* GPS-first first paint: while the boot fix is outstanding the map area
-     shows a loading line, not tiles for the wrong place and not a blank
-     frame — the first tile paint centres on the fix (or on home once the
+     shows a loading line, not a map for the wrong place and not a blank
+     frame — the first paint centres on the fix (or on home once the
      wait ends). The map signature is set to a hold sentinel, so the
      paint after the hold always re-renders: without it, a home fallback
      would compute the same signature as the pre-hold paint and the
      loading line would stick. */
   if (_bootMapHeld) {
-    body.innerHTML = '<div class="note" style="padding:12px 0">Finding your location…</div>';
+    var holdHtml = '<div class="note" style="padding:12px 0">Finding your location…</div>';
+    setMapChrome(holdHtml);
+    _mapChromeHtml = holdHtml; /* record what was written: without this the
+      paint after the hold would compare against the pre-hold chrome and
+      skip the rewrite, leaving the loading line stuck */
     _mapSig = "gpsfirst-hold";
     return;
   }
+  /* The Google map is created once, on the first render after the API
+     loads; before that (no key yet, script still loading) the div stays
+     empty and the chrome carries the note. Creating it here — not in
+     init — keeps the Node suites (no google object) on the pure path. */
+  if (!_gmap) gmapsEnsureMap();
   nowMs = nowMs || Date.now();
   var geom = mapGeometry();
   var colors = mapCurbColors(nowMs, geom);
@@ -8308,7 +8076,7 @@ function renderMap(nowMs) {
   var jSig = jn ? ("j:" + (jn.sameStreet ? jn.sameStreet.status : "-") + "/" + (jn.crossStreet ? jn.crossStreet.status : "-")) : "j:-";
   var staleSig = (liveMode() && LIVE.cacheStale) ? ("stale:" + LIVE.cacheStale.savedAt) : "fresh";
   var _osmV = osmView(), _osmSize = osmMapSize();
-  /* The car glyph rides in the overlay (pin, else the live GPS fix): its
+  /* The car marker rides in the overlay (pin, else the live GPS fix): its
      position is part of what the map shows, so it joins the signature —
      otherwise a moved fix would never repaint the map. */
   var _carPin = null;
@@ -8317,8 +8085,7 @@ function renderMap(nowMs) {
   var fixSig = (typeof lastFix !== "undefined" && lastFix && typeof lastFix.lat === "number" && typeof lastFix.lon === "number")
     ? ("fix:" + lastFix.lat.toFixed(5) + "," + lastFix.lon.toFixed(5)) : "fix:-";
   var sig = (liveMode() ? "live:" + (LIVE.streetSlug || "") : "baked:" + currentSlug())
-    + "|osm:" + _osmV.lat.toFixed(5) + "," + _osmV.lon.toFixed(5) + "," + _osmV.zoom
-    + "," + (_osmV.bearing || 0)
+    + "|gmap:" + _osmV.lat.toFixed(5) + "," + _osmV.lon.toFixed(5) + "," + _osmV.zoom
     + "," + _osmSize.w + "x" + _osmSize.h
     + "|" + JSON.stringify(colors) + "|" + (MAP_LAYERS.paid ? "P" : "p") + (MAP_LAYERS.cleaning ? "C" : "c")
     + "|" + paidSig + "|" + (_mapSelected || "-") + "|" + jSig + "|" + staleSig + "|"
@@ -8326,27 +8093,35 @@ function renderMap(nowMs) {
     + "|area:" + osmAreaSig(nowMs)
     + "|pill:" + osmPillState()
     + "|" + pinSig + "|" + fixSig;
-  if (sig === _mapSig) return;
-  _mapSig = sig;
-  /* The pill state rides in the signature (Nov 19 map fix): without it
-     a prefetch settling loading->failed with an empty area changed
-     nothing in the sig, so the settle handler's renderMap was a no-op
-     and the pill only ever flipped on the next pan's render — mid-drag,
-     which is the blink in the video. With it, the settle repaint
-     happens once, at settle time (idle — no drag running). During a
-     drag the frozen pill keeps this part constant, so a settle cannot
-     repaint mid-drag either. */
-  var html = mapBodyHtml(nowMs, geom, colors);
-  if (!renderMapIncremental(body, html)) {
-    body.innerHTML = html;
-    _mapChromeHtml = null; /* chrome unknown after a wholesale rebuild — the next incremental paint re-syncs it once */
+  var chrome = mapChromeHtml(nowMs, geom, colors);
+  var notes = mapNotesHtml(nowMs, geom, colors);
+  var changed = (sig !== _mapSig) || (chrome !== _mapChromeHtml) || (notes !== _mapNotesHtml);
+  if (changed) {
+    _mapSig = sig;
+    /* The descriptors are the overlay, in pure form: rebuild them when
+       anything they show changed, and put them on the map when there
+       is one. Without a map (Node suites, no key yet) they are still
+       stored, so the tests read exactly what the map would show. */
+    var ov = mapOverlays(nowMs, geom, colors);
+    _gmapDescriptors = ov;
+    /* Keep the map labelled for assistive tech, as the old SVG's
+       aria-label did. */
+    try { var gd = el("gmapDiv"); if (gd && gd.setAttribute) gd.setAttribute("aria-label", "Map of " + ov.streetName); } catch (e) {}
+    if (_gmap) { gmapsSyncOverlays(ov); _gmapOvSig = sig; }
+    if (chrome !== _mapChromeHtml) { _mapChromeHtml = chrome; setMapChrome(chrome); }
+    if (notes !== _mapNotesHtml) { _mapNotesHtml = notes; setMapNotes(notes); }
+  } else if (_gmap && _gmapOvSig !== sig) {
+    /* The map was created after the last overlay sync (the API just
+       loaded): the descriptors are unchanged, but they were never put
+       on the map — sync them now, without rebuilding anything. */
+    gmapsSyncOverlays(_gmapDescriptors);
+    _gmapOvSig = sig;
   }
-  /* A live pinch scale (osmApplyPinchScale) belongs to the gesture, not
-     the paint: any render outside a live pinch clears it, so a
-     re-centre / wheel zoom / settle repaint never leaves a stale scale
-     on the freshly painted tiles. During a pinch the move handler
-     re-applies it after the flush render. */
-  if (!_osmDrag || !_osmDrag.pinch) osmApplyPinchScale(0, 0, 1);
+  /* A programmatic re-centre / zoom pushes the view to the map; a map
+     gesture already moved the view model itself (gmapsOnMapMove), so
+     this is a no-op for those. */
+  if (_gmap) gmapsSyncView();
+  if (!changed) return;
   /* An area curb that fell out of the visible area (the user panned away
      or zoomed out) leaves no sheet behind: a selected area key that is
      no longer drawn is cleared and its sheet closed, instead of showing
@@ -9191,200 +8966,20 @@ function destSetState(s) { DEST = s; }
 
 /* ---- OSM pan / zoom handlers (browser only; the pure math above is
    what the suites drive) ---- */
-var _osmPointers = {}; /* pointerId -> { x, y } in client px */
-var _osmDrag = null; /* { moved, lastX, lastY, pinch } while a gesture runs */
-var _osmSuppressClick = false;
-var _osmRenderHold = 0; /* while >0, osmSetView/osmSetBearing update the view without painting — the pinch branch holds it across bearing+zoom+pan so one move event paints once, not three */
-var _osmDragPill = null; /* the area-pill state frozen at drag start (see osmPillState) — renders during the drag keep it, so a prefetch settling mid-drag cannot flip the pill under the user's finger */
+/* True when the event started inside the map (the Google map div or its
+   chrome): a map drag is not a screen swipe (see the document-level
+   touchstart / mousedown guards). The old version walked up to #osmMap;
+   the Google map lives in #gmapDiv inside #mapBody now. */
 function osmEventInMap(e) {
   var t = e && e.target;
   while (t) {
-    if (t.id === "osmMap" || t.id === "mapBody") return true;
+    if (t.id === "gmapDiv" || t.id === "mapBody" || t.id === "mapChrome") return true;
     t = t.parentNode;
   }
   return false;
-}
-function osmMapRect() {
-  var m = el("osmMap");
-  if (m && m.getBoundingClientRect) {
-    var r = m.getBoundingClientRect();
-    return { left: r.left, top: r.top };
-  }
-  return { left: 0, top: 0 };
-}
-/* Screen angle (degrees, y-down so positive = clockwise) from the map
-   centre to the cursor — the mouse rotation path (Shift+drag). */
-function osmCursorAngle(e) {
-  var r = osmMapRect(), size = osmMapSize();
-  return Math.atan2(e.clientY - (r.top + size.h / 2), e.clientX - (r.left + size.w / 2)) * 180 / Math.PI;
-}
-/* True when the pointer went down on (or inside) a map control button.
-   The three right-side buttons (North / Info / GPS-centre) and the
-   area-retry pill are the ONLY buttons mapBodyHtml emits, so "inside a
-   <button>" is the whole test — no attribute list to keep in sync.
-   Curb taps are NOT in this list — a <path data-map-side> is not a
-   button — so their pointerdown still captures and drags exactly as
-   before. */
-function osmEventOnMapControl(e) {
-  var t = e && e.target;
-  while (t) {
-    if (t.tagName === "BUTTON") return true;
-    t = t.parentNode;
-  }
-  return false;
-}
-/* Drop any kept old-zoom tile layer (see renderMapIncremental's pinch
-   crossfade): called when the gesture ends, so no stale layer survives
-   with its pinch scale cleared. Never throws. */
-function osmDropOldTiles() {
-  try {
-    var m = el("osmMap");
-    if (!m || typeof m.querySelectorAll !== "function") return;
-    var z = osmView().zoom;
-    var imgs = m.querySelectorAll(".osmtile");
-    for (var i = 0; i < imgs.length; i++) {
-      var im = imgs[i];
-      if (!im || !im.getAttribute) continue;
-      var v = im.getAttribute("data-osm-z");
-      if (v !== null && v !== "" && isFinite(parseInt(v, 10)) && parseInt(v, 10) !== z && im.parentNode) {
-        im.parentNode.removeChild(im);
-      }
-    }
-  } catch (e) { /* a stale layer must never break the gesture */ }
-}
-function osmOnPointerDown(e) {
-  if (!osmEventInMap(e) || typeof e.pointerId === "undefined") return;
-  /* A control tap is a click, never a drag: no drag start, and above
-     all NO pointer capture. Capture retargets the pointerup to
-     mapBody, so a mouse click's target becomes mapBody — the nearest
-     common ancestor of the button and mapBody — and the delegated
-     click handler never matches the button's data-map-* attribute:
-     the three buttons were dead on PC mouse for exactly this reason
-     (a touch click still hit-tests the button, which is why the phone
-     worked). Returning here leaves the native click alone, so its
-     target stays the button and the delegation fires. */
-  if (osmEventOnMapControl(e)) return;
-  var body = el("mapBody");
-  try { if (body && body.setPointerCapture) body.setPointerCapture(e.pointerId); } catch (err) { /* drag works without capture while the finger stays on the map */ }
-  _osmPointers[e.pointerId] = { x: e.clientX, y: e.clientY };
-  var ids = Object.keys(_osmPointers);
-  if (ids.length === 2) {
-    var a = _osmPointers[ids[0]], b = _osmPointers[ids[1]];
-    _osmDrag = { moved: 0, pinch: { d0: Math.hypot(a.x - b.x, a.y - b.y),
-      midX: (a.x + b.x) / 2, midY: (a.y + b.y) / 2, zoom0: osmView().zoom,
-      /* Two-finger rotate: the twist is measured from the angle the two
-         fingers start at, against the bearing at that moment — so the map
-         follows the twist absolutely, with no drift from mid-gesture moves. */
-      a0: osmAngleDeg(a.x, a.y, b.x, b.y), bearing0: osmView().bearing || 0 } };
-  } else if (ids.length === 1) {
-    /* Shift+drag (mouse) rotates instead of panning — the desktop path
-       for free rotation. Plain drag still pans. */
-    /* Freeze the area pill for this gesture (see osmPillState): a
-       prefetch settling mid-drag must not flip the pill under the
-       finger. The pinch branch below keeps this value — it never
-       re-captures — so the freeze covers the whole gesture. */
-    try { _osmDragPill = osmAreaState(); } catch (err) { _osmDragPill = null; }
-    _osmDrag = { moved: 0, lastX: e.clientX, lastY: e.clientY, pinch: null,
-      rotate: e.shiftKey ? { lastAngle: osmCursorAngle(e) } : null };
-  }
-}
-function osmOnPointerMove(e) {
-  if (!_osmDrag || !_osmPointers[e.pointerId]) return;
-  var p = _osmPointers[e.pointerId];
-  var dx = e.clientX - p.x, dy = e.clientY - p.y;
-  p.x = e.clientX; p.y = e.clientY;
-  var ids = Object.keys(_osmPointers);
-  if (_osmDrag.pinch && ids.length === 2) {
-    var a = _osmPointers[ids[0]], b = _osmPointers[ids[1]];
-    var d = Math.hypot(a.x - b.x, a.y - b.y);
-    var midX = (a.x + b.x) / 2, midY = (a.y + b.y) / 2;
-    _osmDrag.moved += Math.abs(dx) + Math.abs(dy);
-    var r = osmMapRect();
-    /* One paint per move event (Nov 19 map fix): the old code called
-       osmSetBearing + osmZoomAt + osmPanBy, each rendering the whole
-       map — three full innerHTML rebuilds per move. Hold the renders
-       across the three view updates and paint once. */
-    var nzFrac = _osmDrag.pinch.zoom0 + Math.log(d / _osmDrag.pinch.d0) / Math.log(2);
-    var nz = Math.round(nzFrac);
-    _osmRenderHold++;
-    try {
-      osmSetBearing(_osmDrag.pinch.bearing0 + osmNormDeltaDeg(osmAngleDeg(a.x, a.y, b.x, b.y) - _osmDrag.pinch.a0));
-      /* Smooth pinch zoom: the view zoom stays integer and only commits
-         when the fractional zoom crosses the rounding threshold — the
-         old code fed the fractional nz straight into osmZoomAt, whose
-         Math.round snapped the whole map 2x at each integer step,
-         which is the pinch slip/jump. The fractional remainder rides
-         as a live CSS scale (osmApplyPinchScale), continuous across
-         the commit; the final integer is committed on release. */
-      if (nz !== osmView().zoom) osmZoomAt(midX - r.left, midY - r.top, nz);
-      osmPanBy(midX - _osmDrag.pinch.midX, midY - _osmDrag.pinch.midY);
-    } finally { _osmRenderHold--; }
-    if (!_osmRenderHold) renderMap();
-    _osmDrag.pinch.midX = midX; _osmDrag.pinch.midY = midY;
-    _osmDrag.pinch.nzFrac = nzFrac;
-    osmApplyPinchScale(midX - r.left, midY - r.top, Math.pow(2, nzFrac - osmView().zoom));
-    return;
-  }
-  /* Shift+drag rotates (mouse path); releasing Shift mid-drag drops back
-     to panning, and the stored angle is cleared so re-pressing Shift
-     cannot jump the bearing. */
-  if (_osmDrag.rotate && e.shiftKey) {
-    var ang = osmCursorAngle(e);
-    _osmDrag.moved += Math.abs(dx) + Math.abs(dy);
-    osmRotateBy(osmNormDeltaDeg(ang - _osmDrag.rotate.lastAngle));
-    _osmDrag.rotate.lastAngle = ang;
-    return;
-  }
-  _osmDrag.rotate = null;
-  _osmDrag.moved += Math.abs(dx) + Math.abs(dy);
-  osmPanBy(dx, dy);
-}
-function osmOnPointerUp(e) {
-  if (typeof e.pointerId !== "undefined") delete _osmPointers[e.pointerId];
-  if (!Object.keys(_osmPointers).length) {
-    var hadDrag = !!_osmDrag;
-    /* Pinch release: commit the final integer zoom (the live scale
-       carried the fractional part during the gesture), then drop the
-       scale so the committed paint is the only transform. */
-    if (_osmDrag && _osmDrag.pinch && typeof _osmDrag.pinch.nzFrac === "number"
-        && isFinite(_osmDrag.pinch.nzFrac)) {
-      var fz = Math.round(_osmDrag.pinch.nzFrac);
-      if (fz !== osmView().zoom) {
-        var upR = osmMapRect();
-        osmZoomAt(_osmDrag.pinch.midX - upR.left, _osmDrag.pinch.midY - upR.top, fz);
-      }
-    }
-    osmApplyPinchScale(0, 0, 1);
-    if (_osmDrag && _osmDrag.moved > 6) {
-      _osmSuppressClick = true;
-      setTimeout(function () { _osmSuppressClick = false; }, 100);
-      osmAreaScheduleRefresh(); /* the pan ended -- the coloured area follows the new centre, fetched once, debounced */
-    }
-    _osmDrag = null;
-    _osmDragPill = null; /* lift the pill freeze before refreshing it, so it reads the live state */
-    osmDropOldTiles(); /* the pinch crossfade's kept old-zoom layer goes now — its scale is cleared above, so it would sit mis-sized if it survived */
-    /* The pill was frozen for the whole gesture: refresh just that
-       node now (not a full render — the curb/button the user tapped
-       must keep its node for the click that follows this pointerup). */
-    if (hadDrag) osmRefreshPill();
-  }
-}
-function osmOnWheel(e) {
-  if (!osmEventInMap(e)) return;
-  if (e.preventDefault) e.preventDefault();
-  var r = osmMapRect();
-  osmZoomAt(e.clientX - r.left, e.clientY - r.top, osmView().zoom + (e.deltaY < 0 ? 1 : -1));
-  osmAreaScheduleRefresh();
-}
-function osmOnDblClick(e) {
-  if (!osmEventInMap(e)) return;
-  var r = osmMapRect();
-  osmZoomAt(e.clientX - r.left, e.clientY - r.top, osmView().zoom + 1);
-  osmAreaScheduleRefresh();
 }
 
-/* Test hook (also handy in the console): pure date/.ics logic. */
-if (typeof window !== "undefined") {
+/* Test hook (also handy in the console): pure date/.ics logic. */if (typeof window !== "undefined") {
   window.__ticketSaver = { nextWindow: nextWindow, buildIcs: buildIcs,
     fmtCountdown: fmtCountdown, fmtCountdownShort: fmtCountdownShort,
     fmtDateShortToronto: fmtDateShortToronto, fmtTimeRangeShort: fmtTimeRangeShort,
@@ -9490,15 +9085,16 @@ if (typeof window !== "undefined") {
     mapSideCtSigns: mapSideCtSigns, mapHomeSideKey: mapHomeSideKey,
     mapCurbColor: mapCurbColor, mapCurbColors: mapCurbColors, mapColorStroke: mapColorStroke,
     mapDetailForSide: mapDetailForSide, mapDetailHtml: mapDetailHtml,
-    mapSvgHtml: mapSvgHtml, mapBodyHtml: mapBodyHtml, renderMap: renderMap,
-    osmTileUrl: osmTileUrl, osmLatLngToWorld: osmLatLngToWorld, osmWorldToLatLng: osmWorldToLatLng,
-    osmTilesForView: osmTilesForView, osmProjectLocal: osmProjectLocal,
+    mapOverlays: mapOverlays, mapChromeHtml: mapChromeHtml, mapNotesHtml: mapNotesHtml, mapBodyHtml: mapBodyHtml, renderMap: renderMap,
+    osmLatLngToWorld: osmLatLngToWorld, osmWorldToLatLng: osmWorldToLatLng,
+    osmProjectLocal: osmProjectLocal, osmLocalToLatLng: osmLocalToLatLng,
     osmRefLatLon: osmRefLatLon, osmHomeLatLon: osmHomeLatLon, osmStreetKey: osmStreetKey, osmDefaultView: osmDefaultView,
     osmView: osmView, osmSetView: osmSetView, osmRecentre: osmRecentre, osmMapSize: osmMapSize,
     osmSetBearing: osmSetBearing, osmRotateBy: osmRotateBy, osmNormBearing: osmNormBearing,
-    osmOnPointerDown: osmOnPointerDown, osmOnPointerMove: osmOnPointerMove, osmOnPointerUp: osmOnPointerUp,
-    osmEventOnMapControl: osmEventOnMapControl, osmPillState: osmPillState, osmAreaPillHtml: osmAreaPillHtml,
-    osmRefreshPill: osmRefreshPill, osmApplyPinchScale: osmApplyPinchScale, osmDropOldTiles: osmDropOldTiles, renderMapIncremental: renderMapIncremental,
+    osmPillState: osmPillState, osmAreaPillHtml: osmAreaPillHtml,
+    gmapsLoad: gmapsLoad, gmapsEnsureMap: gmapsEnsureMap, gmapsSyncOverlays: gmapsSyncOverlays,
+    gmapsSyncView: gmapsSyncView, gmapsCssColor: gmapsCssColor, gmapsOnMapMove: gmapsOnMapMove,
+    gmapsApiReady: gmapsApiReady, mapLastOverlays: function () { return _gmapDescriptors; },
     osmPanBy: osmPanBy, osmZoomAt: osmZoomAt, osmZoomBy: osmZoomBy,
     osmNearbySigns: osmNearbySigns, osmNearbyStreetPts: osmNearbyStreetPts, osmNearbyColor: osmNearbyColor,
     osmAreaEntries: osmAreaEntries, osmAreaEntry: osmAreaEntry, osmAreaSig: osmAreaSig,
@@ -9516,7 +9112,7 @@ if (typeof window !== "undefined") {
     LIVE_AREA_PREFETCH_MIN_MOVE_M: LIVE_AREA_PREFETCH_MIN_MOVE_M,
     LIVE_AREA_PREFETCH_DEBOUNCE_MS: LIVE_AREA_PREFETCH_DEBOUNCE_MS,
     osmEventInMap: osmEventInMap,
-    OSM_TILE_URL: OSM_TILE_URL, OSM_ATTRIBUTION_URL: OSM_ATTRIBUTION_URL,
+    GOOGLE_MAPS_API_KEY: GOOGLE_MAPS_API_KEY, GMAPS_API_URL: GMAPS_API_URL,
     OSM_ZOOM_DEFAULT: OSM_ZOOM_DEFAULT, OSM_ZOOM_MIN: OSM_ZOOM_MIN, OSM_ZOOM_MAX: OSM_ZOOM_MAX,
     OSM_MAP_H: OSM_MAP_H,
     setMapOpen: setMapOpen, mapOpen: mapOpen, mapSelectCurb: mapSelectCurb,
