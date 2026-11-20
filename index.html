@@ -1702,6 +1702,21 @@ function streetHasLimit() {
   if (!lims) return false;
   return Object.keys(lims).some(function (k) { return !!lims[k]; });
 }
+/* The Park timer offers only the durations the current street actually
+   posts, both sides together: a street posting 15 min on one side and
+   2 h on the other shows only those two tiles. Sorted ascending, deduped.
+   A street with no posted limits returns [] — the timer section itself is
+   hidden there anyway, so the caller leaves all four tiles alone. */
+function limitTileMinutes() {
+  var lims = (typeof DATA !== "undefined" && DATA) ? DATA.limits : null;
+  var out = [];
+  if (lims) Object.keys(lims).forEach(function (k) {
+    var m = lims[k] && lims[k].minutes;
+    if (typeof m === "number" && isFinite(m) && out.indexOf(m) < 0) out.push(m);
+  });
+  out.sort(function (a, b) { return a - b; });
+  return out;
+}
 /* ---- resident-permit memory (Phase 3): the vignette the user holds ----
    The sign's permit exception is street data (DATA.limits.<side>.exception
    = "SECTEUR N", same string code as a window exception); the permit the
@@ -2481,8 +2496,12 @@ function renderLimit() {
      side the limit does not bind. */
   var tShown = (t && limRaw) ? t : null;
   var tiles = document.querySelectorAll("#limitTiles .limittile");
+  var allowed = limitTileMinutes();
   for (var i = 0; i < tiles.length; i++) {
     tiles[i].classList.toggle("selected", !!tShown && +tiles[i].getAttribute("data-limit") === tShown.limitMin);
+    /* Only the durations this street posts: a duration with no posted
+       limit hides. No posted limits at all leaves every tile alone. */
+    if (allowed.length) tiles[i].classList.toggle("hidden", allowed.indexOf(+tiles[i].getAttribute("data-limit")) < 0);
   }
   el("limitToggleText").textContent = limEx
     ? "No limit — sector " + sectorOfException(limRaw.exception) + " permit"
@@ -2814,6 +2833,7 @@ function onGpsFix(pos) {
      auto-refresh never sets the flag, so it never yanks the map. */
   if (_gpsCentrePending) { _gpsCentrePending = false; osmSetView(pos.coords.latitude, pos.coords.longitude, osmView().zoom); }
   renderGpsRow();
+  try { renderMap(); } catch (e) { /* a map fault must never swallow the fix — the car glyph follows the fix, so a moved fix repaints */ }
   var swSlug = shouldSwitchStreet(pos.coords.latitude, pos.coords.longitude, pos.coords.accuracy);
   var willSwitch = (typeof liveWillSwitch === "function") ? liveWillSwitch(swSlug) : !!swSlug;
   reverseGeocode(pos.coords.latitude, pos.coords.longitude, function (feature) {
@@ -7724,7 +7744,7 @@ function mapSvgHtml(nowMs, geom, colors) {
     || "this street";
   s += '<div class="osmmap" id="osmMap">' + rotOpen;
   tiles.forEach(function (t) {
-    s += '<img class="osmtile" src="' + t.url + '" alt="" draggable="false" style="left:' + t.left.toFixed(0) + 'px;top:' + t.top.toFixed(0) + 'px">';
+    s += '<img class="osmtile" src="' + t.url + '" data-osm-z="' + t.z + '" alt="" draggable="false" style="left:' + t.left.toFixed(0) + 'px;top:' + t.top.toFixed(0) + 'px">';
   });
   s += '<svg class="osmsvg" width="' + fsize.w + '" height="' + fsize.h + '" viewBox="0 0 ' + fsize.w + ' ' + fsize.h + '" role="img" aria-label="Map of '
     + esc(svgStreet) + ' with parking rules by side">';
@@ -7804,6 +7824,29 @@ function mapSvgHtml(nowMs, geom, colors) {
       + ' Z" fill="#2563eb" stroke="#fff" stroke-width="1.5"/>';
     s += '<text x="' + px.toFixed(1) + '" y="' + (py + 26).toFixed(1)
       + '" font-size="11" font-weight="bold" style="fill:var(--ink)" text-anchor="middle">Your car</text>';
+    /* Tiny car glyph above the pin — the marker itself, small and
+       unobtrusive. No <circle>: the overlay circle count (4 metered dots
+       + home marker) stays exactly as the pin test asserts it. */
+    s += '<text x="' + px.toFixed(1) + '" y="' + (py - 20).toFixed(1)
+      + '" font-size="16" text-anchor="middle" dominant-baseline="central">🚗</text>';
+  } else {
+    /* Not parked: the car sits at the live GPS fix, so the driver sees
+       where the car (phone) is right now. No fix, no glyph — never a
+       guessed position. */
+    var fix = null;
+    try { fix = (typeof lastFix !== "undefined") ? lastFix : null; } catch (e) { fix = null; }
+    if (fix && typeof fix.lat === "number" && typeof fix.lon === "number") {
+      var fp = toXY(fix.lat, fix.lon);
+      var fq = osmProjectLocal(fp[0], fp[1], refLat, refLon, view, fsize);
+      /* Only when the fix is actually in the visible frame: a fix
+         kilometres away would project thousands of pixels off-frame —
+         invisible in the browser (the SVG clips it) but an off-frame
+         label in the markup. */
+      if (fq[0] >= -20 && fq[0] <= fsize.w + 20 && fq[1] >= -20 && fq[1] <= fsize.h + 20) {
+        s += '<text x="' + fq[0].toFixed(1) + '" y="' + fq[1].toFixed(1)
+          + '" font-size="16" text-anchor="middle" dominant-baseline="central">🚗</text>';
+      }
+    }
   }
   s += '</svg>' + rotClose;
   /* Hint pill (top centre) + the three controls (right side, near the
@@ -7979,11 +8022,22 @@ function osmApplyPinchScale(px, py, scale) {
       for (var i = 0; i < imgs.length; i++) {
         var im = imgs[i];
         if (!im || !im.style) continue;
-        /* Each tile scales about the pinch midpoint in its own frame. */
+        /* Each tile scales about the pinch midpoint in its own frame.
+           A tile's scale depends on its own zoom: the live scale is
+           2^(nzFrac - zoom), so a kept old-layer tile (z = zoom-1 after
+           a zoom-in commit) scales twice as much and stays registered
+           with the new layer instead of shrinking to half size. */
+        var iz = osmView().zoom;
+        try {
+          var zv = im.getAttribute ? im.getAttribute("data-osm-z") : null;
+          if (zv !== null && zv !== "" && isFinite(parseInt(zv, 10))) iz = parseInt(zv, 10);
+        } catch (e) { /* keep the view zoom */ }
+        var sc = scale * Math.pow(2, osmView().zoom - iz);
+        var tfi = (sc === 1) ? "" : "scale(" + sc.toFixed(4) + ")";
         var left = parseFloat(im.style.left) || 0;
         var top = parseFloat(im.style.top) || 0;
         im.style.transformOrigin = (px - left).toFixed(1) + "px " + (py - top).toFixed(1) + "px";
-        im.style.transform = tf;
+        im.style.transform = tfi;
       }
       if (m.style.transform) m.style.transform = "";
       return;
@@ -8004,9 +8058,10 @@ var _mapChromeHtml = null; /* the mapBody chrome (pill + controls + attribution 
    is one vector repaint (outerHTML swap, no image decode), and the
    chrome inside #osmMap is only touched when its HTML changed — during
    a drag the frozen pill keeps it identical, so the pill node is never
-   touched mid-drag. Returns true when it painted, false to fall back
-   to the wholesale innerHTML rebuild (first paint, rotation-wrapper
-   state change, any fault). Real DOM only: the Node suites' stub
+   touched mid-drag. A bearing 0<->non-zero transition moves the live
+   tiles + overlay into (or out of) the rotation wrapper instead of
+   rebuilding them. Returns true when it painted, false to fall back
+   to the wholesale innerHTML rebuild (first paint, any fault). Real DOM only: the Node suites' stub
    elements have no querySelector, so they always take the fallback
    and every suite assertion about mapBody.innerHTML is unchanged.
    Never throws — any fault returns false and the caller rebuilds. */
@@ -8025,10 +8080,35 @@ function renderMapIncremental(body, html) {
     var newMap = tmp.querySelector("#osmMap");
     if (!newMap) return false;
     /* Rotation wrapper must match: a bearing 0<->non-zero transition
-       changes the frame (diagonal square), so rebuild wholesale once. */
+       changes the frame (diagonal square). The tiles + overlay move into
+       (or out of) the wrapper instead of rebuilding: a twist from
+       north-up mid-pinch used to destroy every tile img node here (one
+       wholesale innerHTML rebuild at gesture start — the pinch slip).
+       Moving nodes never re-fetches a tile. Any fault still falls back
+       to the wholesale rebuild. */
     var oldRot = mapEl.querySelector(".osmrotate");
     var newRot = newMap.querySelector(".osmrotate");
-    if (!!oldRot !== !!newRot) return false;
+    if (!!oldRot !== !!newRot) {
+      try {
+        if (newRot && !oldRot) {
+          var wrap = document.createElement("div");
+          wrap.className = "osmrotate";
+          if (newRot.getAttribute) wrap.setAttribute("style", newRot.getAttribute("style") || "");
+          var firstTile = mapEl.querySelector(".osmtile");
+          mapEl.insertBefore(wrap, firstTile || mapEl.querySelector(".osmsvg"));
+          var movers = mapEl.querySelectorAll(".osmtile");
+          for (var mi = 0; mi < movers.length; mi++) wrap.appendChild(movers[mi]);
+          wrap.appendChild(mapEl.querySelector(".osmsvg"));
+          oldRot = wrap;
+        } else if (oldRot && !newRot) {
+          var kids = [];
+          for (var ki = 0; ki < oldRot.childNodes.length; ki++) kids.push(oldRot.childNodes[ki]);
+          for (var kj = 0; kj < kids.length; kj++) mapEl.insertBefore(kids[kj], oldRot);
+          mapEl.removeChild(oldRot);
+          oldRot = null;
+        }
+      } catch (e) { return false; }
+    }
     if (oldRot && newRot) {
       /* Only the angle changes with the bearing (the frame size is the
          container diagonal, constant per size); copy angle + frame size
@@ -8059,27 +8139,97 @@ function renderMapIncremental(body, html) {
       try { s0 = oldImgs[i].getAttribute ? oldImgs[i].getAttribute("src") : oldImgs[i].src; } catch (e) { s0 = null; }
       if (s0) bySrc[s0] = oldImgs[i];
     }
+    /* Tile zoom level per img (data-osm-z, set at creation and in the
+       wholesale emission): the crossfade below reads it, and the live
+       pinch scale scales each layer by its own z. */
+    function osmTileZ(img) {
+      var z = -1;
+      try {
+        var v = img.getAttribute ? img.getAttribute("data-osm-z") : null;
+        if (v !== null && v !== "") z = parseInt(v, 10);
+      } catch (e) { z = -1; }
+      if (!isFinite(z) || z < 0) {
+        try {
+          var m = /\/(\d+)\/\d+\/\d+\.png$/.exec(img.getAttribute ? (img.getAttribute("src") || "") : (img.src || ""));
+          if (m) z = parseInt(m[1], 10);
+        } catch (e2) { z = -1; }
+      }
+      return (isFinite(z) && z >= 0) ? z : -1;
+    }
     var tileParent = oldSvg.parentNode;
     var seen = {};
-    tiles.forEach(function (t) {
-      var img = bySrc[t.url];
-      if (img) {
-        img.style.left = t.left.toFixed(0) + "px";
-        img.style.top = t.top.toFixed(0) + "px";
-      } else {
-        img = document.createElement("img");
-        img.className = "osmtile";
-        img.setAttribute("src", t.url);
-        img.setAttribute("alt", "");
-        img.setAttribute("draggable", "false");
-        img.style.left = t.left.toFixed(0) + "px";
-        img.style.top = t.top.toFixed(0) + "px";
-        /* Before the overlay SVG, never after it: tiles are opaque, so
-           an appended-after tile would paint over the curb overlay. */
-        tileParent.insertBefore(img, oldSvg);
+    function syncTileList(list, under) {
+      var createdAny = false;
+      list.forEach(function (t) {
+        var img = bySrc[t.url];
+        if (img) {
+          img.style.left = t.left.toFixed(0) + "px";
+          img.style.top = t.top.toFixed(0) + "px";
+        } else {
+          createdAny = true;
+          img = document.createElement("img");
+          img.className = "osmtile";
+          img.setAttribute("src", t.url);
+          img.setAttribute("data-osm-z", String(t.z));
+          img.setAttribute("alt", "");
+          img.setAttribute("draggable", "false");
+          img.style.left = t.left.toFixed(0) + "px";
+          img.style.top = t.top.toFixed(0) + "px";
+          /* Before the overlay SVG, never after it: tiles are opaque, so
+             an appended-after tile would paint over the curb overlay.
+             The old layer (under=true) goes under the new layer: before
+             the first tile, so a loaded new tile is never hidden by the
+             blurrier cover beneath it. */
+          tileParent.insertBefore(img, under ? (tileParent.querySelector(".osmtile") || oldSvg) : oldSvg);
+        }
+        seen[t.url] = true;
+      });
+      return createdAny;
+    }
+    var createdNewLayer = syncTileList(tiles);
+    /* Pinch-zoom crossfade: an integer zoom commit used to destroy every
+       tile img node and create the new zoom's set in the same paint — the
+       new tiles then re-fetched from the network while the gesture ran,
+       which is the map going blank / slipping at each integer step. While
+       a pinch is live, the previous zoom's layer stays in the DOM under
+       the new one (positioned for the current centre at its own z, scaled
+       by the live pinch scale for its z) until every new tile has loaded
+       — the old layer covers the frame while the new one arrives, so no
+       move event ever shows a blank tile. Only the previous layer closest
+       to the new zoom is kept (a fast fling can cross two levels before
+       the first new set loads; the older layer is redundant cover). A
+       render outside a pinch, or a finished new layer, drops the old one
+       via the unseen-removal below; the release path drops it explicitly
+       (osmDropOldTiles) so no stale layer survives the gesture. */
+    var pinchLive = !!(_osmDrag && _osmDrag.pinch);
+    var oldZ = -1;
+    if (pinchLive) {
+      for (i = 0; i < oldImgs.length; i++) {
+        var iz = osmTileZ(oldImgs[i]);
+        if (iz >= 0 && iz !== view.zoom && (oldZ < 0 || Math.abs(iz - view.zoom) < Math.abs(oldZ - view.zoom))) oldZ = iz;
       }
-      seen[t.url] = true;
-    });
+    }
+    if (oldZ >= 0) {
+      var newLoaded = true;
+      for (i = 0; i < oldImgs.length; i++) {
+        /* The new layer is the current-z imgs already synced above; a
+           tile counts as loaded only when decoded (complete + width).
+           Freshly created imgs are incomplete here, so the old layer is
+           kept for at least one more move. */
+        if (osmTileZ(oldImgs[i]) === view.zoom) {
+          var nim = oldImgs[i];
+          if (!nim.complete || !nim.naturalWidth) { newLoaded = false; break; }
+        }
+      }
+      /* New tiles created in THIS paint are not in oldImgs (they were
+         created after the snapshot) — they are incomplete by definition,
+         so the old layer stays until a later paint sees them loaded.
+         Only the NEW layer's creations count here: an old-layer edge tile
+         arriving mid-gesture says nothing about the new layer. */
+      if (!newLoaded || createdNewLayer) {
+        syncTileList(osmTilesForView(view.lat, view.lon, oldZ, fsize.w, fsize.h), true);
+      } else { oldZ = -1; /* new layer loaded: the unseen-removal drops the old one */ }
+    }
     for (i = 0; i < oldImgs.length; i++) {
       s0 = null;
       try { s0 = oldImgs[i].getAttribute ? oldImgs[i].getAttribute("src") : oldImgs[i].src; } catch (e) { s0 = null; }
@@ -8158,6 +8308,14 @@ function renderMap(nowMs) {
   var jSig = jn ? ("j:" + (jn.sameStreet ? jn.sameStreet.status : "-") + "/" + (jn.crossStreet ? jn.crossStreet.status : "-")) : "j:-";
   var staleSig = (liveMode() && LIVE.cacheStale) ? ("stale:" + LIVE.cacheStale.savedAt) : "fresh";
   var _osmV = osmView(), _osmSize = osmMapSize();
+  /* The car glyph rides in the overlay (pin, else the live GPS fix): its
+     position is part of what the map shows, so it joins the signature —
+     otherwise a moved fix would never repaint the map. */
+  var _carPin = null;
+  try { _carPin = getPin(); } catch (e) { _carPin = null; }
+  var pinSig = _carPin ? ("pin:" + _carPin.lat.toFixed(5) + "," + _carPin.lon.toFixed(5)) : "pin:-";
+  var fixSig = (typeof lastFix !== "undefined" && lastFix && typeof lastFix.lat === "number" && typeof lastFix.lon === "number")
+    ? ("fix:" + lastFix.lat.toFixed(5) + "," + lastFix.lon.toFixed(5)) : "fix:-";
   var sig = (liveMode() ? "live:" + (LIVE.streetSlug || "") : "baked:" + currentSlug())
     + "|osm:" + _osmV.lat.toFixed(5) + "," + _osmV.lon.toFixed(5) + "," + _osmV.zoom
     + "," + (_osmV.bearing || 0)
@@ -8166,7 +8324,8 @@ function renderMap(nowMs) {
     + "|" + paidSig + "|" + (_mapSelected || "-") + "|" + jSig + "|" + staleSig + "|"
     + (geom && geom.ok ? geom.viewBox : "nogeo:" + (geom && geom.reason || "?"))
     + "|area:" + osmAreaSig(nowMs)
-    + "|pill:" + osmPillState();
+    + "|pill:" + osmPillState()
+    + "|" + pinSig + "|" + fixSig;
   if (sig === _mapSig) return;
   _mapSig = sig;
   /* The pill state rides in the signature (Nov 19 map fix): without it
@@ -9074,6 +9233,25 @@ function osmEventOnMapControl(e) {
   }
   return false;
 }
+/* Drop any kept old-zoom tile layer (see renderMapIncremental's pinch
+   crossfade): called when the gesture ends, so no stale layer survives
+   with its pinch scale cleared. Never throws. */
+function osmDropOldTiles() {
+  try {
+    var m = el("osmMap");
+    if (!m || typeof m.querySelectorAll !== "function") return;
+    var z = osmView().zoom;
+    var imgs = m.querySelectorAll(".osmtile");
+    for (var i = 0; i < imgs.length; i++) {
+      var im = imgs[i];
+      if (!im || !im.getAttribute) continue;
+      var v = im.getAttribute("data-osm-z");
+      if (v !== null && v !== "" && isFinite(parseInt(v, 10)) && parseInt(v, 10) !== z && im.parentNode) {
+        im.parentNode.removeChild(im);
+      }
+    }
+  } catch (e) { /* a stale layer must never break the gesture */ }
+}
 function osmOnPointerDown(e) {
   if (!osmEventInMap(e) || typeof e.pointerId === "undefined") return;
   /* A control tap is a click, never a drag: no drag start, and above
@@ -9184,6 +9362,7 @@ function osmOnPointerUp(e) {
     }
     _osmDrag = null;
     _osmDragPill = null; /* lift the pill freeze before refreshing it, so it reads the live state */
+    osmDropOldTiles(); /* the pinch crossfade's kept old-zoom layer goes now — its scale is cleared above, so it would sit mis-sized if it survived */
     /* The pill was frozen for the whole gesture: refresh just that
        node now (not a full render — the curb/button the user tapped
        must keep its node for the click that follows this pointerup). */
@@ -9319,7 +9498,7 @@ if (typeof window !== "undefined") {
     osmSetBearing: osmSetBearing, osmRotateBy: osmRotateBy, osmNormBearing: osmNormBearing,
     osmOnPointerDown: osmOnPointerDown, osmOnPointerMove: osmOnPointerMove, osmOnPointerUp: osmOnPointerUp,
     osmEventOnMapControl: osmEventOnMapControl, osmPillState: osmPillState, osmAreaPillHtml: osmAreaPillHtml,
-    osmRefreshPill: osmRefreshPill, osmApplyPinchScale: osmApplyPinchScale, renderMapIncremental: renderMapIncremental,
+    osmRefreshPill: osmRefreshPill, osmApplyPinchScale: osmApplyPinchScale, osmDropOldTiles: osmDropOldTiles, renderMapIncremental: renderMapIncremental,
     osmPanBy: osmPanBy, osmZoomAt: osmZoomAt, osmZoomBy: osmZoomBy,
     osmNearbySigns: osmNearbySigns, osmNearbyStreetPts: osmNearbyStreetPts, osmNearbyColor: osmNearbyColor,
     osmAreaEntries: osmAreaEntries, osmAreaEntry: osmAreaEntry, osmAreaSig: osmAreaSig,
@@ -9358,7 +9537,7 @@ if (typeof window !== "undefined") {
     whereOpen: whereOpen, whereShowOnMap: whereShowOnMap,
     bindingDeadlineForSide: bindingDeadlineForSide, bindingDeadlineForSideData: bindingDeadlineForSideData,
     heroWarningState: heroWarningState, heroWarningStateForData: heroWarningStateForData,
-    limitForSideKey: limitForSideKey, streetHasLimit: streetHasLimit, anchorLimitStartFor: anchorLimitStartFor,
+    limitForSideKey: limitForSideKey, streetHasLimit: streetHasLimit, limitTileMinutes: limitTileMinutes, anchorLimitStartFor: anchorLimitStartFor,
     limitExpiryMs: limitExpiryMs, limitDeadlineMs: limitDeadlineMs, limitCloseMs: limitCloseMs,
     nextLimitOpenMs: nextLimitOpenMs,
     parkedAtForVerdict: parkedAtForVerdict,
