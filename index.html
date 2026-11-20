@@ -3563,6 +3563,7 @@ var LIVE_BAND_MIN_M = 3, LIVE_BAND_MAX_M = 10;
 var LIVE_PAID_BAND_MIN_M = 1, LIVE_PAID_BAND_MAX_M = 10; /* place centres sit on the road, closer than sign poles */
 var LIVE_INTERSECTION_M = 20, LIVE_CONSENSUS = 1; /* city-data rule (Nov 18): 1 pole establishes — the build still uses >=2 */
 var LIVE_NEAREST_ADDRESS_MAX_M = 100; /* no-house-number fallback (Nov 18): the nearest address on the street is the reference point only if it is this close -- a farther address would put the segment on the wrong block, so beyond this the lookup still reports it cannot tell which side */
+var LIVE_NEAREST_ADDRESS_FALLBACK_M = 250; /* pan fix (Nov 19): the RELAXED fallback for the nearby sweep only — when Photon has no address on the street within 100 m, the nearest real address on the SAME street up to 250 m is still a real reference point (its own block, its own signs), just a block farther along. Cedar's nearest Photon house (#1529) sits at 101.5 m — one metre past the strict cap — so the strict rule dropped a street with real data. The relaxed point is used only when the strict one yields nothing, and the result carries houseFallback so the bake log can say so. Never a cross-street house, never an invented number. */
 var LIVE_CACHE_TTL_MS = 7 * 86400000;
 var LIVE_CACHE_FRESH_MS = 2 * 3600000; /* map fix (Nov 18): a cached lookup
   older than 2 h is STALE, not current — it may still be shown, but only
@@ -3677,6 +3678,7 @@ var LIVE_NEARBY_MAX_STREETS = 8; /* landed cap (Nov 18 cap raise): the sweep sug
 var LIVE_PREFETCH_MAX_STREETS = 12; /* landed cap for the AREA prefetch only (Nov 19 area paint): the visible area on a wide screen holds more streets than the where-to-move list needs -- 12 landed covers a neighbourhood block (ParkUsher's Ducharme view paints ~9) while the 20-entry live.v5 LRU still bounds the total cache; the GPS sweep keeps its own 8 */
 var LIVE_PREFETCH_MAX_TRIES = 20; /* try-cap for the AREA prefetch only (Nov 19 area paint): a candidate that yields nothing consumes a try, never a slot, exactly as in the sweep */
 var LIVE_NEARBY_MAX_TRIES = 15; /* try-cap (Nov 18 cap raise): the sweep never attempts a 16th lookup -- a candidate that yields nothing (no house, no centreline, no signs, a fetch failure) consumes a try, never a suggestion slot, so a neighbourhood where every street yields nothing stays bounded */
+var LIVE_SWEEP_CONCURRENCY = 4; /* pan-speed fix (Nov 19): the sweep/prefetch loop used to run one street at a time — each street is Photon reverse + Geobase + paid CKAN, ~5–15 s of sequential round trips, so 12 streets took minutes and the area prefetch painted nothing until the whole loop finished. Four streets now run at once (bounded: Photon/CKAN are shared public services, and each street still costs the same requests, only overlapped). Slot reservation keeps the caps exact — landed never exceeds maxStreets, tried never exceeds maxTries — and the retry pass keeps its one-retry rule. */
 var LIVE_NEARBY_CACHE_PREFIX = "ticketSaver.nearby.v1."; /* separate cache from the current-street lookup: a nearby result carries no paid data (the where-to-move rows never read it), so it must never be mistaken for a complete current-street entry */
 var LIVE_NEARBY_ENABLED = true; /* the live-repro suite disables the auto-sweep -- its Overpass fixture answers every area query with the des-pins ways, which would be wrong-fix candidates */
 var LIVE_JUNCTION_CLOSE_M = 40; /* junction display (Nov 18, his idea): the user is "close" to a junction when the reference house sits within 40 m of a segment end -- the Pierre-Dupaigne 8534 fix is 36.9 m from the Place Pierre-Dupaigne junction, so 30 m would miss the field case that prompted the idea; 40 m sits just beyond the 20 m junction-exclusion band, and a mid-segment fix (49.5 m from the nearest junction on the same street) stays quiet */
@@ -4819,6 +4821,62 @@ function liveOverpassLookup(streetName, lat, lon) {
       detail: "The street map didn't load, so no windows can be shown. Read the sign where you park." };
   });
 }
+/* Last-resort house point (pan fix, Nov 19): some streets have NO civic
+   address in Photon at all — Avenue Steyning returns zero house-numbered
+   addresses in Photon reverse (limits 20 and 50) and forward search, and
+   the city's own point-address dataset has zero Steyning rows either —
+   so the Photon path can never place a reference point there, even
+   though the street exists in OSM (7 ways) and in Geobase. This asks
+   Overpass (the same endpoints the area query already uses) for OSM
+   address nodes on this street near the anchor: node["addr:street"]
+   + ["addr:housenumber"]. A node is a real OSM address — number +
+   coordinates — never invented. Returns { number, lat, lon, distM } or
+   null (no nodes, or Overpass unreachable). Only the nearby sweep calls
+   it, only after both Photon attempts yield nothing, so the common path
+   pays nothing for it. */
+function liveOverpassAddrPoint(streetName, lat, lon) {
+  if (typeof fetch === "undefined") return Promise.resolve(null);
+  var name = String(streetName).replace(/"/g, "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  var q = '[out:json][timeout:30];node["addr:street"~"' + name + '",i]["addr:housenumber"](around:250,' +
+    lat.toFixed(6) + ',' + lon.toFixed(6) + ');out;';
+  var opts = { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: "data=" + encodeURIComponent(q) };
+  var urls = [LIVE_OVERPASS_URLS[0], LIVE_OVERPASS_URLS[1]];
+  var tries = [2, 1]; /* same rotation as the area query */
+  var chain = Promise.resolve();
+  var best = null, lastErr = null;
+  urls.forEach(function (url, u) {
+    chain = chain.then(function () {
+      if (best) return;
+      return liveFetchWithRetry(url, opts, tries[u], LIVE_OVERPASS_TIMEOUT_MS, false)
+        .then(function (res) { return res.json(); })
+        .then(function (j) {
+          ((j && j.elements) || []).forEach(function (e) {
+            if (e.type !== "node") return;
+            var t = e.tags || {};
+            /* The Overpass regex is a substring match, so a reply can carry
+               a nearer node from a cross street (the stub proves it) — keep
+               only nodes whose addr:street IS this street, same exact-match
+               convention as the way-name check. Never take a cross-street
+               house as this street's anchor. */
+            var tagStreet = liveNorm(t["addr:street"]);
+            var wantStreet = liveNorm(streetName);
+            if (!tagStreet || (tagStreet !== wantStreet
+              && tagStreet.indexOf(wantStreet) < 0 && wantStreet.indexOf(tagStreet) < 0)) return;
+            var n = liveParseHouseNumber(t["addr:housenumber"]);
+            if (n === null) return;
+            if (typeof e.lat !== "number" || typeof e.lon !== "number") return;
+            var d = liveDistM(lat, lon, e.lat, e.lon);
+            if (d > LIVE_NEAREST_ADDRESS_FALLBACK_M) return;
+            if (!best || d < best.distM) best = { number: n, lat: e.lat, lon: e.lon, distM: d };
+          });
+          if (!best) lastErr = new Error("no address nodes");
+        })
+        .catch(function (e) { lastErr = e; });
+    });
+  });
+  return chain.then(function () { return best; }).catch(function () { return null; });
+}
 function liveHousePointViaSearch(number, streetName) {
   var url = LIVE_PHOTON_SEARCH + encodeURIComponent(number + " " + streetName + ", Montreal") + "&limit=5";
   return liveFetchWithRetry(url, {}, 2)
@@ -4854,11 +4912,14 @@ function liveDistM(lat1, lon1, lat2, lon2) {
    guess. Only within LIVE_NEAREST_ADDRESS_MAX_M: a farther address would
    put the segment on the wrong block. The limit is 20, not 10: the
    nearest features can include the road itself and nearby POIs, so 20
-   gives the nearest house room to appear. Returns { number, lat, lon,
-   distM } or null (no house close by, no fetch, or the search failed --
+   gives the nearest house room to appear. maxM overrides the distance
+   cap (pan fix, Nov 19: the nearby sweep retries with
+   LIVE_NEAREST_ADDRESS_FALLBACK_M when the strict cap yields nothing).
+   Returns { number, lat, lon, distM } or null (no house close by, no fetch, or the search failed --
    the caller then keeps the honest error). */
-function liveNearestAddressPoint(streetName, lat, lon) {
+function liveNearestAddressPoint(streetName, lat, lon, maxM) {
   if (typeof fetch === "undefined") return Promise.resolve(null);
+  var maxD = (typeof maxM === "number" && maxM > 0) ? maxM : LIVE_NEAREST_ADDRESS_MAX_M;
   var url = LIVE_PHOTON_REVERSE + lon.toFixed(6) + "&lat=" + lat.toFixed(6) + "&limit=20";
   function norm(v) {
     var s = String(v || "");
@@ -4884,7 +4945,7 @@ function liveNearestAddressPoint(streetName, lat, lon) {
           var d = liveDistM(lat, lon, alat, alon);
           if (d < bestD) { bestD = d; best = { number: n, lat: alat, lon: alon, distM: d }; }
         });
-        if (!best || bestD > LIVE_NEAREST_ADDRESS_MAX_M) return null;
+        if (!best || bestD > maxD) return null;
         return best;
       })
       .catch(function () { return null; });
@@ -5072,10 +5133,14 @@ async function livePaidLookup(fix, result, input, paidAsOf) {
     odd: livePaidUnknown("The paid-parking lookup didn't load \u2014 the city's data was unreachable.") };
   var asOf = paidAsOf ? String(paidAsOf).slice(0, 10) : null;
   try {
+    /* Pan-speed fix (Nov 19): the places query and the expiry-date
+       query are independent — they run at once. A failed expiry query
+       still keeps the package date, exactly as before. */
+    var expP = liveCkanSql(livePaidDateExpSql()).catch(function () { return null; });
     var places = await liveCkanSql(livePaidSql(fix.lat, fix.lon));
     var matched = livePaidMatchPlaces(places, result, input);
     try {
-      var exp = await liveCkanSql(livePaidDateExpSql());
+      var exp = await expP;
       if (exp && exp.length && exp[0].dDate) asOf = exp[0].dDate;
     } catch (e) { /* keep the package date */ }
     if (!matched.even.length && !matched.odd.length) {
@@ -5452,11 +5517,31 @@ function liveNearbyCacheKey(slug, idTrc, houseNumber) {
 async function liveNearbyLookupOne(fixLat, fixLon, cand, areaWays, dataAsOf, cacheKeyFn, opts) {
   try {
     if (typeof fetch === "undefined") return null;
+    /* Pan-speed fix (Nov 19): the Photon reverse and the Geobase query
+       are independent — the Geobase SQL needs only the street name, not
+       the house point — so they run at once instead of back to back. */
+    var geoP = liveCkanSql(liveGeobaseSql(liveNomVoieCandidate(cand.name)))
+      .catch(function () { return []; });
     var pt = await liveNearestAddressPoint(cand.name, cand.anchorLat, cand.anchorLon);
+    var houseFallback = null;
+    if (!pt) {
+      /* Cedar: the nearest real Photon house (#1529) sits 101.5 m from
+         the anchor — one metre past the strict 100 m cap — so the strict
+         rule dropped a street with real data. Retry relaxed (250 m,
+         same street only). */
+      pt = await liveNearestAddressPoint(cand.name, cand.anchorLat, cand.anchorLon, LIVE_NEAREST_ADDRESS_FALLBACK_M);
+      if (pt) houseFallback = "photon-250m";
+    }
+    if (!pt && typeof liveOverpassAddrPoint === "function") {
+      /* Steyning: Photon has no address on the street at all, so the
+         relaxed retry cannot help either. Last resort is OSM address
+         nodes via Overpass (same endpoints as the area query). */
+      pt = await liveOverpassAddrPoint(cand.name, cand.anchorLat, cand.anchorLon);
+      if (pt) houseFallback = "overpass-addr";
+    }
     if (!pt) return null; /* no house on this street near its closest point — skip silently */
     var slug = cand.slug;
-    var geoRows = [];
-    try { geoRows = await liveCkanSql(liveGeobaseSql(liveNomVoieCandidate(cand.name))); } catch (e) { geoRows = []; }
+    var geoRows = await geoP;
     var geoHit = liveGeobaseHit(geoRows, pt.number);
     var key = (typeof cacheKeyFn === "function")
       ? cacheKeyFn(slug, geoHit ? geoHit.idTrc : null, pt.number)
@@ -5493,6 +5578,7 @@ async function liveNearbyLookupOne(fixLat, fixLon, cand, areaWays, dataAsOf, cac
       crossWays: crossWays, houseLat: pt.lat, houseLon: pt.lon,
       houseNumber: pt.number, streetName: cand.name, dataAsOf: dataAsOf, geoHit: geoHit });
     if (!result || result.status !== "ok") return null;
+    if (houseFallback) result.houseFallback = houseFallback; /* traceability: the bake log names it, the paint ignores it */
     liveCacheSave(key, { streetName: cand.name, streetSlug: slug, houseNumber: pt.number,
       dataAsOf: dataAsOf, paidAsOf: null, savedAt: Date.now(), result: result });
     if (opts && opts.prefetchLive) {
@@ -5552,6 +5638,17 @@ function liveNearbySweep(fixLat, fixLon, currentStreetName, city) {
    (the sweep records it into LIVE_NEARBY and renders; the prefetch
    passes null - the live.v5 save already happened inside
    liveNearbyLookupOne). Returns { landed, tried, retried }. Never throws.
+   Pan-speed fix (Nov 19): up to LIVE_SWEEP_CONCURRENCY streets run at
+   once instead of one at a time — the per-street chain (Photon +
+   Geobase + paid) is network-bound, so overlapping it is what turns
+   minutes into seconds. Slots are reserved synchronously before an
+   attempt starts (landed + inFlight < maxStreets, tried < maxTries),
+   so the caps stay exact — no overrun past maxStreets — and a worker
+   that finds the caps full stops taking work. Candidates are still
+   taken in distance order; landings may arrive out of order, which is
+   fine — every consumer sorts by distM, and onLand fires per landing
+   so the map paints each street as it arrives instead of waiting for
+   the whole loop.
    One retry pass (Nov 19 area-paint phone fix): a candidate that yields
    nothing may have hit a transient empty answer — Photon reverse
    intermittently returns 0 features for the same query, then succeeds
@@ -5565,47 +5662,68 @@ async function liveNearbySweepLoop(fixLat, fixLon, currentStreetName, areaWays, 
   var radiusM = (opts && typeof opts.radiusM === "number") ? opts.radiusM : LIVE_NEARBY_RADIUS_M;
   var maxStreets = (opts && typeof opts.maxStreets === "number") ? opts.maxStreets : LIVE_NEARBY_MAX_STREETS;
   var maxTries = (opts && typeof opts.maxTries === "number") ? opts.maxTries : LIVE_NEARBY_MAX_TRIES;
+  var conc = (typeof LIVE_SWEEP_CONCURRENCY === "number" && LIVE_SWEEP_CONCURRENCY > 0)
+    ? Math.floor(LIVE_SWEEP_CONCURRENCY) : 1;
   var cands = liveNearbyCandidates(areaWays, currentStreetName, fixLat, fixLon, radiusM);
-  var landed = 0, tried = 0, retried = 0;
+  var landed = 0, tried = 0, retried = 0, inFlight = 0;
   var failed = [];
-  for (var i = 0; i < cands.length && landed < maxStreets && tried < maxTries; i++) {
-    if (typeof stillValid === "function" && !stillValid()) return { landed: landed, tried: tried, retried: retried };
-    tried++;
-    var r = await liveNearbyLookupOne(fixLat, fixLon, cands[i], areaWays, dataAsOf, null, opts);
-    if (typeof stillValid === "function" && !stillValid()) return { landed: landed, tried: tried, retried: retried };
-    if (r && r.result && r.result.sides) {
-      landed++;
-      if (typeof onLand === "function") onLand(r);
-    } else {
-      failed.push(cands[i]);
-    }
+  var stopped = false;
+  function valid() {
+    if (stopped) return false;
+    if (typeof stillValid === "function" && !stillValid()) { stopped = true; return false; }
+    return true;
   }
-  for (var j = 0; j < failed.length && landed < maxStreets && tried < maxTries; j++) {
-    if (typeof stillValid === "function" && !stillValid()) return { landed: landed, tried: tried, retried: retried };
-    tried++; retried++;
-    var r2 = await liveNearbyLookupOne(fixLat, fixLon, failed[j], areaWays, dataAsOf, null, opts);
-    if (typeof stillValid === "function" && !stillValid()) return { landed: landed, tried: tried, retried: retried };
-    if (r2 && r2.result && r2.result.sides) {
-      landed++;
-      if (typeof onLand === "function") onLand(r2);
+  async function runList(list, isRetry) {
+    var next = 0;
+    async function worker() {
+      for (;;) {
+        if (!valid()) return;
+        /* Reserve both slots synchronously: the check and the increments
+           run without an await between them, so two workers can never
+           reserve the same slot — landed + inFlight stays <= maxStreets
+           and tried stays <= maxTries. */
+        if (landed + inFlight >= maxStreets || tried >= maxTries) return;
+        var i = next++;
+        if (i >= list.length) return;
+        tried++; if (isRetry) retried++;
+        inFlight++;
+        var r = null;
+        try { r = await liveNearbyLookupOne(fixLat, fixLon, list[i], areaWays, dataAsOf, null, opts); }
+        catch (e) { r = null; /* LookupOne never throws, but a worker must never die on it */ }
+        inFlight--;
+        if (!valid()) return;
+        if (r && r.result && r.result.sides) {
+          landed++;
+          if (typeof onLand === "function") onLand(r);
+        } else if (!isRetry) {
+          failed.push(list[i]);
+        }
+      }
     }
+    var workers = [];
+    var n = Math.min(conc, list.length);
+    for (var w = 0; w < n; w++) workers.push(worker());
+    await Promise.all(workers);
   }
+  await runList(cands, false);
+  if (!stopped && failed.length && landed < maxStreets && tried < maxTries) await runList(failed, true);
   return { landed: landed, tried: tried, retried: retried };
 }
 async function liveNearbySweepInner(fixLat, fixLon, currentStreetName, key, gen, city) {
   try {
     var area = await liveNearbyAreaQuery(fixLat, fixLon);
     if (gen !== LIVE_GEN || LIVE_NEARBY.fixKey !== key) return null; /* abandoned — the user moved on */
-    var dataAsOf = null;
+    /* Pan-speed fix (Nov 19): the two package dates are independent —
+       they fetch at once instead of back to back (same as the prefetch). */
+    var dataAsOf = null, paidAsOf = null;
     try {
-      var pkg = await liveCkanPackage();
-      dataAsOf = (pkg.metadata_modified || pkg.metadata_created || "").slice(0, 10) || null;
-    } catch (e) { dataAsOf = null; }
-    var paidAsOf = null;
-    try {
-      var ppkg = await liveCkanPaidPackage();
-      paidAsOf = (ppkg.metadata_modified || ppkg.metadata_created || "").slice(0, 10) || null;
-    } catch (e) { paidAsOf = null; }
+      var pkgs2 = await Promise.all([
+        liveCkanPackage().catch(function () { return null; }),
+        liveCkanPaidPackage().catch(function () { return null; })]);
+      var pkg2 = pkgs2[0], ppkg2 = pkgs2[1];
+      dataAsOf = (pkg2 && (pkg2.metadata_modified || pkg2.metadata_created || "").slice(0, 10)) || null;
+      paidAsOf = (ppkg2 && (ppkg2.metadata_modified || ppkg2.metadata_created || "").slice(0, 10)) || null;
+    } catch (e) { dataAsOf = null; paidAsOf = null; }
     if (gen !== LIVE_GEN || LIVE_NEARBY.fixKey !== key) return null;
     /* The sweep IS the GPS-path prefetch (Nov 19): each landed street's
        full slice - signs + centreline + Geobase side + paid places -
@@ -5698,22 +5816,29 @@ async function livePrefetchAroundInner(lat, lon, streetName, key, gen, city, rad
   try {
     var area = await liveNearbyAreaQuery(lat, lon, radiusM);
     if (gen !== DEST_GEN || LIVE_PREFETCH.fixKey !== key) return null;
-    var dataAsOf = null;
+    /* Pan-speed fix (Nov 19): the two package dates are independent —
+       they fetch at once instead of back to back. */
+    var dataAsOf = null, paidAsOf = null;
     try {
-      var pkg = await liveCkanPackage();
-      dataAsOf = (pkg.metadata_modified || pkg.metadata_created || "").slice(0, 10) || null;
-    } catch (e) { dataAsOf = null; }
-    var paidAsOf = null;
-    try {
-      var ppkg = await liveCkanPaidPackage();
-      paidAsOf = (ppkg.metadata_modified || ppkg.metadata_created || "").slice(0, 10) || null;
-    } catch (e) { paidAsOf = null; }
+      var pkgs = await Promise.all([
+        liveCkanPackage().catch(function () { return null; }),
+        liveCkanPaidPackage().catch(function () { return null; })]);
+      var pkg = pkgs[0], ppkg = pkgs[1];
+      dataAsOf = (pkg && (pkg.metadata_modified || pkg.metadata_created || "").slice(0, 10)) || null;
+      paidAsOf = (ppkg && (ppkg.metadata_modified || ppkg.metadata_created || "").slice(0, 10)) || null;
+    } catch (e) { dataAsOf = null; paidAsOf = null; }
     if (gen !== DEST_GEN || LIVE_PREFETCH.fixKey !== key) return null;
     var loop = await liveNearbySweepLoop(lat, lon, streetName, area.ways, dataAsOf,
       { paidAsOf: paidAsOf, prefetchLive: true, city: city || null, radiusM: radiusM,
         maxStreets: LIVE_PREFETCH_MAX_STREETS, maxTries: LIVE_PREFETCH_MAX_TRIES },
       function () { return gen === DEST_GEN && LIVE_PREFETCH.fixKey === key; },
-      null);
+      /* Pan-speed fix (Nov 19): the area prefetch used to pass no
+         onLand, so the map painted NOTHING until the whole loop
+         finished — minutes of blank after a pan. Each landed street
+         now re-renders the map as it arrives (the GPS sweep already
+         did this); the live.v5 save inside LookupOne happened first,
+         so the render sees the landed street. */
+      function () { try { if (typeof renderMap === "function") renderMap(); } catch (e) { /* a render fault never stops the prefetch */ } });
     if (gen !== DEST_GEN || LIVE_PREFETCH.fixKey !== key) return null;
     /* No-latch rule (Nov 19 area-paint phone fix): "ready" only when at
        least one street landed. A 0-landed run ends "idle" — retryable by
@@ -6720,13 +6845,13 @@ function mapCurbColor(key, nowMs) {
     if (!jr || jr.status !== "ready" || !jr.sides) return "grey";
     return curbColorForVerdict(verdictForSideData(jr.sides[jm[2]], null, nowMs, null));
   }
-  /* Area curb (Nov 19, colour around the centre): "area:<slug>:even|odd"
+  /* Area curb (Nov 19, colour around the centre): "area:<slug>[#<house>]:even|odd"
      -- coloured by THAT street's own sides, from the area entry, never
      the current street's. A street whose entry has left the area (or
      never had one) reads grey, never a guessed verdict colour. */
   var am = /^area:([^:]+):(even|odd)$/.exec(key || "");
   if (am) {
-    var ae = (typeof osmAreaEntry === "function") ? osmAreaEntry(am[1]) : null;
+    var ae = (typeof osmAreaEntryForKey === "function") ? osmAreaEntryForKey(key) : null;
     if (!ae || !ae.result.sides) return "grey";
     var av = verdictForSideData(ae.result.sides[am[2]], null, nowMs, null);
     if (!av) av = limitOnlyVerdictForSideData(ae.result.sides[am[2]], null, nowMs, null);
@@ -6829,7 +6954,7 @@ function mapDetailForSide(key, nowMs) {
      mapDetailHtml wrapper as every other curb tap. */
   var am = /^area:([^:]+):(even|odd)$/.exec(key || "");
   if (am) {
-    var ae = (typeof osmAreaEntry === "function") ? osmAreaEntry(am[1]) : null;
+    var ae = (typeof osmAreaEntryForKey === "function") ? osmAreaEntryForKey(key) : null;
     if (!ae || !ae.result.sides) return null;
     var aside = ae.result.sides[am[2]];
     if (!aside) return null;
@@ -7529,10 +7654,14 @@ function osmAreaEntries() {
   var key = cellLat + "," + cellLon + "|z" + view.zoom + ":" + size.w + "x" + size.h + ":b" + Math.round(osmNormBearing(view.bearing || 0)) + "|" + idx + "|" + nbState + "|bake:" + (bakedPaintUsable() ? (_bakedPaint.entries.length + ":" + (_bakedPaint.asOf || "")) : "-");
   if (_areaMemo && _areaMemo.key === key) return _areaMemo.entries;
   if (!osmAreaZoomOk()) { _areaMemo = { key: key, entries: [] }; return []; } /* too zoomed out: no area paint, the prompt shows instead */
-  var cands = {}; /* slug -> { slug, name, result }: the BAKED paint first (the static file — instant, no network), then the live.v5 cache, then the in-memory sweep — fresher live data wins on a clash, the bake is the base, never the override */
+  var cands = {}; /* key -> { slug, name, result }: the BAKED paint first (the static file — instant, no network), then the live.v5 cache, then the in-memory sweep — fresher live data wins on a clash, the bake is the base, never the override.
+     Multi-block (Nov 19 pan fix): the key is slug + "#" + houseNumber, NOT the slug alone — the bake now holds several blocks of one long street (Penfield, Simpson, Sherbrooke…), each a real liveBuildResult for its own block, and keying by slug alone would collapse them to one. A live entry replaces only the baked block with the SAME house number; a live entry for a different block coexists with the baked ones. An entry with no house number falls back to the bare slug (the old behaviour). */
+  function areaKey(slug, houseNumber) {
+    return slug + "#" + ((houseNumber === null || houseNumber === undefined) ? "" : houseNumber);
+  }
   try {
     bakedPaintEntries().forEach(function (e) {
-      if (e && e.slug && e.result) cands[e.slug] = { slug: e.slug, name: e.name || e.slug, result: e.result };
+      if (e && e.slug && e.result) cands[areaKey(e.slug, e.result.houseNumber)] = { slug: e.slug, name: e.name || e.slug, result: e.result };
     });
   } catch (e) { /* a bad baked entry never blocks the live sources */ }
   var prefix = (typeof LIVE_CACHE_PREFIX === "string") ? LIVE_CACHE_PREFIX : "ticketSaver.live.v5.";
@@ -7544,20 +7673,21 @@ function osmAreaEntries() {
       if (!entry || !entry.result) return; /* liveCacheRead already enforces the 7-day TTL; a stale (>2 h) entry still reads -- last-known colours, refreshed by the area prefetch */
       var slug = k.slice(prefix.length).split(".")[0]; /* the slug carries no dots (liveSlug), so the first segment is the slug */
       if (!slug) return;
-      cands[slug] = { slug: slug, name: entry.streetName || entry.result.streetName || slug, result: entry.result };
+      cands[areaKey(slug, entry.houseNumber)] = { slug: slug, name: entry.streetName || entry.result.streetName || slug, result: entry.result };
     });
   }
   try {
     if (typeof liveNearbyMapEntries === "function") {
       liveNearbyMapEntries().forEach(function (n) {
-        if (n && n.slug && n.result) cands[n.slug] = { slug: n.slug, name: n.name, result: n.result };
+        if (n && n.slug && n.result) cands[areaKey(n.slug, n.result.houseNumber)] = { slug: n.slug, name: n.name, result: n.result };
       });
     }
   } catch (e) { /* the sweep streets are best-effort here; the cache is the source */ }
   var c = mapXY(view.lat, view.lon, refLat, refLon); /* the screen centre, in the home-street local-metre frame */
   var out = [];
-  Object.keys(cands).forEach(function (slug) {
-    var cand = cands[slug];
+  Object.keys(cands).forEach(function (key) {
+    var cand = cands[key];
+    var slug = cand.slug; /* the key is slug#houseNumber (multi-block) — the entry's slug is the plain slug */
     if (!cand.result || !cand.result.centreline || cand.result.centreline.length < 2) return;
     if (!cand.result.segment) return;
     if (curName && cand.name === curName) return;
@@ -7576,6 +7706,26 @@ function osmAreaEntries() {
 function osmAreaEntry(slug) {
   var list = osmAreaEntries();
   for (var i = 0; i < list.length; i++) if (list[i].slug === slug) return list[i];
+  return null;
+}
+/* Area curb keys are block-specific (Nov 19 pan fix): "area:<slug>#<house>:even|odd"
+   so two baked blocks of one street in one viewport draw two curbs instead of
+   colliding on one Google Maps polyline id ("curb:area:<slug>:even"). Entries
+   without a house number keep the old "area:<slug>:even|odd" key. */
+function osmAreaKeyFor(a, side) {
+  var h = a && a.result && typeof a.result.houseNumber === "number" ? a.result.houseNumber : null;
+  return "area:" + a.slug + (h === null ? "" : "#" + h) + ":" + side;
+}
+function osmAreaEntryForKey(key) {
+  var am = /^area:([^:]+):(even|odd)$/.exec(key || "");
+  if (!am) return null;
+  var parts = am[1].split("#");
+  var slug = parts[0], house = parts.length > 1 ? parseInt(parts[1], 10) : null;
+  var list = osmAreaEntries();
+  for (var i = 0; i < list.length; i++) {
+    if (list[i].slug !== slug) continue;
+    if (house === null || list[i].result.houseNumber === house) return list[i];
+  }
   return null;
 }
 /* The area's render signature: slugs + per-side colours, so a landed
@@ -7870,7 +8020,7 @@ function mapOverlays(nowMs, geom, colors) {
         return { x: pt.x + nn[0] * MAP_CURB_M * signs[k], y: pt.y + nn[1] * MAP_CURB_M * signs[k] };
       });
       var acolor = osmNearbyColor(a.result.sides, k, nowMs);
-      var akey = "area:" + a.slug + ":" + k;
+      var akey = osmAreaKeyFor(a, k);
       out.curbs.push({ key: akey, color: acolor, stroke: mapColorStroke(acolor), weight: 4,
         path: curb.map(toLL), label: mapCurbAriaLabel(akey, nowMs) });
     });
@@ -7930,11 +8080,12 @@ function mapOverlays(nowMs, geom, colors) {
       if (!c || !c.key || c.key.indexOf("area:") !== 0 || !c.path || c.path.length < 1) return;
       var parts = c.key.split(":");
       if (parts.length !== 3) return;
-      var reps = areaReportsFor(parts[1], parts[2]);
+      var repSlug = parts[1].split("#")[0]; /* block key "slug#house" — reports are filed per street */
+      var reps = areaReportsFor(repSlug, parts[2]);
       if (!reps || !reps.length) return;
       var mid = c.path[Math.floor(c.path.length / 2)];
       reps.forEach(function (r) {
-        out.reports.push({ slug: parts[1], side: parts[2], lat: mid.lat, lon: mid.lon,
+        out.reports.push({ slug: repSlug, side: parts[2], lat: mid.lat, lon: mid.lon,
           status: r.status || "unverified", text: r.text || "" });
       });
     });
@@ -8229,7 +8380,7 @@ function mapSelectableKeys() {
       if (!signs) return;
       ["even", "odd"].forEach(function (k) {
         if (!signs[k]) return;
-        var key = "area:" + a.slug + ":" + k;
+        var key = osmAreaKeyFor(a, k);
         if (keys.indexOf(key) < 0) keys.push(key);
       });
     });
@@ -9254,6 +9405,9 @@ function osmEventInMap(e) {
     liveHouseFromFeature: liveHouseFromFeature, liveCacheKey: liveCacheKey,
     liveNearestAddressPoint: liveNearestAddressPoint, liveDistM: liveDistM,
     LIVE_NEAREST_ADDRESS_MAX_M: LIVE_NEAREST_ADDRESS_MAX_M,
+    LIVE_NEAREST_ADDRESS_FALLBACK_M: LIVE_NEAREST_ADDRESS_FALLBACK_M,
+    liveOverpassAddrPoint: liveOverpassAddrPoint,
+    LIVE_SWEEP_CONCURRENCY: LIVE_SWEEP_CONCURRENCY,
     liveNearbySweep: liveNearbySweep, liveNearbyEntries: liveNearbyEntries, liveNearbyMapEntries: liveNearbyMapEntries,
     liveNearbyCandidates: liveNearbyCandidates, liveNearbyClosestPoint: liveNearbyClosestPoint,
     liveNearbyAreaQuery: liveNearbyAreaQuery, liveNearbyLookupOne: liveNearbyLookupOne,
