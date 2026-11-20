@@ -7011,7 +7011,7 @@ function osmSetView(lat, lon, zoom, bearing) {
   _osmView = { lat: lat, lon: lon, zoom: zoom,
     bearing: (typeof bearing === "number") ? osmNormBearing(bearing) : osmNormBearing(osmView().bearing || 0) };
   _osmStreetKey = osmStreetKey();
-  renderMap();
+  if (!_osmRenderHold) renderMap();
   return _osmView;
 }
 function osmRecentre() {
@@ -7036,7 +7036,7 @@ function osmSetBearing(deg) {
   var v = osmView();
   _osmView = { lat: v.lat, lon: v.lon, zoom: v.zoom, bearing: osmNormBearing(deg) };
   _osmStreetKey = osmStreetKey();
-  renderMap();
+  if (!_osmRenderHold) renderMap();
   return _osmView;
 }
 function osmRotateBy(dDeg) {
@@ -7528,6 +7528,57 @@ function osmAreaState() {
     return "empty";
   } catch (e) { return "empty"; }
 }
+/* The pill state a render shows: while a drag/pinch is running, the
+   state frozen at drag start (_osmDragPill) — NOT the live state. The
+   video (Nov 19, PC mouse drag over Mount Royal): the pill flipped
+   "Checking nearby streets…" -> "Nearby streets didn't load — tap to
+   retry" MID-DRAG, because the area prefetch settled 0-landed while
+   the user was still dragging and every pointermove re-rendered the
+   pill from live state. Freezing it for the gesture keeps the pill
+   stable under the finger; the pointerup refresh (osmRefreshPill)
+   shows the live state once the gesture ends. The freeze is
+   presentation only — osmAreaState() and the prefetch state machine
+   are untouched, so the area-paint-phone tests (which drive mapSvgHtml
+   with no gesture running) read the live state exactly as before. */
+function osmPillState() {
+  if (_osmDrag && typeof _osmDragPill === "string") return _osmDragPill;
+  try { return (typeof osmAreaState === "function") ? osmAreaState() : "ready"; } catch (e) { return "ready"; }
+}
+/* The map's status pill HTML for one state — the single place its
+   content is decided, so the drag-freeze and the pointerup refresh
+   cannot drift from the full render. Wording/classes byte-identical to
+   the old inline ternary: loading = white hint pill, failed = amber
+   tap-to-retry button, anything else = tap hint; below the zoom gate
+   the "Too zoomed out" prompt replaces the pill. */
+function osmAreaPillHtml(state) {
+  if (!osmAreaZoomOk()) return '<div class="osmzoomhint" aria-hidden="true">Too zoomed out \u2014 zoom in to see parking rules</div>';
+  if (state === "loading") return '<div class="osmhint" aria-hidden="true">Checking nearby streets\u2026</div>';
+  if (state === "failed") return '<button class="osmaretry" data-area-retry type="button">Nearby streets didn\u2019t load \u2014 tap to retry</button>';
+  return '<div class="osmhint" aria-hidden="true">Tap a color line for details</div>';
+}
+/* Refresh just the pill node after a gesture ends (called from
+   osmOnPointerUp once the freeze is lifted). A full renderMap here
+   would rebuild the tiles + overlay between pointerup and the click
+   that follows it — destroying the curb/button node the click targets
+   — so only this one node is swapped, and only when its content
+   actually changed. Real DOM only; in the Node suites (stub elements
+   with no querySelector) this is a no-op and the pill is read from
+   mapSvgHtml instead. Never throws. */
+function osmRefreshPill() {
+  var body = null;
+  try { body = el("mapBody"); } catch (e) { return; }
+  if (!body || typeof body.querySelector !== "function") return;
+  try {
+    var old = body.querySelector(".osmhint") || body.querySelector(".osmaretry") || body.querySelector(".osmzoomhint");
+    if (!old || !old.parentNode) return;
+    var html = osmAreaPillHtml(osmPillState());
+    if (old.outerHTML === html) return;
+    var tmp = document.createElement("div");
+    tmp.innerHTML = html;
+    var node = tmp.firstChild;
+    if (node) old.parentNode.replaceChild(node, old);
+  } catch (e) { /* the pill refresh is cosmetic; the next full render fixes it */ }
+}
 /* The diagnostic readout the phone probe needs (baseline report §7):
    the build, the zoom, what paints now, and the last prefetch run
    {status, landed, tried, retried, lastError, attempts} plus the live.v5
@@ -7769,15 +7820,8 @@ function mapSvgHtml(nowMs, geom, colors) {
      nearby streets…" while a prefetch is in flight, a tap-to-retry
      button when the last run finished with nothing landed, the tap hint
      once streets paint (or before any run has been attempted). */
-  var areaPill = null;
-  try { areaPill = (typeof osmAreaState === "function") ? osmAreaState() : "ready"; } catch (e) { areaPill = "ready"; }
-  s += osmAreaZoomOk()
-    ? (areaPill === "loading"
-      ? '<div class="osmhint" aria-hidden="true">Checking nearby streets\u2026</div>'
-      : areaPill === "failed"
-      ? '<button class="osmaretry" data-area-retry type="button">Nearby streets didn\u2019t load \u2014 tap to retry</button>'
-      : '<div class="osmhint" aria-hidden="true">Tap a color line for details</div>')
-    : '<div class="osmzoomhint" aria-hidden="true">Too zoomed out \u2014 zoom in to see parking rules</div>';
+  var areaPill = osmPillState();
+  s += osmAreaPillHtml(areaPill);
   s += '<div class="osmcontrols">'
     + '<button class="osmctl" data-map-north type="button" aria-label="North up — centre on home"><svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true"><text x="12" y="8.5" text-anchor="middle" font-size="9" font-weight="bold" fill="currentColor">N</text><path d="M12 11 L17.5 20 L12 17.5 L6.5 20 Z" fill="currentColor"/></svg></button>'
     + '<button class="osmctl" data-map-info type="button" aria-label="Map info"><svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/><text x="12" y="16.5" text-anchor="middle" font-size="13" font-weight="bold" fill="currentColor">i</text></svg></button>'
@@ -7901,6 +7945,189 @@ function mapToggleLayer(name) {
    curb colors, layers, paid spots, selected curb, geometry) — the 30 s
    hero tick and the expand/collapse toggle must never wipe an open detail
    card. */
+/* Live pinch scale (Nov 19 map fix): between integer zooms the tile
+   layer is scaled by CSS transform about the pinch midpoint, so a pinch
+   zooms smoothly instead of snapping 2x at each integer step. The view
+   zoom stays integer (tiles fetch at that z); the transform carries the
+   fractional remainder 2^(nzFrac - zoom), which is continuous across
+   the commit threshold (at nzFrac = zoom+0.5 the z+1 tiles at scale
+   2^-0.5 render exactly where the z tiles at 2^+0.5 were). Cleared on
+   release, when the final integer zoom is committed, and by any render
+   outside a live pinch (see renderMap). The scale goes on the tile
+   imgs + the overlay svg ONLY — the hint pill, controls and
+   attribution live inside #osmMap too and must not grow with the pinch
+   (the pill even carries its own translateX(-50%) transform, which a
+   scale here would clobber). Rotation lives on the inner .osmrotate
+   wrapper, so these scales compose with the bearing. Real DOM only in
+   effect; in the Node suites el("osmMap") is a stub with no
+   querySelector, so the whole-map fallback runs there instead (which
+   is what the pinch test observes). Never throws. */
+function osmApplyPinchScale(px, py, scale) {
+  var m = null;
+  try { m = el("osmMap"); } catch (e) { m = null; }
+  if (!m || !m.style) return;
+  if (!isFinite(scale) || scale <= 0) scale = 1;
+  var tf = (scale === 1) ? "" : "scale(" + scale.toFixed(4) + ")";
+  try {
+    if (typeof m.querySelectorAll === "function" && typeof m.querySelector === "function") {
+      var svg = m.querySelector(".osmsvg");
+      if (svg && svg.style) {
+        svg.style.transformOrigin = px.toFixed(1) + "px " + py.toFixed(1) + "px";
+        svg.style.transform = tf;
+      }
+      var imgs = m.querySelectorAll(".osmtile");
+      for (var i = 0; i < imgs.length; i++) {
+        var im = imgs[i];
+        if (!im || !im.style) continue;
+        /* Each tile scales about the pinch midpoint in its own frame. */
+        var left = parseFloat(im.style.left) || 0;
+        var top = parseFloat(im.style.top) || 0;
+        im.style.transformOrigin = (px - left).toFixed(1) + "px " + (py - top).toFixed(1) + "px";
+        im.style.transform = tf;
+      }
+      if (m.style.transform) m.style.transform = "";
+      return;
+    }
+    m.style.transformOrigin = px.toFixed(1) + "px " + py.toFixed(1) + "px";
+    m.style.transform = tf;
+  } catch (e) { /* a style fault must never break the gesture */ }
+}
+var _mapChromeHtml = null; /* the mapBody chrome (pill + controls + attribution + notes) HTML of the last incremental paint — the chrome is only re-created when this changes */
+/* Incremental map paint (Nov 19 map fix): the old renderMap destroyed
+   and recreated every tile img node on EVERY pointermove —
+   the sig's lat/lon moves every move — forcing a re-decode/repaint of
+   every tile each frame, which is the map jumping/blinking in the
+   video (plus the pill div<->button swap and the overlay SVG rebuild
+   on top). This keeps the tile img nodes across paints: a tile whose
+   z/x/y is still in view only moves (style left/top); new tiles are
+   created once; tiles that scrolled out are dropped. The overlay SVG
+   is one vector repaint (outerHTML swap, no image decode), and the
+   chrome inside #osmMap is only touched when its HTML changed — during
+   a drag the frozen pill keeps it identical, so the pill node is never
+   touched mid-drag. Returns true when it painted, false to fall back
+   to the wholesale innerHTML rebuild (first paint, rotation-wrapper
+   state change, any fault). Real DOM only: the Node suites' stub
+   elements have no querySelector, so they always take the fallback
+   and every suite assertion about mapBody.innerHTML is unchanged.
+   Never throws — any fault returns false and the caller rebuilds. */
+function renderMapIncremental(body, html) {
+  try {
+    if (!body || typeof body.querySelector !== "function"
+        || typeof document === "undefined" || !document.createElement) return false;
+    var mapEl = body.querySelector("#osmMap");
+    if (!mapEl) return false;
+    var tmp = document.createElement("div");
+    /* Parse without the tile imgs: a detached parsed img still fetches
+       its src, so parsing the full HTML here would re-fetch every tile
+       on every move — the waste this function exists to remove. The
+       tile list comes from osmTilesForView below, never from tmp. */
+    tmp.innerHTML = html.replace(/<img\b[^>]*>/g, "");
+    var newMap = tmp.querySelector("#osmMap");
+    if (!newMap) return false;
+    /* Rotation wrapper must match: a bearing 0<->non-zero transition
+       changes the frame (diagonal square), so rebuild wholesale once. */
+    var oldRot = mapEl.querySelector(".osmrotate");
+    var newRot = newMap.querySelector(".osmrotate");
+    if (!!oldRot !== !!newRot) return false;
+    if (oldRot && newRot) {
+      /* Only the angle changes with the bearing (the frame size is the
+         container diagonal, constant per size); copy angle + frame size
+         so a twist repaints without rebuilding the tiles. */
+      oldRot.style.transform = newRot.style.transform;
+      oldRot.style.width = newRot.style.width;
+      oldRot.style.height = newRot.style.height;
+    }
+    var oldSvg = mapEl.querySelector(".osmsvg");
+    if (!oldSvg || !oldSvg.parentNode) return false;
+    var newSvg = newMap.querySelector(".osmsvg");
+    if (!newSvg) return false;
+    /* Tiles for this view (same frame mapSvgHtml used: the diagonal
+       square when rotated, the container when north-up). */
+    var view = osmView(), size = osmMapSize();
+    var bearing = osmNormBearing(view.bearing || 0);
+    var fsize = size;
+    if (bearing) {
+      var diag = Math.ceil(Math.sqrt(size.w * size.w + size.h * size.h));
+      fsize = { w: diag, h: diag };
+    }
+    var tiles = osmTilesForView(view.lat, view.lon, view.zoom, fsize.w, fsize.h);
+    var oldImgs = mapEl.querySelectorAll(".osmtile");
+    var bySrc = {};
+    var i, s0;
+    for (i = 0; i < oldImgs.length; i++) {
+      s0 = null;
+      try { s0 = oldImgs[i].getAttribute ? oldImgs[i].getAttribute("src") : oldImgs[i].src; } catch (e) { s0 = null; }
+      if (s0) bySrc[s0] = oldImgs[i];
+    }
+    var tileParent = oldSvg.parentNode;
+    var seen = {};
+    tiles.forEach(function (t) {
+      var img = bySrc[t.url];
+      if (img) {
+        img.style.left = t.left.toFixed(0) + "px";
+        img.style.top = t.top.toFixed(0) + "px";
+      } else {
+        img = document.createElement("img");
+        img.className = "osmtile";
+        img.setAttribute("src", t.url);
+        img.setAttribute("alt", "");
+        img.setAttribute("draggable", "false");
+        img.style.left = t.left.toFixed(0) + "px";
+        img.style.top = t.top.toFixed(0) + "px";
+        /* Before the overlay SVG, never after it: tiles are opaque, so
+           an appended-after tile would paint over the curb overlay. */
+        tileParent.insertBefore(img, oldSvg);
+      }
+      seen[t.url] = true;
+    });
+    for (i = 0; i < oldImgs.length; i++) {
+      s0 = null;
+      try { s0 = oldImgs[i].getAttribute ? oldImgs[i].getAttribute("src") : oldImgs[i].src; } catch (e) { s0 = null; }
+      if (s0 && !seen[s0] && oldImgs[i].parentNode) oldImgs[i].parentNode.removeChild(oldImgs[i]);
+    }
+    /* Overlay SVG: one vector repaint, no image decode. */
+    oldSvg.outerHTML = newSvg.outerHTML;
+    /* Chrome INSIDE #osmMap (pill + controls + attribution + notes —
+       they are direct children of #osmMap, after the tiles + overlay):
+       replace only when its HTML changed. */
+    var curChrome = chromeHtmlOf(newMap);
+    if (curChrome !== _mapChromeHtml) {
+      var liveKids = [], newKids = [], k, kc;
+      for (i = 0; i < mapEl.childNodes.length; i++) liveKids.push(mapEl.childNodes[i]);
+      for (i = 0; i < newMap.childNodes.length; i++) newKids.push(newMap.childNodes[i]);
+      liveKids.forEach(function (kid) {
+        if (!isChromeNode(kid)) return;
+        if (kid.parentNode) kid.parentNode.removeChild(kid);
+      });
+      newKids.forEach(function (kid) {
+        if (!isChromeNode(kid)) return;
+        mapEl.appendChild(kid);
+      });
+      _mapChromeHtml = curChrome;
+    }
+    return true;
+  } catch (e) { return false; }
+}
+/* A #osmMap child is chrome (pill / controls / attribution / notes)
+   when it is neither a tile img, nor the overlay svg, nor the rotation
+   wrapper — the three paint layers renderMapIncremental syncs
+   separately. */
+function isChromeNode(kid) {
+  if (!kid || !kid.getAttribute) return false;
+  var cls = "";
+  try { cls = kid.getAttribute("class") || ""; } catch (e) { cls = ""; }
+  if (cls.indexOf("osmtile") >= 0 || cls.indexOf("osmsvg") >= 0 || cls.indexOf("osmrotate") >= 0) return false;
+  return true;
+}
+function chromeHtmlOf(mapNode) {
+  var out = "";
+  var kids = mapNode.childNodes || [];
+  for (var i = 0; i < kids.length; i++) {
+    if (!isChromeNode(kids[i])) continue;
+    out += kids[i].outerHTML || kids[i].textContent || "";
+  }
+  return out;
+}
 function renderMap(nowMs) {
   var card = el("mapCard");
   if (!card) return;
@@ -7938,10 +8165,29 @@ function renderMap(nowMs) {
     + "|" + JSON.stringify(colors) + "|" + (MAP_LAYERS.paid ? "P" : "p") + (MAP_LAYERS.cleaning ? "C" : "c")
     + "|" + paidSig + "|" + (_mapSelected || "-") + "|" + jSig + "|" + staleSig + "|"
     + (geom && geom.ok ? geom.viewBox : "nogeo:" + (geom && geom.reason || "?"))
-    + "|area:" + osmAreaSig(nowMs);
+    + "|area:" + osmAreaSig(nowMs)
+    + "|pill:" + osmPillState();
   if (sig === _mapSig) return;
   _mapSig = sig;
-  body.innerHTML = mapBodyHtml(nowMs, geom, colors);
+  /* The pill state rides in the signature (Nov 19 map fix): without it
+     a prefetch settling loading->failed with an empty area changed
+     nothing in the sig, so the settle handler's renderMap was a no-op
+     and the pill only ever flipped on the next pan's render — mid-drag,
+     which is the blink in the video. With it, the settle repaint
+     happens once, at settle time (idle — no drag running). During a
+     drag the frozen pill keeps this part constant, so a settle cannot
+     repaint mid-drag either. */
+  var html = mapBodyHtml(nowMs, geom, colors);
+  if (!renderMapIncremental(body, html)) {
+    body.innerHTML = html;
+    _mapChromeHtml = null; /* chrome unknown after a wholesale rebuild — the next incremental paint re-syncs it once */
+  }
+  /* A live pinch scale (osmApplyPinchScale) belongs to the gesture, not
+     the paint: any render outside a live pinch clears it, so a
+     re-centre / wheel zoom / settle repaint never leaves a stale scale
+     on the freshly painted tiles. During a pinch the move handler
+     re-applies it after the flush render. */
+  if (!_osmDrag || !_osmDrag.pinch) osmApplyPinchScale(0, 0, 1);
   /* An area curb that fell out of the visible area (the user panned away
      or zoomed out) leaves no sheet behind: a selected area key that is
      no longer drawn is cleared and its sheet closed, instead of showing
@@ -8789,6 +9035,8 @@ function destSetState(s) { DEST = s; }
 var _osmPointers = {}; /* pointerId -> { x, y } in client px */
 var _osmDrag = null; /* { moved, lastX, lastY, pinch } while a gesture runs */
 var _osmSuppressClick = false;
+var _osmRenderHold = 0; /* while >0, osmSetView/osmSetBearing update the view without painting — the pinch branch holds it across bearing+zoom+pan so one move event paints once, not three */
+var _osmDragPill = null; /* the area-pill state frozen at drag start (see osmPillState) — renders during the drag keep it, so a prefetch settling mid-drag cannot flip the pill under the user's finger */
 function osmEventInMap(e) {
   var t = e && e.target;
   while (t) {
@@ -8811,8 +9059,33 @@ function osmCursorAngle(e) {
   var r = osmMapRect(), size = osmMapSize();
   return Math.atan2(e.clientY - (r.top + size.h / 2), e.clientX - (r.left + size.w / 2)) * 180 / Math.PI;
 }
+/* True when the pointer went down on (or inside) a map control button.
+   The three right-side buttons (North / Info / GPS-centre) and the
+   area-retry pill are the ONLY buttons mapBodyHtml emits, so "inside a
+   <button>" is the whole test — no attribute list to keep in sync.
+   Curb taps are NOT in this list — a <path data-map-side> is not a
+   button — so their pointerdown still captures and drags exactly as
+   before. */
+function osmEventOnMapControl(e) {
+  var t = e && e.target;
+  while (t) {
+    if (t.tagName === "BUTTON") return true;
+    t = t.parentNode;
+  }
+  return false;
+}
 function osmOnPointerDown(e) {
   if (!osmEventInMap(e) || typeof e.pointerId === "undefined") return;
+  /* A control tap is a click, never a drag: no drag start, and above
+     all NO pointer capture. Capture retargets the pointerup to
+     mapBody, so a mouse click's target becomes mapBody — the nearest
+     common ancestor of the button and mapBody — and the delegated
+     click handler never matches the button's data-map-* attribute:
+     the three buttons were dead on PC mouse for exactly this reason
+     (a touch click still hit-tests the button, which is why the phone
+     worked). Returning here leaves the native click alone, so its
+     target stays the button and the delegation fires. */
+  if (osmEventOnMapControl(e)) return;
   var body = el("mapBody");
   try { if (body && body.setPointerCapture) body.setPointerCapture(e.pointerId); } catch (err) { /* drag works without capture while the finger stays on the map */ }
   _osmPointers[e.pointerId] = { x: e.clientX, y: e.clientY };
@@ -8828,6 +9101,11 @@ function osmOnPointerDown(e) {
   } else if (ids.length === 1) {
     /* Shift+drag (mouse) rotates instead of panning — the desktop path
        for free rotation. Plain drag still pans. */
+    /* Freeze the area pill for this gesture (see osmPillState): a
+       prefetch settling mid-drag must not flip the pill under the
+       finger. The pinch branch below keeps this value — it never
+       re-captures — so the freeze covers the whole gesture. */
+    try { _osmDragPill = osmAreaState(); } catch (err) { _osmDragPill = null; }
     _osmDrag = { moved: 0, lastX: e.clientX, lastY: e.clientY, pinch: null,
       rotate: e.shiftKey ? { lastAngle: osmCursorAngle(e) } : null };
   }
@@ -8844,11 +9122,29 @@ function osmOnPointerMove(e) {
     var midX = (a.x + b.x) / 2, midY = (a.y + b.y) / 2;
     _osmDrag.moved += Math.abs(dx) + Math.abs(dy);
     var r = osmMapRect();
-    osmSetBearing(_osmDrag.pinch.bearing0 + osmNormDeltaDeg(osmAngleDeg(a.x, a.y, b.x, b.y) - _osmDrag.pinch.a0));
-    var nz = _osmDrag.pinch.zoom0 + Math.log(d / _osmDrag.pinch.d0) / Math.log(2);
-    osmZoomAt(midX - r.left, midY - r.top, nz);
-    osmPanBy(midX - _osmDrag.pinch.midX, midY - _osmDrag.pinch.midY);
+    /* One paint per move event (Nov 19 map fix): the old code called
+       osmSetBearing + osmZoomAt + osmPanBy, each rendering the whole
+       map — three full innerHTML rebuilds per move. Hold the renders
+       across the three view updates and paint once. */
+    var nzFrac = _osmDrag.pinch.zoom0 + Math.log(d / _osmDrag.pinch.d0) / Math.log(2);
+    var nz = Math.round(nzFrac);
+    _osmRenderHold++;
+    try {
+      osmSetBearing(_osmDrag.pinch.bearing0 + osmNormDeltaDeg(osmAngleDeg(a.x, a.y, b.x, b.y) - _osmDrag.pinch.a0));
+      /* Smooth pinch zoom: the view zoom stays integer and only commits
+         when the fractional zoom crosses the rounding threshold — the
+         old code fed the fractional nz straight into osmZoomAt, whose
+         Math.round snapped the whole map 2x at each integer step,
+         which is the pinch slip/jump. The fractional remainder rides
+         as a live CSS scale (osmApplyPinchScale), continuous across
+         the commit; the final integer is committed on release. */
+      if (nz !== osmView().zoom) osmZoomAt(midX - r.left, midY - r.top, nz);
+      osmPanBy(midX - _osmDrag.pinch.midX, midY - _osmDrag.pinch.midY);
+    } finally { _osmRenderHold--; }
+    if (!_osmRenderHold) renderMap();
     _osmDrag.pinch.midX = midX; _osmDrag.pinch.midY = midY;
+    _osmDrag.pinch.nzFrac = nzFrac;
+    osmApplyPinchScale(midX - r.left, midY - r.top, Math.pow(2, nzFrac - osmView().zoom));
     return;
   }
   /* Shift+drag rotates (mouse path); releasing Shift mid-drag drops back
@@ -8868,12 +9164,30 @@ function osmOnPointerMove(e) {
 function osmOnPointerUp(e) {
   if (typeof e.pointerId !== "undefined") delete _osmPointers[e.pointerId];
   if (!Object.keys(_osmPointers).length) {
+    var hadDrag = !!_osmDrag;
+    /* Pinch release: commit the final integer zoom (the live scale
+       carried the fractional part during the gesture), then drop the
+       scale so the committed paint is the only transform. */
+    if (_osmDrag && _osmDrag.pinch && typeof _osmDrag.pinch.nzFrac === "number"
+        && isFinite(_osmDrag.pinch.nzFrac)) {
+      var fz = Math.round(_osmDrag.pinch.nzFrac);
+      if (fz !== osmView().zoom) {
+        var upR = osmMapRect();
+        osmZoomAt(_osmDrag.pinch.midX - upR.left, _osmDrag.pinch.midY - upR.top, fz);
+      }
+    }
+    osmApplyPinchScale(0, 0, 1);
     if (_osmDrag && _osmDrag.moved > 6) {
       _osmSuppressClick = true;
       setTimeout(function () { _osmSuppressClick = false; }, 100);
       osmAreaScheduleRefresh(); /* the pan ended -- the coloured area follows the new centre, fetched once, debounced */
     }
     _osmDrag = null;
+    _osmDragPill = null; /* lift the pill freeze before refreshing it, so it reads the live state */
+    /* The pill was frozen for the whole gesture: refresh just that
+       node now (not a full render — the curb/button the user tapped
+       must keep its node for the click that follows this pointerup). */
+    if (hadDrag) osmRefreshPill();
   }
 }
 function osmOnWheel(e) {
@@ -9004,6 +9318,8 @@ if (typeof window !== "undefined") {
     osmView: osmView, osmSetView: osmSetView, osmRecentre: osmRecentre, osmMapSize: osmMapSize,
     osmSetBearing: osmSetBearing, osmRotateBy: osmRotateBy, osmNormBearing: osmNormBearing,
     osmOnPointerDown: osmOnPointerDown, osmOnPointerMove: osmOnPointerMove, osmOnPointerUp: osmOnPointerUp,
+    osmEventOnMapControl: osmEventOnMapControl, osmPillState: osmPillState, osmAreaPillHtml: osmAreaPillHtml,
+    osmRefreshPill: osmRefreshPill, osmApplyPinchScale: osmApplyPinchScale, renderMapIncremental: renderMapIncremental,
     osmPanBy: osmPanBy, osmZoomAt: osmZoomAt, osmZoomBy: osmZoomBy,
     osmNearbySigns: osmNearbySigns, osmNearbyStreetPts: osmNearbyStreetPts, osmNearbyColor: osmNearbyColor,
     osmAreaEntries: osmAreaEntries, osmAreaEntry: osmAreaEntry, osmAreaSig: osmAreaSig,
