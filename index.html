@@ -92,8 +92,8 @@
      position. The base map is a Google fetch, not a data upload; the
      overlay is drawn from the same centreline + verdict data as the
      old schematic map, so no verdict logic moved. Google handles
-     pan / pinch / zoom natively; the map is always north-up (the
-     Google Maps JS API has no rotation). */
+     pan / pinch / zoom natively; a two-finger twist rotates the
+     vector map, and North resets the heading to 0. */
   #mapBody { position: relative; height: 400px; overflow: hidden; border-radius: 12px;
              background: #e8eef0; }
   #gmapDiv { position: absolute; left: 0; top: 0; right: 0; bottom: 0; }
@@ -1453,11 +1453,14 @@ function renderPin(nowMs) {
 function stopPinSession() {
   setSelectedSide(null);
 }
-/* Find my car: centre the Google map on the pin at street level and show the map. */
+/* Find my car: centre the Google map on the pin and show the map. No
+   auto re-zoom (Nov 19): the zoom stays exactly where the user left
+   it — a zoomed-out map still shows the pin, and the "too zoomed out"
+   prompt says to zoom in if they want curb detail. */
 function findMyCar() {
   var pin = getPin();
   if (!pin) return osmView();
-  osmSetView(pin.lat, pin.lon, Math.max(osmView().zoom, OSM_ZOOM_DEFAULT));
+  osmSetView(pin.lat, pin.lon, osmView().zoom);
   showTab("map");
   return osmView();
 }
@@ -3283,6 +3286,10 @@ function init() {
   }
   /* Google Maps (Nov 19): load the API script once, at boot. */
   gmapsLoad();
+  /* Baked area paint (Nov 19): start the one static-file load at boot
+     so the first paint can draw from it — the live prefetch still runs
+     in the background for streets outside the bake. */
+  try { bakedPaintLoad(); } catch (e) { /* the live lookup covers a failed bake load */ }
   var po = el("permitOptions");
   if (po) po.addEventListener("change", function (e) {
     var t = e.target || e.srcElement;
@@ -6898,10 +6905,11 @@ function mapDetailHtml(key, nowMs) {
    The map is pannable (drag) and zoomable
    (pinch, wheel, double-click) — the standard map gestures, handled by
    Google, the only way to navigate now the +/- buttons are gone (Nov 18
-   map cleanup). The map is always north-up: the Google Maps JS API has
-   no rotation, so free rotation is gone and the North button is a
-   re-centre. North re-centres on the position at the default zoom, GPS
-   on your location. The home marker sits at the
+   map cleanup). Rotation is back (Nov 19): the map renders as a vector
+   map (renderingType VECTOR, no map ID needed), so a two-finger twist
+   rotates it and the North button resets the heading to 0 and
+   re-centres on the position at the default zoom; GPS centres on your
+   location. The home marker sits at the
    exact centre of the view on load and after Centre (the view centres
    on the snapped marker, not the raw address — the snap is ~25 m off
    on the home street) — the rendered centring the verifier checks is the
@@ -6928,6 +6936,19 @@ function mapDetailHtml(key, nowMs) {
    bill stays $0 — that upgrade is a separate step, not this build). */
 var GOOGLE_MAPS_API_KEY = "AIzaSyDwlA856wu8_Ktos1F94ReV1akxmltpEDc";
 var GMAPS_API_URL = "https://maps.googleapis.com/maps/api/js";
+/* GMAPS_MAP_ID — Cloud-based map style id (OPTIONAL, empty = none).
+   Rotation does NOT need it: the map is created with renderingType
+   VECTOR (no map ID required — Google's Maps JavaScript API docs,
+   "Rendering type"), which is what enables heading, and two-finger
+   twist rotates a vector map. A map ID is only needed if cloud-based
+   map styling is wanted later: create it in Cloud Console > Google
+   Maps Platform > Map Management > Create map ID (Map type
+   JavaScript, Vector, check Rotation), then paste the real ID here.
+   NEVER invent an ID — an empty string means "no cloud style", and
+   the map still rotates. No map ID could be created from this sandbox
+   (no gcloud, no Google Cloud credentials here); rotation was built
+   on renderingType instead, so nothing waits on the Console step. */
+var GMAPS_MAP_ID = "";
 var OSM_ZOOM_DEFAULT = 17; /* street level: ~0.85 m/px at Montreal's latitude */
 var OSM_ZOOM_MIN = 15, OSM_ZOOM_MAX = 19;
 var OSM_MAP_H = 400; /* the home-screen map is the dominant view */
@@ -7028,11 +7049,20 @@ function osmDefaultView() {
   var h = osmHomeLatLon();
   return { lat: h.lat, lon: h.lon, zoom: OSM_ZOOM_DEFAULT, bearing: 0 };
 }
-/* The current view; a street change (or a live lookup landing on a new
-   street) re-centres on the new position at the default zoom. */
+/* The current view; a street change re-centres on the new street's
+   position and NOTHING else — no auto re-zoom (Nov 19): the zoom (and
+   heading) the user chose stays exactly where they left it, whether
+   they were zoomed out to 15 or in to 19. The area layer's zoom gate
+   only hides curb detail below 17 and shows the "too zoomed out"
+   prompt; it never moves the zoom. */
 function osmView() {
   var k = osmStreetKey();
-  if (!_osmView || _osmStreetKey !== k) { _osmView = osmDefaultView(); _osmStreetKey = k; }
+  if (!_osmView) { _osmView = osmDefaultView(); _osmStreetKey = k; }
+  else if (_osmStreetKey !== k) {
+    var h = osmHomeLatLon();
+    _osmView = { lat: h.lat, lon: h.lon, zoom: _osmView.zoom, bearing: _osmView.bearing || 0 };
+    _osmStreetKey = k;
+  }
   return _osmView;
 }
 function osmSetView(lat, lon, zoom, bearing) {
@@ -7040,14 +7070,19 @@ function osmSetView(lat, lon, zoom, bearing) {
   zoom = (typeof zoom === "number") ? Math.max(OSM_ZOOM_MIN, Math.min(OSM_ZOOM_MAX, Math.round(zoom))) : osmView().zoom;
   lat = Math.max(-85, Math.min(85, lat));
   lon = ((lon + 180) % 360 + 360) % 360 - 180;
-  /* North-up only (Google Maps switch, Nov 19): the Google Maps JS API
-     has no rotation, so the bearing is always 0. The bearing argument
-     is accepted and ignored, so old callers keep working. */
-  _osmView = { lat: lat, lon: lon, zoom: zoom, bearing: 0 };
+  /* Rotation (Nov 19, vector maps): the bearing is real now — a caller
+     that passes one sets the heading; a caller that passes none keeps
+     the heading the user already has. Nothing here ever resets the
+     zoom or the heading on its own. */
+  var b = (typeof bearing === "number") ? osmNormBearing(bearing) : (osmView().bearing || 0);
+  _osmView = { lat: lat, lon: lon, zoom: zoom, bearing: b };
   _osmStreetKey = osmStreetKey();
   renderMap();
   return _osmView;
 }
+/* North (Nov 19): re-centre on home at the default zoom and reset the
+   heading to 0 — the one place a zoom/heading reset still happens, and
+   only because the user tapped North. */
 function osmRecentre() {
   _osmView = osmDefaultView();
   _osmStreetKey = osmStreetKey();
@@ -7055,19 +7090,30 @@ function osmRecentre() {
   osmAreaScheduleRefresh();
   return _osmView;
 }
-/* North-up only (Google Maps switch, Nov 19): the bearing is always 0 —
-   the Google Maps JS API has no rotation. osmNormBearing stays: the
-   area memo key still normalises the (always 0) bearing. */
+/* The bearing is the map heading in degrees (0 = north-up), kept in
+   the view model so the area paint rotates with the map. */
 function osmNormBearing(b) {
   if (typeof b !== "number" || !isFinite(b)) return 0;
   b = b % 360;
   if (b < 0) b += 360;
   return b;
 }
-/* Setting a bearing is a no-op: the map cannot rotate, so the view it
-   returns is always north-up. */
-function osmSetBearing(deg) { return osmView(); }
-function osmRotateBy(dDeg) { return osmView(); }
+/* Set the heading (two-finger twist does this through the map; the
+   North button calls it with 0). Pushes the heading to the live map
+   when there is one; the view model carries it either way, so the
+   area paint and the tests see the same value. */
+function osmSetBearing(deg) {
+  var v = osmView();
+  var b = osmNormBearing(deg);
+  _osmView = { lat: v.lat, lon: v.lon, zoom: v.zoom, bearing: b };
+  _osmStreetKey = osmStreetKey();
+  renderMap();
+  return _osmView;
+}
+function osmRotateBy(dDeg) {
+  var v = osmView();
+  return osmSetBearing((v.bearing || 0) + (typeof dDeg === "number" ? dDeg : 0));
+}
 /* GPS-centre button (Nov 18 map cleanup): centre the map on the last GPS
    fix at once, then ask for a fresh fix — when it lands, the map follows
    it (see checkGps). The auto-refresh (boot + visibilitychange + 90 s)
@@ -7098,9 +7144,8 @@ function osmProjectLocal(x, y, refLat, refLon, view, size) {
   return [w[0] - c[0] + size.w / 2, w[1] - c[1] + size.h / 2];
 }
 /* Pan by container pixels: dragging the map right moves the centre west,
-   so the content follows the finger / mouse. North-up only (Google Maps
-   switch, Nov 19): the bearing is always 0, so the un-rotate below is
-   the identity — kept so the math stays the same shape. */
+   so the content follows the finger / mouse. The pan un-rotates by the
+   heading, so a drag follows the finger on a rotated map too. */
 function osmPanBy(dx, dy) {
   var v = osmView(), size = osmMapSize();
   var c = osmLatLngToWorld(v.lat, v.lon, v.zoom);
@@ -7111,8 +7156,8 @@ function osmPanBy(dx, dy) {
   return osmSetView(ll[0], ll[1], v.zoom);
 }
 /* Zoom around a container point (px, py): the place under that point
-   stays under it. North-up only (Google Maps switch, Nov 19): the
-   bearing is always 0, so the un-rotate below is the identity. */
+   stays under it. The zoom un-rotates by the heading, so the anchor
+   holds on a rotated map too. */
 function osmZoomAt(px, py, zoom) {
   var v = osmView(), size = osmMapSize();
   zoom = Math.max(OSM_ZOOM_MIN, Math.min(OSM_ZOOM_MAX, zoom));
@@ -7230,11 +7275,16 @@ function osmNearbyColor(sides, key, nowMs) {
    map shows a "Too zoomed out -- zoom in" prompt instead (ParkUsher-
    style). The current street's own curbs are NOT gated -- they always
    draw, at any zoom; only the area layer is.
-   Data source: the background cache ONLY -- the live.v5 entries (index
-   ticketSaver.live.v5.index, same LRU/TTL as the on-demand lookup) plus
-   the in-memory sweep streets (liveNearbyMapEntries), which are the same
-   entries the sweep just saved. A street with no fetched data gets NO
-   coloured curb -- not grey, not a guess: it simply is not in the list.
+   Data source: the BAKED paint file first (montreal-area-paint.v1.json
+   — the static freeze of the live pipeline for the home
+   neighbourhood), then the background cache — the live.v5 entries
+   (index ticketSaver.live.v5.index, same LRU/TTL as the on-demand
+   lookup) plus the in-memory sweep streets (liveNearbyMapEntries), which
+   are the same entries the sweep just saved. Live data wins on a
+   clash with the bake (fresher beats frozen); the bake only fills
+   streets the live sources have not landed yet. A street with no
+   fetched data gets NO coloured curb -- not grey, not a guess: it
+   simply is not in the list.
    A fetched street with no established verdict still draws, grey -- the
    same "no verdict" grey as the current street's curbs. The current
    street is skipped here (its own curbs draw above, with the plain
@@ -7251,6 +7301,112 @@ var _areaMemo = null; /* { key, entries } -- entries carry their clipped pts */
 var _areaPrefetchAt = null; /* { lat, lon } the last area prefetch ran for */
 var _areaPrefetchPromise = null; /* the in-flight area prefetch, if any */
 var _areaTimer = null; /* the pending debounced refresh, if any */
+/* ---- baked area paint (Nov 19, ParkUsher-fast) ----
+   montreal-area-paint.v1.json is a static file built by
+   build_area_paint.js: the live pipeline (Overpass + Photon + Geobase
+   + the signs file) run ONCE at build time for the streets around the
+   home street, frozen as liveBuildResult objects — the exact shape the
+   area layer consumes. The phone loads the one file and draws, instead
+   of running the per-street live chain on every street change / first
+   paint (seconds of network) before anything paints. The live lookup
+   stays the fallback, correct just slower: streets outside the baked
+   neighbourhood, blocks other than a baked street's baked block, and
+   any street whose baked entry is missing all still fetch live, and
+   the area prefetch keeps running in the background for them.
+   Staleness: the baked file carries the signs package's asOf; it is
+   usable only while that still matches the signs store's asOf. A
+   city-data update ships as a rebuild (v1 -> v2, same mechanism as
+   montreal-signs.v1.json) — a stale baked file is ignored, never
+   painted, and the live lookup covers the gap. Sign reports are a
+   LIVE overlay on top (fetchAreaReports below): a new report shows
+   immediately, without waiting for a rebuild, and never changes a
+   colour or a verdict. */
+var LIVE_AREA_PAINT_VERSION = 1;
+var LIVE_AREA_PAINT_URL = "montreal-area-paint.v1.json";
+var _bakedPaint = null; /* decoded baked file, once loaded */
+var _bakedPaintPromise = null; /* in-flight load, for dedup */
+var _bakedPaintFailed = false; /* a failed load never retries in-session */
+function bakedPaintLoad() {
+  if (_bakedPaint) return Promise.resolve(_bakedPaint);
+  if (_bakedPaintPromise) return _bakedPaintPromise;
+  if (_bakedPaintFailed || typeof fetch === "undefined") return Promise.resolve(null);
+  var p;
+  try {
+    p = fetch(LIVE_AREA_PAINT_URL).then(function (res) {
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      return res.json();
+    }).then(function (j) {
+      if (!j || j.v !== LIVE_AREA_PAINT_VERSION || !j.entries || !j.entries.length) throw new Error("bad baked paint file");
+      _bakedPaint = j;
+      try { renderMap(); } catch (e) { /* the repaint after the bake lands is best-effort */ }
+      return j;
+    });
+  } catch (e) { _bakedPaintFailed = true; return Promise.resolve(null); }
+  p = p.catch(function () { _bakedPaintFailed = true; return null; });
+  _bakedPaintPromise = p;
+  return p;
+}
+/* Test/embedding seam: inject decoded baked data without a network fetch. */
+function bakedPaintSetData(j) {
+  _bakedPaint = j || null;
+  _bakedPaintFailed = false;
+  _bakedPaintPromise = j ? Promise.resolve(j) : null;
+}
+/* Usable only when loaded, the right version, and still current: its
+   asOf must match the signs store's asOf (when the store has loaded —
+   before that, the baked file ships from the same build, so it is
+   accepted provisionally and re-checked once the store lands). */
+function bakedPaintUsable() {
+  if (!_bakedPaint || _bakedPaint.v !== LIVE_AREA_PAINT_VERSION) return false;
+  if (!Array.isArray(_bakedPaint.entries) || !_bakedPaint.entries.length) return false;
+  try {
+    if (typeof LIVE_SIGNS_FILE !== "undefined" && LIVE_SIGNS_FILE && LIVE_SIGNS_FILE.asOf
+        && _bakedPaint.asOf && _bakedPaint.asOf !== LIVE_SIGNS_FILE.asOf) return false;
+  } catch (e) { /* a store fault never blocks the bake */ }
+  return true;
+}
+function bakedPaintEntries() {
+  if (!_bakedPaint && !_bakedPaintPromise && !_bakedPaintFailed) bakedPaintLoad();
+  if (!bakedPaintUsable()) return [];
+  return _bakedPaint.entries;
+}
+/* ---- live sign-reports overlay for the visible area (Nov 19) ----
+   Reports live in the Worker + KV (REPORTS_URL), NOT in the baked
+   file: the visible area's slugs are fetched (5-minute cache per
+   slug, debounced by the area refresh that calls this), so a report
+   filed minutes ago shows on the map without a rebuild. The overlay
+   is markers only (mapOverlays ov.reports) — it never touches a
+   colour, a verdict, a countdown or a fine, the same structural guard
+   as the report card. A failed fetch leaves the last fetch in place;
+   the baked paint never waits on it. */
+var AREA_REPORTS_TTL_MS = 5 * 60 * 1000;
+var _areaReports = {}; /* slug -> { at, reports } */
+function areaReportsFor(slug, side) {
+  var rec = _areaReports[slug];
+  if (!rec || !rec.reports) return [];
+  if (!side) return rec.reports;
+  return rec.reports.filter(function (r) { return r && r.side === side; });
+}
+function fetchAreaReports(fetchImpl) {
+  if (!reportsEnabled()) return Promise.resolve([]);
+  var f = fetchImpl || (typeof fetch === "function" ? fetch : null);
+  if (!f) return Promise.resolve([]);
+  var slugs = [];
+  try { osmAreaEntries().forEach(function (a) { if (a && a.slug && slugs.indexOf(a.slug) < 0) slugs.push(a.slug); }); } catch (e) {}
+  try { var cur = reportStreetSlug(); if (cur && slugs.indexOf(cur) < 0) slugs.push(cur); } catch (e) {}
+  var now = Date.now();
+  var todo = slugs.filter(function (s) {
+    var r = _areaReports[s];
+    return !r || (now - r.at) > AREA_REPORTS_TTL_MS;
+  });
+  if (!todo.length) return Promise.resolve([]);
+  return Promise.all(todo.map(function (slug) {
+    return f(REPORTS_URL + "/reports?street=" + encodeURIComponent(slug))
+      .then(function (resp) { return resp.json(); })
+      .then(function (j) { _areaReports[slug] = { at: Date.now(), reports: (j && j.reports) || [] }; })
+      .catch(function () { /* this slug keeps its last fetch (or none) */ });
+  })).then(function () { try { renderMap(); } catch (e) {} return []; });
+}
 /* Metres per container pixel at a view (Web Mercator, tile size 256) --
    the same projection osmLatLngToWorld uses, so the paint window and the
    tiles agree. At Montreal's latitude and zoom 17 this is ~0.84 m/px. */
@@ -7344,9 +7500,9 @@ function osmAreaDistToPts(pts, cx, cy) {
    zoom threshold the area is empty by derivation (the map shows the
    "Too zoomed out" prompt instead). Pure derivation (no fetch) -- the
    memo is keyed by the centre cell + zoom + size + bearing + the live.v5
-   index + the sweep state, so a landed prefetch, a re-fetch, a pan into
-   a new cell, a zoom or a resize re-derives, and a render at the same
-   view re-uses the list. Each entry is { slug, name, distM, result, pts }
+   index + the sweep state + the baked-paint state, so a landed prefetch,
+   a landed bake, a re-fetch, a pan into a new cell, a zoom or a resize
+   re-derives, and a render at the same view re-uses the list. Each entry is { slug, name, distM, result, pts }
    -- pts are the segment-clipped centreline points in the home-street
    local-metre frame, exactly what the draw code offsets into curbs, so
    the paint test and the drawn curb agree: a street is in the area
@@ -7370,10 +7526,15 @@ function osmAreaEntries() {
   } catch (e) { nbState = ""; }
   var cellLat = Math.round(view.lat / (LIVE_AREA_GRID_M / 110540));
   var cellLon = Math.round(view.lon / (LIVE_AREA_GRID_M / (111320 * Math.cos(view.lat * Math.PI / 180))));
-  var key = cellLat + "," + cellLon + "|z" + view.zoom + ":" + size.w + "x" + size.h + ":b" + Math.round(osmNormBearing(view.bearing || 0)) + "|" + idx + "|" + nbState;
+  var key = cellLat + "," + cellLon + "|z" + view.zoom + ":" + size.w + "x" + size.h + ":b" + Math.round(osmNormBearing(view.bearing || 0)) + "|" + idx + "|" + nbState + "|bake:" + (bakedPaintUsable() ? (_bakedPaint.entries.length + ":" + (_bakedPaint.asOf || "")) : "-");
   if (_areaMemo && _areaMemo.key === key) return _areaMemo.entries;
   if (!osmAreaZoomOk()) { _areaMemo = { key: key, entries: [] }; return []; } /* too zoomed out: no area paint, the prompt shows instead */
-  var cands = {}; /* slug -> { slug, name, result }: the cache first, the in-memory sweep wins on a clash (freshest in-session) */
+  var cands = {}; /* slug -> { slug, name, result }: the BAKED paint first (the static file — instant, no network), then the live.v5 cache, then the in-memory sweep — fresher live data wins on a clash, the bake is the base, never the override */
+  try {
+    bakedPaintEntries().forEach(function (e) {
+      if (e && e.slug && e.result) cands[e.slug] = { slug: e.slug, name: e.name || e.slug, result: e.result };
+    });
+  } catch (e) { /* a bad baked entry never blocks the live sources */ }
   var prefix = (typeof LIVE_CACHE_PREFIX === "string") ? LIVE_CACHE_PREFIX : "ticketSaver.live.v5.";
   if (idx) {
     idx.split(",").forEach(function (k) {
@@ -7488,6 +7649,9 @@ function osmAreaRefresh() {
     if (_areaPrefetchPromise === p) _areaPrefetchPromise = null;
     try { if (!osmAreaIsEmpty()) _areaEmptyRetries = 0; } catch (e) { /* best-effort */ }
     renderMap();
+    /* The live reports overlay follows the area: a report filed since
+       the last rebuild shows on the painted curbs within minutes. */
+    try { fetchAreaReports(); } catch (e) { /* reports never block the paint */ }
     return r;
   }, function () {
     if (_areaPrefetchPromise === p) _areaPrefetchPromise = null;
@@ -7686,8 +7850,8 @@ function mapOverlays(nowMs, geom, colors) {
   var streetName = (geom && geom.streetName)
     || (typeof liveMode === "function" && liveMode() && typeof LIVE !== "undefined" && LIVE && LIVE.streetName)
     || "this street";
-  var out = { streetName: streetName, view: { lat: view.lat, lon: view.lon, zoom: view.zoom },
-    curbs: [], dots: [], home: null, car: null };
+  var out = { streetName: streetName, view: { lat: view.lat, lon: view.lon, zoom: view.zoom, bearing: view.bearing || 0 },
+    curbs: [], dots: [], home: null, car: null, gps: null, reports: [] };
   function toLL(pt) { return osmLocalToLatLng(pt.x, pt.y, refLat, refLon); }
   /* Area streets first (under the current street): every street with
      fetched data in the VISIBLE AREA around the screen centre, in its
@@ -7747,6 +7911,34 @@ function mapOverlays(nowMs, geom, colors) {
       out.car = { lat: fix.lat, lon: fix.lon, parked: false, label: null };
     }
   }
+  /* The GPS dot (Nov 19): the user's CURRENT position, shown whenever
+     a fix is available — parked or not. It plots the RAW fix exactly
+     as the phone reported it: never snapped to the car, the street or
+     the pin. Parked 1 km away, the dot sits 1 km from the car marker
+     and both show; not parked, it sits under the car marker at the
+     same fix. The parked car marker above is untouched. */
+  var fixGps = null;
+  try { fixGps = (typeof lastFix !== "undefined") ? lastFix : null; } catch (e) { fixGps = null; }
+  if (fixGps && typeof fixGps.lat === "number" && typeof fixGps.lon === "number") {
+    out.gps = { lat: fixGps.lat, lon: fixGps.lon };
+  }
+  /* Sign reports on the painted curbs (Nov 19, baked-paint overlay):
+     a report for a painted area curb draws one amber dot at the
+     middle of that curb — unverified, never a colour or a verdict. */
+  try {
+    out.curbs.forEach(function (c) {
+      if (!c || !c.key || c.key.indexOf("area:") !== 0 || !c.path || c.path.length < 1) return;
+      var parts = c.key.split(":");
+      if (parts.length !== 3) return;
+      var reps = areaReportsFor(parts[1], parts[2]);
+      if (!reps || !reps.length) return;
+      var mid = c.path[Math.floor(c.path.length / 2)];
+      reps.forEach(function (r) {
+        out.reports.push({ slug: parts[1], side: parts[2], lat: mid.lat, lon: mid.lon,
+          status: r.status || "unverified", text: r.text || "" });
+      });
+    });
+  } catch (e) { /* reports never break the overlay */ }
   return out;
 }
 /* The map's HTML chrome — everything that is NOT the Google map itself:
@@ -7757,7 +7949,7 @@ function mapOverlays(nowMs, geom, colors) {
 function mapChromeHtml(nowMs, geom, colors) {
   var s = osmAreaPillHtml(osmPillState());
   s += '<div class="osmcontrols">'
-    + '<button class="osmctl" data-map-north type="button" aria-label="Centre on home"><svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true"><text x="12" y="8.5" text-anchor="middle" font-size="9" font-weight="bold" fill="currentColor">N</text><path d="M12 11 L17.5 20 L12 17.5 L6.5 20 Z" fill="currentColor"/></svg></button>'
+    + '<button class="osmctl" data-map-north type="button" aria-label="North — reset heading and centre on home"><svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true"><text x="12" y="8.5" text-anchor="middle" font-size="9" font-weight="bold" fill="currentColor">N</text><path d="M12 11 L17.5 20 L12 17.5 L6.5 20 Z" fill="currentColor"/></svg></button>'
     + '<button class="osmctl" data-map-info type="button" aria-label="Map info"><svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/><text x="12" y="16.5" text-anchor="middle" font-size="13" font-weight="bold" fill="currentColor">i</text></svg></button>'
     + '<button class="osmctl" data-map-gps type="button" aria-label="Centre on my location"><svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="6.5" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="1.8" fill="currentColor"/><path d="M12 1.5 L12 4.5 M12 19.5 L12 22.5 M1.5 12 L4.5 12 M19.5 12 L22.5 12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>'
     + '</div>';
@@ -7819,9 +8011,18 @@ function gmapsIcon(kind) {
     } else if (kind === "home") {
       svg = '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><circle cx="10" cy="10" r="7" fill="#31c48d" stroke="#fff" stroke-width="2"/></svg>';
       w = 20; h = 20; ax = 10; ay = 10; lx = 10; ly = 1;
+    } else if (kind === "gps") {
+      /* The GPS dot (Nov 19): the standard Google Maps blue-dot style —
+         a blue core with a white ring on a soft blue halo. No label:
+         the dot IS the user's position, plotted from the raw fix. */
+      svg = '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><circle cx="16" cy="16" r="14" fill="#4285f4" fill-opacity="0.25"/><circle cx="16" cy="16" r="8" fill="#4285f4" stroke="#fff" stroke-width="2"/></svg>';
+      w = 32; h = 32; ax = 16; ay = 16;
     } else {
-      svg = '<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28"><circle cx="14" cy="14" r="13" fill="#2563eb" stroke="#fff" stroke-width="1.5"/><text x="14" y="19" font-size="13" text-anchor="middle">\uD83D\uDE97</text></svg>';
-      w = 28; h = 28; ax = 14; ay = 14; lx = 14; ly = 1;
+      /* The car (Nov 19): the glyph alone, bigger — no circle
+         background behind it, so it reads as the car itself, not a
+         button. The label ("Your car", parked only) still sits above. */
+      svg = '<svg xmlns="http://www.w3.org/2000/svg" width="36" height="36"><text x="18" y="29" font-size="27" text-anchor="middle">\uD83D\uDE97</text></svg>';
+      w = 36; h = 36; ax = 18; ay = 18; lx = 18; ly = 1;
     }
     var icon = { url: "data:image/svg+xml;charset=UTF-8," + encodeURIComponent(svg),
       scaledSize: new google.maps.Size(w, h),
@@ -7838,14 +8039,25 @@ function gmapsEnsureMap() {
   if (!div) return null;
   var v = osmView();
   try {
-    _gmap = new google.maps.Map(div, {
+    var mapOpts = {
       center: { lat: v.lat, lng: v.lon },
       zoom: v.zoom,
       mapTypeId: google.maps.MapTypeId.ROADMAP,
       disableDefaultUI: true, zoomControl: false, mapTypeControl: false,
       streetViewControl: false, fullscreenControl: false, rotateControl: false,
-      clickableIcons: false, gestureHandling: "greedy", heading: 0
-    });
+      clickableIcons: false, gestureHandling: "greedy", heading: 0,
+      /* Vector rendering (Nov 19, rotation restore): renderingType
+         VECTOR needs no map ID and is what enables heading — a
+         two-finger twist rotates the map, setHeading() turns it
+         programmatically. Tilt stays off (heading only). When a real
+         cloud map ID is pasted into GMAPS_MAP_ID it rides along too;
+         an empty GMAPS_MAP_ID passes nothing, so the map is still
+         vector. (The raster default cannot rotate.) */
+      headingInteractionEnabled: true, tiltInteractionEnabled: false
+    };
+    if (google.maps.RenderingType) mapOpts.renderingType = google.maps.RenderingType.VECTOR;
+    if (GMAPS_MAP_ID) mapOpts.mapId = GMAPS_MAP_ID;
+    _gmap = new google.maps.Map(div, mapOpts);
     /* Google owns the gestures now: centre/zoom changes stream in
        while the user drags (the view model follows, no repaint — the
        overlays are LatLng-anchored, so they track the map for free);
@@ -7866,9 +8078,17 @@ function gmapsOnMapMove(idle) {
     var lon = (typeof c.lng === "function") ? c.lng() : c.lng;
     if (typeof lat !== "number" || typeof lon !== "number" || !isFinite(lat) || !isFinite(lon)) return;
     z = Math.max(OSM_ZOOM_MIN, Math.min(OSM_ZOOM_MAX, Math.round(z)));
+    /* A two-finger twist streams the heading in with the centre/zoom:
+       read it off the map so the view model (and the area paint, whose
+       window rotates with the heading) follows the turned map. On a
+       raster fallback getHeading stays 0. Never a zoom change here —
+       the zoom is the user's, read off the map, never set. */
+    var hd = 0;
+    try { hd = _gmap.getHeading ? (_gmap.getHeading() || 0) : 0; } catch (e0) { hd = 0; }
+    hd = osmNormBearing(hd);
     var v = osmView();
-    if (Math.abs(v.lat - lat) > 1e-9 || Math.abs(v.lon - lon) > 1e-9 || v.zoom !== z) {
-      _osmView = { lat: lat, lon: lon, zoom: z, bearing: 0 };
+    if (Math.abs(v.lat - lat) > 1e-9 || Math.abs(v.lon - lon) > 1e-9 || v.zoom !== z || (v.bearing || 0) !== hd) {
+      _osmView = { lat: lat, lon: lon, zoom: z, bearing: hd };
       _osmStreetKey = osmStreetKey();
     }
     if (idle) { renderMap(); osmAreaScheduleRefresh(); }
@@ -7885,6 +8105,14 @@ function gmapsSyncView() {
       _gmap.setCenter({ lat: v.lat, lng: v.lon });
     }
     if (_gmap.getZoom() !== v.zoom) _gmap.setZoom(v.zoom);
+    /* Push the heading the same way (a programmatic turn — North
+       resetting to 0, or osmSetBearing). On a raster map setHeading
+       is a no-op; on a vector map it turns the map. Never touches
+       the zoom. */
+    try {
+      var mh = _gmap.getHeading ? (_gmap.getHeading() || 0) : 0;
+      if (Math.abs(osmNormBearing(mh) - (v.bearing || 0)) > 0.5 && _gmap.setHeading) _gmap.setHeading(v.bearing || 0);
+    } catch (e0) { /* a heading fault must never break the render */ }
   } catch (e) { /* a view sync fault must never break the render */ }
 }
 function gmapsSyncOverlays(ov) {
@@ -7910,8 +8138,20 @@ function gmapsSyncOverlays(ov) {
     if (ov.car) {
       want["car"] = { kind: "marker", position: { lat: ov.car.lat, lng: ov.car.lon },
         icon: gmapsIcon("car"), label: ov.car.parked ? "Your car" : null,
-        title: ov.car.parked ? "Your car" : "Your location" };
+        title: ov.car.parked ? "Your car" : "Your location", zIndex: 3 };
     }
+    if (ov.gps) {
+      /* The GPS dot rides under the car marker (zIndex 2 vs the car's
+         3): parked, both show — the dot where the phone is, the car
+         where it was parked. */
+      want["gps"] = { kind: "marker", position: { lat: ov.gps.lat, lng: ov.gps.lon },
+        icon: gmapsIcon("gps"), label: null, title: "Your location", zIndex: 2 };
+    }
+    (ov.reports || []).forEach(function (r, i) {
+      want["report:" + r.slug + ":" + r.side + ":" + i] = { kind: "marker",
+        position: { lat: r.lat, lng: r.lon }, icon: gmapsIcon("dot"), label: null,
+        title: "Unverified report", zIndex: 1 };
+    });
     Object.keys(_gmapObjs).forEach(function (id) {
       if (!want[id]) { try { _gmapObjs[id].obj.setMap(null); } catch (e) {} delete _gmapObjs[id]; }
     });
@@ -7938,11 +8178,13 @@ function gmapsSyncOverlays(ov) {
         if (!rec || rec.kind !== "marker") {
           if (rec) { try { rec.obj.setMap(null); } catch (e) {} }
           var mk = new google.maps.Marker({ position: spec.position, map: _gmap,
-            icon: spec.icon, label: label, title: spec.title || "", clickable: false });
+            icon: spec.icon, label: label, title: spec.title || "", clickable: false,
+            zIndex: spec.zIndex || 0 });
           _gmapObjs[id] = { kind: "marker", obj: mk };
         } else {
           try { rec.obj.setPosition(spec.position); rec.obj.setIcon(spec.icon);
-            rec.obj.setLabel(label); rec.obj.setTitle(spec.title || ""); } catch (e) {}
+            rec.obj.setLabel(label); rec.obj.setTitle(spec.title || "");
+            if (rec.obj.setZIndex) rec.obj.setZIndex(spec.zIndex || 0); } catch (e) {}
         }
       }
     });
@@ -8086,6 +8328,7 @@ function renderMap(nowMs) {
     ? ("fix:" + lastFix.lat.toFixed(5) + "," + lastFix.lon.toFixed(5)) : "fix:-";
   var sig = (liveMode() ? "live:" + (LIVE.streetSlug || "") : "baked:" + currentSlug())
     + "|gmap:" + _osmV.lat.toFixed(5) + "," + _osmV.lon.toFixed(5) + "," + _osmV.zoom
+    + ",b" + Math.round(_osmV.bearing || 0)
     + "," + _osmSize.w + "x" + _osmSize.h
     + "|" + JSON.stringify(colors) + "|" + (MAP_LAYERS.paid ? "P" : "p") + (MAP_LAYERS.cleaning ? "C" : "c")
     + "|" + paidSig + "|" + (_mapSelected || "-") + "|" + jSig + "|" + staleSig + "|"
@@ -8664,8 +8907,8 @@ function destClearStaleIfMine(gen) {
    makes the destination's own live.v5 entry (saved just before this apply
    on the success path, already cached on the stale/fresh paths) draw its
    verdict-coloured curbs as an area street. Best effort: the verdicts
-   already rendered — a map fault never blocks them. Zoom keeps the current
-   zoom but never below street level (OSM_ZOOM_DEFAULT, 17). */
+   already rendered — a map fault never blocks them. No auto re-zoom
+   (Nov 19): the zoom stays where the user left it. */
 function destCentreMap(result) {
   try {
     var lat = (result && typeof result.houseLat === "number") ? result.houseLat : null;
@@ -8675,7 +8918,7 @@ function destCentreMap(result) {
     }
     if (typeof lat !== "number" || typeof lon !== "number" || !isFinite(lat) || !isFinite(lon)) return;
     if (typeof osmSetView !== "function") return;
-    osmSetView(lat, lon, Math.max(osmView().zoom, OSM_ZOOM_DEFAULT));
+    osmSetView(lat, lon, osmView().zoom);
     if (typeof osmAreaScheduleRefresh === "function") osmAreaScheduleRefresh();
   } catch (e) { /* the map follows best-effort; the verdicts already rendered */ }
 }
@@ -9102,6 +9345,11 @@ function osmEventInMap(e) {
     osmAreaScheduleRefresh: osmAreaScheduleRefresh,
     osmAreaIsEmpty: osmAreaIsEmpty, osmAreaState: osmAreaState, osmAreaDiag: osmAreaDiag,
     osmAreaRetryIfEmpty: osmAreaRetryIfEmpty, osmAreaRetryNow: osmAreaRetryNow,
+    bakedPaintLoad: bakedPaintLoad, bakedPaintSetData: bakedPaintSetData,
+    bakedPaintEntries: bakedPaintEntries, bakedPaintUsable: bakedPaintUsable,
+    fetchAreaReports: fetchAreaReports, areaReportsFor: areaReportsFor,
+    LIVE_AREA_PAINT_VERSION: LIVE_AREA_PAINT_VERSION, LIVE_AREA_PAINT_URL: LIVE_AREA_PAINT_URL,
+    AREA_REPORTS_TTL_MS: AREA_REPORTS_TTL_MS,
     renderInfoSheet: renderInfoSheet,
     LIVE_AREA_EMPTY_MAX_RETRIES: LIVE_AREA_EMPTY_MAX_RETRIES,
     osmMetresPerPx: osmMetresPerPx, osmVisibleHalfDiagM: osmVisibleHalfDiagM,
@@ -9112,7 +9360,7 @@ function osmEventInMap(e) {
     LIVE_AREA_PREFETCH_MIN_MOVE_M: LIVE_AREA_PREFETCH_MIN_MOVE_M,
     LIVE_AREA_PREFETCH_DEBOUNCE_MS: LIVE_AREA_PREFETCH_DEBOUNCE_MS,
     osmEventInMap: osmEventInMap,
-    GOOGLE_MAPS_API_KEY: GOOGLE_MAPS_API_KEY, GMAPS_API_URL: GMAPS_API_URL,
+    GOOGLE_MAPS_API_KEY: GOOGLE_MAPS_API_KEY, GMAPS_API_URL: GMAPS_API_URL, GMAPS_MAP_ID: GMAPS_MAP_ID,
     OSM_ZOOM_DEFAULT: OSM_ZOOM_DEFAULT, OSM_ZOOM_MIN: OSM_ZOOM_MIN, OSM_ZOOM_MAX: OSM_ZOOM_MAX,
     OSM_MAP_H: OSM_MAP_H,
     setMapOpen: setMapOpen, mapOpen: mapOpen, mapSelectCurb: mapSelectCurb,
