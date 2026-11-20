@@ -970,6 +970,26 @@ function windowHeadline(win) {
   return dayPart + ", " + range + ", " + seasonStartLabel(win) + " – "
     + MONTH_SHORT[win.season.end_month - 1] + " " + win.season.end_day;
 }
+/* The sheet's rule line (Nov 20, his call): the rule as data, not a
+   reassurance — "No parking: 9:30–10:30, Tue & Fri, Apr 1 – Dec 1".
+   Same parts as windowHeadline (days, times, season) in the order he
+   asked for (time, days, season), with short day names; a no-stopping
+   window is named as such ("No stopping: …"). Returns null when the
+   window lacks the parts — never a guessed rule. */
+function windowRuleLine(win) {
+  if (!win || !win.weekdays_iso || !win.weekdays_iso.length || !win.start || !win.end || !win.season) return null;
+  var names = win.weekdays_iso.map(function (i) { return DAY_SHORT[i % 7]; });
+  var dayPart = names.length === 1 ? names[0]
+    : names.slice(0, -1).join(", ") + " & " + names[names.length - 1];
+  function parts(s) {
+    var h = +s.slice(0, 2), m = s.slice(3);
+    return { t: (h % 12 || 12) + ":" + m, ap: h >= 12 ? "PM" : "AM" };
+  }
+  var a = parts(win.start), b = parts(win.end);
+  var range = a.ap === b.ap ? a.t + "–" + b.t + " " + a.ap : a.t + " " + a.ap + "–" + b.t + " " + b.ap;
+  return (win.no_stopping ? "No stopping: " : "No parking: ") + range + ", " + dayPart + ", "
+    + seasonStartLabel(win) + " – " + MONTH_SHORT[win.season.end_month - 1] + " " + win.season.end_day;
+}
 
 /* ---- .ics export (RFC 5545: TZID DTSTART + UTC UNTIL + VTIMEZONE) ---- */
 function foldLine(s) {
@@ -1910,6 +1930,28 @@ function permitSuffix(code) {
   if (String(code) === "S3R") return " Resident-permit holders excepted.";
   return " Permit holders excepted.";
 }
+/* The sheet's conditional data lines (Nov 20, his call): the posted limit
+   and the permit sector, each only when the data for this side carries
+   one — never a hardcoded value, never a guessed one. Short limit label:
+   120 minutes reads "2H", 60 "1H", 15 "15 min". */
+function limitShortLabel(minutes) {
+  if (typeof minutes !== "number" || !isFinite(minutes)) return null;
+  if (minutes % 60 === 0) return (minutes / 60) + "H";
+  return minutes + " min";
+}
+function limitLineFor(lim) {
+  if (!lim || typeof lim.minutes !== "number") return null;
+  var s = limitShortLabel(lim.minutes);
+  return s ? "Time limit: " + s : null;
+}
+/* The sector that applies to this side: the limit's permit exception
+   first (that is what the plate exempts), else the window's.
+   sectorOfException parses "SECTEUR N" only, so a bare permit code
+   such as "S3R" yields no line. */
+function sectorLineFor(lim, win) {
+  var s = sectorOfException(lim && lim.exception) || (win ? sectorOfException(win.exception) : null);
+  return s ? "Sector: " + s : null;
+}
 function bindingDeadlineForSideData(side, lim, evalMs, parkedAtMs) {
   if (!side || side.status !== "established" || !side.windows || !side.windows.length) return null;
   if (side.no_stopping_whole_side) return null; /* cannot park at all — no deadline to count to */
@@ -2212,8 +2254,16 @@ function verdictForSideData(side, lim, evalMs, parkedAtMs, isFuture) {
              deadlineMs: limitExpiry, binds: "limit" };
   }
   if (cleanStart !== null) {
+    /* Nov 20, his call: a deadline is an instruction, not a reassurance —
+       "Move by Tue 9:30 AM", never "You're fine until …". A coming
+       no-stopping window is named as such, the same distinction
+       stayUntilTextFor already makes. This one string feeds the hero
+       verdict, the sheet's main line and the where-to-move fallback, so
+       all three stay worded the same way. */
     return { kind: "cleaning_soon",
-             text: "You're fine until " + fmtDayTime(cleanStart) + "." + permitSuffix(r.win.exception)
+             text: "Move by " + fmtDayTime(cleanStart)
+               + (r.win.no_stopping ? " — no stopping starts then." : " — cleaning starts then.")
+               + permitSuffix(r.win.exception)
                + (limEx ? permitLimitStatement(lim) : ""),
              fine: fineForKind(r.win.no_stopping ? "no_stopping" : "standard"),
              deadlineMs: cleanStart, binds: "cleaning" };
@@ -6715,8 +6765,9 @@ function liveJunctionForMap() {
    available on tap whatever the toggles say. There are no construction /
    EV / accessible layers: we have no data for them, so those toggles do
    not exist. Snow is deferred — nothing here draws it.
-   Tapping a curb opens a detail card (side name + "Parking allowed until
-   {deadline}" + "Coming up {next rule}", reusing verdict wording) and
+   Tapping a curb opens a detail card (side name + the rule as data +
+   the posted limit / permit sector when they apply + "Move by
+   {deadline}", reusing verdict wording) and
    changes NOTHING else: not the parked side, not the timer.
    Geometry: centreline points are projected to local metres around the
    reference address; the segment is clipped to the street's real extent
@@ -7376,10 +7427,12 @@ function mapCurbColors(nowMs, geom) {
 function mapColorStroke(color) {
   return color === "red" ? "var(--fine-ink)" : color === "green" ? "var(--accent)" : "#b3beb6";
 }
-/* The stay-until line for one curb, from its verdict — the same wording the
+/* The move-by line for one curb, from its verdict — the same wording the
    map detail card and the where-to-move rows use (shared, not a second
-   copy). Returns null when the verdict states no stay at all (a permit
-   exemption or a whole-side ban carry their own wording in the caller). */
+   copy). Nov 20, his call: a deadline is an instruction ("Move by …"),
+   never a permission ("Parking allowed until …"). Returns null when the
+   verdict states no stay at all (a permit exemption or a whole-side ban
+   carry their own wording in the caller). */
 function stayUntilTextFor(side, lim, v, nowMs) {
   if (!v) return null;
   if ((v.kind === "cleaning_soon" || v.kind === "limit") && v.deadlineMs) {
@@ -7391,7 +7444,7 @@ function stayUntilTextFor(side, lim, v, nowMs) {
       var rS = nextWindowForSideData(side, new Date(nowMs));
       noStopSoon = !!(rS && rS.win && rS.win.no_stopping);
     }
-    return "Parking allowed until " + fmtDayTime(v.deadlineMs)
+    return "Move by " + fmtDayTime(v.deadlineMs)
       + (v.binds === "limit" ? " — parking limit." : (noStopSoon ? " — no stopping starts then." : " — cleaning starts then."));
   }
   if (v.kind === "cleaning_now") {
@@ -7406,16 +7459,19 @@ function stayUntilTextFor(side, lim, v, nowMs) {
     if (r1) {
       /* Months out, the weekday + time alone ("Thu 5:30 PM") doesn't say
          which Thursday — the date rides along. */
-      return "Parking allowed until " + fmtDateShortToronto(r1.nw.start) + ", "
+      return "Move by " + fmtDateShortToronto(r1.nw.start) + ", "
         + fmtTimeToronto(r1.nw.start) + (r1.win && r1.win.no_stopping ? " — no stopping resumes then." : " — cleaning resumes then.");
     }
     return null;
   }
   return null;
 }
-/* Detail card data for one side: the verdict wording, a stay-until line
-   when a deadline exists, and the next rule. Pure — the HTML is a thin
-   wrapper below. */
+/* Detail card data for one side: the rule as data first (windowRuleLine),
+   the posted limit and permit sector when the side's data carries them,
+   then the verdict wording, with a move-by line when a deadline exists
+   and the verdict itself does not already state it. The old "Coming up:"
+   line is gone — the rule line IS the coming-up rule, restating it only
+   trained users to skim past it. Pure — the HTML is a thin wrapper below. */
 function mapDetailForSide(key, nowMs) {
   nowMs = nowMs || Date.now();
   /* A junction curb's detail card reads from the junction lookup's own
@@ -7440,16 +7496,19 @@ function mapDetailForSide(key, nowMs) {
     var jv = verdictForSideData(jside, null, nowMs, null);
     if (!jv) return { key: key, sideLabel: jlabel, color: jcolor,
       main: "No verified window for this side — the data doesn't say.",
+      rule: null, limitLine: null, sectorLine: null,
       allowedUntil: null, comingUp: null, note: null, reportable: false };
     var jallowed = stayUntilTextFor(jside, null, jv, nowMs);
-    var jcoming = null;
+    /* The verdict already states the move-by deadline for cleaning_soon /
+       limit kinds — repeating it as allowedUntil would print the same
+       deadline twice on the sheet. */
+    if (jv.kind === "cleaning_soon" || jv.kind === "limit") jallowed = null;
+    var jrule = null;
     var jr2 = nextWindowForSideData(jside, new Date(nowMs));
-    if (jr2) {
-      if (jr2.nw.state === "season_over") jcoming = "Coming up: cleaning resumes " + seasonStartLabel(jr2.win) + ".";
-      else jcoming = "Coming up: " + windowHeadline(jr2.win) + ".";
-    }
+    if (jr2 && jr2.win) jrule = windowRuleLine(jr2.win);
     return { key: key, sideLabel: jlabel, color: jcolor, main: jv.text,
-             allowedUntil: jallowed, comingUp: jcoming, note: null, reportable: false };
+             rule: jrule, limitLine: null, sectorLine: null,
+             allowedUntil: jallowed, comingUp: null, note: null, reportable: false };
   }
   /* Area curb (Nov 19): the detail card reads from the area entry's own
      sides -- the same verdict text as the current street's cards,
@@ -7468,43 +7527,53 @@ function mapDetailForSide(key, nowMs) {
     if (!aside) return null;
     var acolor = mapCurbColor(key, nowMs);
     var alabel = (aside.label || am[2]) + " \u2014 " + ae.name;
-    var av = verdictForSideData(aside, null, nowMs, null);
-    if (!av) av = limitOnlyVerdictForSideData(aside, null, nowMs, null);
+    /* Nov 20: area curbs read their limits from the area entry's own
+       result (liveBuildResult derives them; the bake keeps them) instead
+       of a hardcoded null — otherwise a street that DID post a limit
+       could never show its limit/sector lines on an area curb. For Rue
+       du Fort the entry's limits are null, so no lines render there. */
+    var alim = (ae.result.limits && ae.result.limits[am[2]]) || null;
+    var av = verdictForSideData(aside, alim, nowMs, null);
+    if (!av) av = limitOnlyVerdictForSideData(aside, alim, nowMs, null);
     if (!av) return { key: key, sideLabel: alabel, color: acolor,
       main: "No verified window for this side \u2014 the data doesn't say.",
+      rule: null, limitLine: null, sectorLine: null,
       allowedUntil: null, comingUp: null, note: corroboratedReportNote(am[1], am[2]), reportable: false };
-    var aallowed = stayUntilTextFor(aside, null, av, nowMs);
-    var acoming = null;
+    var aallowed = stayUntilTextFor(aside, alim, av, nowMs);
+    /* The verdict already states the move-by deadline for cleaning_soon /
+       limit kinds — repeating it as allowedUntil would print the same
+       deadline twice on the sheet. */
+    if (av.kind === "cleaning_soon" || av.kind === "limit") aallowed = null;
+    var arule = null, asectorLine = null;
     var ar = nextWindowForSideData(aside, new Date(nowMs));
-    if (ar) {
-      if (ar.nw.state === "season_over") acoming = "Coming up: cleaning resumes " + seasonStartLabel(ar.win) + ".";
-      else acoming = "Coming up: " + windowHeadline(ar.win) + ".";
-    }
+    if (ar && ar.win) { arule = windowRuleLine(ar.win); asectorLine = sectorLineFor(alim, ar.win); }
     return { key: key, sideLabel: alabel, color: acolor, main: av.text,
-             allowedUntil: aallowed, comingUp: acoming, note: corroboratedReportNote(am[1], am[2]), reportable: false };
+             rule: arule, limitLine: limitLineFor(alim), sectorLine: asectorLine,
+             allowedUntil: aallowed, comingUp: null, note: corroboratedReportNote(am[1], am[2]), reportable: false };
   }
   var sides = liveActiveSides();
   var side = sides[key];
   if (!side) return null;
   var color = mapCurbColor(key, nowMs);
   var label = side.label || key;
+  var lim = limitForSideKey(key);
   var v = verdictForSide(key, nowMs, parkedAtForVerdict(key));
-  if (!v) v = limitOnlyVerdictForSideData(side, limitForSideKey(key), nowMs, parkedAtForVerdict(key));
+  if (!v) v = limitOnlyVerdictForSideData(side, lim, nowMs, parkedAtForVerdict(key));
   if (!v) return { key: key, sideLabel: label, color: color,
     main: "No verified window for this side — the data doesn't say.",
+    rule: null, limitLine: null, sectorLine: null,
     allowedUntil: null, comingUp: null, note: corroboratedReportNote(reportStreetSlug(), key) };
-  var allowedUntil = stayUntilTextFor(side, limitForSideKey(key), v, nowMs);
-  var comingUp = null;
+  var allowedUntil = stayUntilTextFor(side, lim, v, nowMs);
+  /* The verdict already states the move-by deadline for cleaning_soon /
+     limit kinds — repeating it as allowedUntil would print the same
+     deadline twice on the sheet. */
+  if (v.kind === "cleaning_soon" || v.kind === "limit") allowedUntil = null;
+  var rule = null, sectorLine = null;
   var r = nextWindowForSide(key, new Date(nowMs));
-  if (r) {
-    if (r.nw.state === "season_over") {
-      comingUp = "Coming up: cleaning resumes " + seasonStartLabel(r.win) + ".";
-    } else {
-      comingUp = "Coming up: " + windowHeadline(r.win) + ".";
-    }
-  }
+  if (r && r.win) { rule = windowRuleLine(r.win); sectorLine = sectorLineFor(lim, r.win); }
   return { key: key, sideLabel: label, color: color, main: v.text,
-           allowedUntil: allowedUntil, comingUp: comingUp,
+           rule: rule, limitLine: limitLineFor(lim), sectorLine: sectorLine,
+           allowedUntil: allowedUntil, comingUp: null,
            note: v.limitOnly ? "Cleaning is not established for this side — check the physical sign." : corroboratedReportNote(reportStreetSlug(), key) };
 }
 function mapDetailHtml(key, nowMs) {
@@ -7513,8 +7582,13 @@ function mapDetailHtml(key, nowMs) {
   var s = '<div class="mapdetail"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px">'
     + '<b>' + esc(d.sideLabel) + '</b>'
     + '<span class="mapsw" style="background:' + mapColorStroke(d.color) + '"></span>'
-    + '<button class="linkbtn" data-map-close aria-label="Close detail">&#10005;</button></div>'
-    + '<div style="margin-top:4px">' + esc(d.main) + '</div>';
+    + '<button class="linkbtn" data-map-close aria-label="Close detail">&#10005;</button></div>';
+  /* Rule data leads (Nov 20): the rule, then the posted limit and permit
+     sector when they apply, then the move-by verdict. */
+  if (d.rule) s += '<div style="margin-top:4px">' + esc(d.rule) + '</div>';
+  if (d.limitLine) s += '<div style="margin-top:4px">' + esc(d.limitLine) + '</div>';
+  if (d.sectorLine) s += '<div style="margin-top:4px">' + esc(d.sectorLine) + '</div>';
+  s += '<div style="margin-top:4px">' + esc(d.main) + '</div>';
   if (d.note) s += '<div style="margin-top:4px">' + esc(d.note) + '</div>';
   if (d.allowedUntil) s += '<div style="margin-top:4px">' + esc(d.allowedUntil) + '</div>';
   if (d.comingUp) s += '<div style="margin-top:4px">' + esc(d.comingUp) + '</div>';
@@ -10609,6 +10683,7 @@ function osmEventInMap(e) {
     mapSelectedCurb: mapSelectedCurb, mapLayers: mapLayers, mapSetLayer: mapSetLayer,
     mapToggleLayer: mapToggleLayer, MAP_CURB_M: MAP_CURB_M,
     curbColorForVerdict: curbColorForVerdict, stayUntilTextFor: stayUntilTextFor,
+    windowRuleLine: windowRuleLine, limitShortLabel: limitShortLabel, limitLineFor: limitLineFor, sectorLineFor: sectorLineFor,
     whereToMoveEntries: whereToMoveEntries, whereStreetNames: whereStreetNames,
     whereRowText: whereRowText, whereRowHtml: whereRowHtml,
     whereToMoveBodyHtml: whereToMoveBodyHtml, whereToMoveRowLabel: whereToMoveRowLabel,
