@@ -4204,7 +4204,17 @@ function liveBuildResult(input) {
     if (geo.parity === houseParity) sideMethod = "geobase";
     else geoDisagreement = true; /* geometry wins: the house point is the ground truth */
   }
-  var seg = liveDeriveSegment(chain, input.crossWays, houseAlong, cum);
+  /* input.segment (optional, Nov 20 centreline fallback): a pre-derived
+     segment { min, max, belowName, aboveName, extMin, extMax,
+     extBelowName, extAboveName, innerBelow, innerAbove } — all alongs
+     relative to the house — used INSTEAD of deriving one from crossings.
+     Supplied only by the Destination centreline fallback, where the
+     segment comes from the same house's cached result or from the baked
+     junctions bracketing the house: real geometry, never invented. The
+     signs are still fetched fresh and attributed against it exactly as
+     against a derived segment. Without it the segment is derived from
+     crossings exactly as before. */
+  var seg = input.segment || liveDeriveSegment(chain, input.crossWays, houseAlong, cum);
   var seen = {}, attributed = [];
   var banPoles = { even: {}, odd: {} }; /* in-band permanent-ban poles per side (poteau -> along): the whole-side-ban evidence, liveWholeSideBan */
   var counts = { fetched_in_box: input.signs.length, in_band_3_10m: 0, in_segment: 0,
@@ -4239,7 +4249,18 @@ function liveBuildResult(input) {
       along_track_from_home_block_m: Math.round(along * 10) / 10, parsed: parsed });
   });
   counts.attributed = attributed.length;
-  var mapExtent = liveMapExtent(seg);
+  /* A supplied segment already carries its map extent (cached result, or
+     the baked junctions' 2nd-out junctions) — keep it whole instead of
+     re-deriving it from crossings the caller does not have. A derived
+     segment goes through liveMapExtent exactly as before. */
+  var mapExtent;
+  if (input.segment && typeof input.segment.extMin === "number" && typeof input.segment.extMax === "number") {
+    mapExtent = { extMin: input.segment.extMin, extMax: input.segment.extMax,
+      extBelowName: input.segment.extBelowName || null, extAboveName: input.segment.extAboveName || null,
+      innerBelow: input.segment.innerBelow || null, innerAbove: input.segment.innerAbove || null };
+  } else {
+    mapExtent = liveMapExtent(seg);
+  }
   var banEvidence = { even: liveBanSummary(banPoles.even), odd: liveBanSummary(banPoles.odd) };
   return { status: "ok", sides: liveAssembleSides(attributed, banEvidence), counts: counts,
     banEvidence: banEvidence,
@@ -7117,6 +7138,7 @@ var OSM_MAP_H = 400; /* the home-screen map is the dominant view */
 var _osmView = null; /* { lat, lon, zoom } — the view centre (north-up only) */
 var _osmStreetKey = "";
 var _gmap = null; /* the google.maps.Map instance, once the API has loaded */
+var _gmapZoomPush = false; /* an explicit zoom change is waiting to be pushed to the live map (Nov 20 pinch-zoom snap): set ONLY where the user asked for a zoom — osmSetView with a new zoom (directions overview, osmZoomAt) or North — never by a background render or a gesture read-back. gmapsSyncView consumes it once; a render without it pushes centre + heading only, so a background render during a fractional-zoom pinch never snaps the map to the integer view-model zoom. */
 var _gmapLoaded = false, _gmapLoading = false, _gmapFailed = false;
 var _gmapObjs = {}; /* overlay id -> google.maps overlay object on the map */
 var _gmapDescriptors = null; /* the last mapOverlays() result (tests read it) */
@@ -7265,6 +7287,7 @@ function osmView() {
 }
 function osmSetView(lat, lon, zoom, bearing) {
   if (typeof lat !== "number" || typeof lon !== "number") return osmView();
+  var prevZoom = osmView().zoom;
   zoom = (typeof zoom === "number") ? Math.max(OSM_ZOOM_MIN, Math.min(OSM_ZOOM_MAX, Math.round(zoom))) : osmView().zoom;
   lat = Math.max(-85, Math.min(85, lat));
   lon = ((lon + 180) % 360 + 360) % 360 - 180;
@@ -7273,6 +7296,11 @@ function osmSetView(lat, lon, zoom, bearing) {
      the heading the user already has. Nothing here ever resets the
      zoom or the heading on its own. */
   var b = (typeof bearing === "number") ? osmNormBearing(bearing) : (osmView().bearing || 0);
+  /* An explicit zoom change (directions overview, osmZoomAt) arms the
+     one-shot push to the live map; a re-assert of the current zoom (GPS
+     centre, destination centre, pan) arms nothing, so a render mid-pinch
+     never snaps the map. */
+  if (zoom !== prevZoom) _gmapZoomPush = true;
   _osmView = { lat: lat, lon: lon, zoom: zoom, bearing: b };
   _osmStreetKey = osmStreetKey();
   osmPersistZoom(zoom); /* the map's zoom now is the last zoom: the next open restores it, never forces 17 */
@@ -7285,6 +7313,11 @@ function osmSetView(lat, lon, zoom, bearing) {
 function osmRecentre() {
   _osmView = osmDefaultView();
   _osmStreetKey = osmStreetKey();
+  /* North always wants the default zoom on the map — even when the view
+     model already held it (a fractional mid-pinch zoom reads back
+     rounded, so the model can equal the default while the map sits
+     fractional). The push is armed here and consumed by the next sync. */
+  _gmapZoomPush = true;
   osmPersistZoom(_osmView.zoom); /* North's reset zoom is the map's zoom now: the next open restores it */
   renderMap();
   osmAreaScheduleRefresh();
@@ -8337,7 +8370,19 @@ function gmapsSyncView() {
     if (clat === null || Math.abs(clat - v.lat) > 1e-9 || Math.abs(clon - v.lon) > 1e-9) {
       _gmap.setCenter({ lat: v.lat, lng: v.lon });
     }
-    if (_gmap.getZoom() !== v.zoom) _gmap.setZoom(v.zoom);
+    /* Zoom (Nov 20 pinch-zoom snap): a background render NEVER pushes
+       zoom. The live map's zoom is the user's — pinch / wheel /
+       double-click stream in through gmapsOnMapMove, which reads the
+       fractional zoom back ROUNDED into the view model — so pushing the
+       model zoom here snaps a fractional mid-pinch zoom to the nearest
+       integer. A zoom push happens only for an explicit user action
+       (North, directions overview, osmZoomAt), which arms _gmapZoomPush;
+       the push is consumed here, once, and is a no-op when the map
+       already sits at the model zoom. */
+    if (_gmapZoomPush) {
+      _gmapZoomPush = false;
+      try { if (_gmap.getZoom() !== v.zoom) _gmap.setZoom(v.zoom); } catch (e1) { /* a zoom-push fault never breaks the render */ }
+    }
     /* Push the heading the same way (a programmatic turn — North
        resetting to 0, or osmSetBearing). On a raster map setHeading
        is a no-op; on a vector map it turns the map. Never touches
@@ -9154,6 +9199,215 @@ function destApplyResult(result, dataAsOf) {
   destRender();
   destCentreMap(result);
 }
+/* Bounded wait for the baked area-paint file (Nov 20 Ducharme fix): the
+   Destination lookup must not hang when the bake has not landed yet (a
+   slow first load) — it waits at most DEST_BAKED_WAIT_MS, then falls
+   through to the live pipeline, which covers the gap. A failed load
+   resolves at once (bakedPaintLoad never rejects). Plain var so suites
+   can shorten it, like the LIVE_* timeouts. */
+var DEST_BAKED_WAIT_MS = 2000;
+function destBakedAreaWait() {
+  var loaded = null;
+  try { loaded = bakedPaintLoad(); } catch (e) { loaded = null; }
+  if (!loaded || typeof loaded.then !== "function") return Promise.resolve(bakedPaintEntries());
+  var timer = null;
+  var timeout = new Promise(function (resolve) {
+    try {
+      if (typeof setTimeout === "function") timer = setTimeout(function () { resolve(null); }, DEST_BAKED_WAIT_MS);
+      else resolve(null);
+    } catch (e) { resolve(null); }
+  });
+  return Promise.race([loaded, timeout]).then(function () {
+    if (timer && typeof clearTimeout === "function") { try { clearTimeout(timer); } catch (e) {} }
+    return bakedPaintEntries();
+  });
+}
+/* Baked area-paint block for a destination (Nov 20 Ducharme fix): the
+   area-paint bake holds liveBuildResult objects for 342 blocks on 174
+   streets — including streets the verified STREET_DATA does not cover —
+   but destRunLookup never consulted it, so a Destination lookup for one
+   of those streets fell through to the live pipeline and died at the
+   Overpass step. A block matches by NEAREST block, never by exact house
+   number (1466 Ducharme is not a baked house; its block is #1495): among
+   the same-slug ok entries whose CORE segment contains the house point
+   (along-track, on the entry's own centreline), the nearest anchor house
+   wins; a far block of the same street never wins. A house that falls in
+   NO baked segment (e.g. 1551 Ducharme, McEachran..Davaar — whose odd
+   side is not established while its neighbours' are) does NOT take a
+   neighbouring block's rules — it falls through to the live pipeline,
+   which derives that house's own segment. Returns the picked entry (or
+   null). Pure over the entries list, so suites can drive it without the
+   network. */
+function destBakedAreaPick(entries, slug, houseLat, houseLon) {
+  if (!entries || !slug || typeof houseLat !== "number" || typeof houseLon !== "number"
+      || !isFinite(houseLat) || !isFinite(houseLon)) return null;
+  var best = null, bestAnchorDist = Infinity;
+  (entries || []).forEach(function (e) {
+    if (!e || e.slug !== slug) return;
+    var r = e.result;
+    if (!r || r.status !== "ok") return;
+    var cl = r.centreline;
+    if (!cl || cl.length < 2) return;
+    var seg = r.segment;
+    if (!seg || typeof seg.min !== "number" || typeof seg.max !== "number") return;
+    if (typeof r.houseAlong !== "number") return;
+    var snap = null;
+    try { snap = liveSnap(houseLat, houseLon, cl, houseLat, houseLon); } catch (err) { snap = null; }
+    if (!snap) return;
+    /* The live Overpass query covers 400 m around the fix; a house
+       point farther than that from this street's centreline is not on
+       this street's mapped geometry, so it cannot be in this block. */
+    if (snap.dist > 400) return;
+    var cum = null, along = NaN;
+    try {
+      cum = liveCumAlong(cl, houseLat, houseLon);
+      along = liveAlongFromSnap(cum, cl, snap, houseLat, houseLon);
+    } catch (err) { return; }
+    if (typeof along !== "number" || !isFinite(along)) return;
+    var lo = r.houseAlong + seg.min, hi = r.houseAlong + seg.max;
+    if (along < lo || along > hi) return; /* this block's rules stop at its junctions */
+    var anchorDist = Math.abs(along - r.houseAlong);
+    if (!best || anchorDist < bestAnchorDist) { bestAnchorDist = anchorDist; best = e; }
+  });
+  return best;
+}
+/* Segment for a house from the baked junctions bracketing it (Nov 20
+   centreline fallback): the union of the known junctions on one street
+   — each same-slug entry's segment bounds, 1st junctions beyond the
+   segment (innerBelow/innerAbove) and 2nd junctions out (ext bounds) —
+   all absolute along-track positions on the shared centreline. The
+   segment is the greatest known junction below the house and the
+   smallest above it, with the 2nd-out junctions as the map extent,
+   mirroring liveDeriveSegment + liveMapExtent exactly (relative to
+   houseAlong). A null name means "no junction there" (the centreline
+   end) and is skipped; an empty name is an unnamed crossing and still
+   bounds the segment. Returns null when either side has no known
+   junction — the house sits beyond the baked coverage, so no segment
+   can be stated honestly. Pure, so suites can drive it directly. */
+function destBakedJunctionSegment(entries, slug, houseAlong) {
+  if (!entries || !slug || typeof houseAlong !== "number" || !isFinite(houseAlong)) return null;
+  var jn = [];
+  (entries || []).forEach(function (e) {
+    if (!e || e.slug !== slug) return;
+    var r = e.result;
+    if (!r || r.status !== "ok") return;
+    var ha = r.houseAlong, s = r.segment;
+    if (typeof ha !== "number" || !s) return;
+    var pts = [];
+    if (s.belowName !== null && s.belowName !== undefined && typeof s.min === "number") pts.push({ name: s.belowName, along: ha + s.min });
+    if (s.aboveName !== null && s.aboveName !== undefined && typeof s.max === "number") pts.push({ name: s.aboveName, along: ha + s.max });
+    if (s.innerBelow) pts.push({ name: s.innerBelow.name, along: ha + s.innerBelow.along });
+    if (s.innerAbove) pts.push({ name: s.innerAbove.name, along: ha + s.innerAbove.along });
+    if (s.extBelowName !== null && s.extBelowName !== undefined && typeof s.extMin === "number") pts.push({ name: s.extBelowName, along: ha + s.extMin });
+    if (s.extAboveName !== null && s.extAboveName !== undefined && typeof s.extMax === "number") pts.push({ name: s.extAboveName, along: ha + s.extMax });
+    pts.forEach(function (p) {
+      /* Same junction reported by two entries at slightly different
+         alongs (different anchor chains): dedup like
+         liveDedupeCrossings — same name within 20 m is one junction. */
+      if (jn.some(function (o) { return o.name === p.name && Math.abs(o.along - p.along) <= 20; })) return;
+      jn.push(p);
+    });
+  });
+  if (!jn.length) return null;
+  var below = jn.filter(function (j) { return j.along < houseAlong; }).sort(function (a, b) { return b.along - a.along; });
+  var above = jn.filter(function (j) { return j.along > houseAlong; }).sort(function (a, b) { return a.along - b.along; });
+  if (!below.length || !above.length) return null;
+  var lo = below[0], hi = above[0];
+  /* Map extent, mirroring liveMapExtent exactly: the junctions BEYOND
+     the segment bounds (not the bounds themselves) — the 1st beyond is
+     the inner label, the 2nd beyond is the extent; with only one beyond,
+     it is the extent and there is no inner label; with none, the extent
+     is the bound itself. */
+  var belowBeyond = below.slice(1), aboveBeyond = above.slice(1);
+  var extMin = belowBeyond.length >= 2 ? belowBeyond[1].along : (belowBeyond.length === 1 ? belowBeyond[0].along : lo.along);
+  var extMax = aboveBeyond.length >= 2 ? aboveBeyond[1].along : (aboveBeyond.length === 1 ? aboveBeyond[0].along : hi.along);
+  function rel(v) { return Math.round((v - houseAlong) * 10) / 10; }
+  return { min: rel(lo.along), max: rel(hi.along), belowName: lo.name, aboveName: hi.name,
+    extMin: rel(extMin), extMax: rel(extMax),
+    extBelowName: belowBeyond.length >= 2 ? belowBeyond[1].name : (belowBeyond.length === 1 ? belowBeyond[0].name : null),
+    extAboveName: aboveBeyond.length >= 2 ? aboveBeyond[1].name : (aboveBeyond.length === 1 ? aboveBeyond[0].name : null),
+    innerBelow: (belowBeyond.length >= 2 && belowBeyond[0].along > extMin)
+      ? { name: belowBeyond[0].name, along: rel(belowBeyond[0].along) } : null,
+    innerAbove: (aboveBeyond.length >= 2 && aboveBeyond[0].along < extMax)
+      ? { name: aboveBeyond[0].name, along: rel(aboveBeyond[0].along) } : null };
+}
+/* Re-base a cached segment (relative to its own houseAlong) onto a new
+   houseAlong on the same centreline. Same house, so the shift is ~0 in
+   practice; exact when both alongs are known, identity when the cached
+   along is missing. */
+function destReanchorSegment(seg, fromAlong, toAlong) {
+  if (!seg || typeof seg.min !== "number" || typeof seg.max !== "number") return null;
+  var shift = (typeof fromAlong === "number" && typeof toAlong === "number") ? (fromAlong - toAlong) : 0;
+  function sh(v) { return (typeof v === "number") ? Math.round((v + shift) * 10) / 10 : v; }
+  return { min: sh(seg.min), max: sh(seg.max),
+    belowName: seg.belowName || null, aboveName: seg.aboveName || null,
+    extMin: sh(seg.extMin), extMax: sh(seg.extMax),
+    extBelowName: seg.extBelowName || null, extAboveName: seg.extAboveName || null,
+    innerBelow: seg.innerBelow ? { name: seg.innerBelow.name || null, along: sh(seg.innerBelow.along) } : null,
+    innerAbove: seg.innerAbove ? { name: seg.innerAbove.name || null, along: sh(seg.innerAbove.along) } : null };
+}
+/* Fallback centreline for the chain step when Overpass fails (Nov 20):
+   real geometry only, most specific first — (a) the live.v5 cached
+   centreline for this same street+house (a previous successful lookup),
+   with that result's own segment re-based onto this run's house point;
+   (b) the baked area-paint centreline of the NEAREST block of the same
+   street (nearest anchor house), with the segment derived from the baked
+   junctions bracketing the house — its rules do not cover this house,
+   only its road geometry and its junctions are reused, and the signs
+   still come fresh from the city. The returned chain carries no node
+   ids (no crossings are known — the segment is supplied, never derived
+   from an empty crossing list, so a full-street attribution can never
+   happen). Returns { chain, segment } or null when no real centreline
+   exists anywhere — the caller then fails with the plain error-map,
+   never an invented road. */
+function destFallbackChain(fix, slug, cached) {
+  var hLat = (typeof fix.houseLat === "number") ? fix.houseLat : fix.lat;
+  var hLon = (typeof fix.houseLon === "number") ? fix.houseLon : fix.lon;
+  if (typeof hLat !== "number" || typeof hLon !== "number" || !isFinite(hLat) || !isFinite(hLon)) return null;
+  function alongOn(points) {
+    var snap = null, cum = null;
+    try {
+      snap = liveSnap(hLat, hLon, points, hLat, hLon);
+      if (!snap) return null;
+      cum = liveCumAlong(points, hLat, hLon);
+      var along = liveAlongFromSnap(cum, points, snap, hLat, hLon);
+      if (typeof along !== "number" || !isFinite(along)) return null;
+      var total = cum[cum.length - 1];
+      if (along <= 0 || along >= total) return null; /* the house projects past this centreline's span */
+      return { along: along, snapDist: snap.dist };
+    } catch (e) { return null; }
+  }
+  /* (a) cached centreline for this same street+house. */
+  if (cached && cached.result && cached.result.centreline && cached.result.centreline.length >= 2) {
+    var a = alongOn(cached.result.centreline);
+    if (a) {
+      var segA = destReanchorSegment(cached.result.segment, cached.result.houseAlong, a.along);
+      if (segA) return { chain: { points: cached.result.centreline, nodeIds: [], streetWayIds: {} }, segment: segA };
+    }
+  }
+  /* (b) baked centreline of the nearest block of the same street. */
+  var entries = null;
+  try { entries = bakedPaintEntries(); } catch (e) { entries = null; }
+  var cands = [];
+  (entries || []).forEach(function (e) {
+    if (!e || e.slug !== slug) return;
+    var r = e.result;
+    if (!r || r.status !== "ok") return;
+    var cl = r.centreline;
+    if (!cl || cl.length < 2) return;
+    if (typeof r.houseLat !== "number" || typeof r.houseLon !== "number") return;
+    cands.push({ points: cl, dist: liveDistM(hLat, hLon, r.houseLat, r.houseLon) });
+  });
+  cands.sort(function (x, y) { return x.dist - y.dist; });
+  for (var i = 0; i < cands.length; i++) {
+    var b = alongOn(cands[i].points);
+    if (!b) continue;
+    var segB = destBakedJunctionSegment(entries, slug, b.along);
+    if (!segB) continue;
+    return { chain: { points: cands[i].points, nodeIds: [], streetWayIds: {} }, segment: segB };
+  }
+  return null;
+}
 /* The live pipeline for a destination fix — the same steps as
    liveRunLookupInner (Geobase -> packages -> cache -> Overpass -> CKAN
    signs -> RPA canon -> liveBuildResult -> paid), but the result lands
@@ -9170,6 +9424,34 @@ async function destRunLookup(fix) {
       houseNumber: fix.houseNumber, sides: bd.sides, lims: bd.limits || null,
       counts: null, segment: null, sideMethod: "verified", dataAsOf: bd.data_as_of,
       errorTitle: null, errorDetail: null, cacheStale: null, baked: true };
+    destRender();
+    destCentreMap({ houseLat: fix.houseLat, houseLon: fix.houseLon });
+    return { status: "ok", baked: true };
+  }
+  /* Baked area-paint short-circuit (Nov 20 Ducharme fix): the bake holds
+     live results for streets the verified STREET_DATA does not cover, so
+     a Destination lookup for one of them answers from the bake instead
+     of dying at the Overpass step. Bounded wait — a bake that has not
+     landed yet falls through to the live pipeline below. The picked
+     block's rules ARE this house's rules (its segment contains the house
+     point) — applied exactly as the live path applies a result, then
+     marked baked and centred on the destination house (not the block's
+     anchor house). */
+  var areaHit = null;
+  try {
+    var areaEntries = await destBakedAreaWait();
+    areaHit = destBakedAreaPick(areaEntries, slug,
+      (typeof fix.houseLat === "number" ? fix.houseLat : fix.lat),
+      (typeof fix.houseLon === "number" ? fix.houseLon : fix.lon));
+  } catch (e) { areaHit = null; }
+  if (gen !== DEST_GEN) { destClearStaleIfMine(gen); return { status: "abandoned" }; }
+  if (areaHit && areaHit.result) {
+    DEST = { status: "loading", query: DEST.query, streetName: fix.streetName,
+      houseNumber: fix.houseNumber, houseLat: fix.houseLat, houseLon: fix.houseLon,
+      sides: null, lims: null, counts: null, segment: null, sideMethod: null,
+      dataAsOf: null, errorTitle: null, errorDetail: null, cacheStale: null, baked: false };
+    destApplyResult(areaHit.result, areaHit.result.dataAsOf || null);
+    DEST.baked = true;
     destRender();
     destCentreMap({ houseLat: fix.houseLat, houseLon: fix.houseLon });
     return { status: "ok", baked: true };
@@ -9237,17 +9519,36 @@ async function destRunLookup(fix) {
       }
       houseLat = pt.lat; houseLon = pt.lon;
     }
-    var over = await liveOverpassLookup(fix.streetName, fix.lat, fix.lon);
-    var chain = liveChainStreetWays(over.ways, fix.streetName, fix.lat, fix.lon);
+    var over = null, chain = null, crossWays = [], overErr = null, fbSegment = null;
+    try {
+      over = await liveOverpassLookup(fix.streetName, fix.lat, fix.lon);
+      chain = liveChainStreetWays(over.ways, fix.streetName, fix.lat, fix.lon);
+      if (chain) {
+        crossWays = over.ways.filter(function (w) {
+          var t = w.tags || {};
+          return !chain.streetWayIds[w.id] && (t.name || "").toLowerCase() !== String(fix.streetName).toLowerCase()
+            && ["footway", "path", "cycleway", "steps", "pedestrian"].indexOf(t.highway) < 0;
+        });
+      }
+    } catch (e) { overErr = e; over = null; chain = null; crossWays = []; }
     if (!chain) {
-      throw { liveError: "error-map", title: "Couldn't read the street map",
-        detail: "No road matching this street came back from the map, so no windows can be shown. Read the sign where you park." };
+      /* Centreline resilience (Nov 20): a single Overpass failure must
+         not kill the lookup when real geometry exists — a cached
+         centreline for this same street+house, or the baked centreline
+         of a nearby block of the same street with its junctions. The
+         signs still come fresh from the city and are attributed against
+         that segment exactly as against a derived one. No centreline
+         anywhere: the plain error-map below, as before — the Overpass
+         failure's own error when that is what failed, the "no road
+         matching" one when Overpass answered but chained nothing. */
+      var fb = null;
+      try { fb = destFallbackChain(fix, slug, cached); } catch (e2) { fb = null; }
+      if (fb && fb.chain) { chain = fb.chain; fbSegment = fb.segment || null; crossWays = []; }
+      if (!chain) {
+        throw overErr || { liveError: "error-map", title: "Couldn't read the street map",
+          detail: "No road matching this street came back from the map, so no windows can be shown. Read the sign where you park." };
+      }
     }
-    var crossWays = over.ways.filter(function (w) {
-      var t = w.tags || {};
-      return !chain.streetWayIds[w.id] && (t.name || "").toLowerCase() !== String(fix.streetName).toLowerCase()
-        && ["footway", "path", "cycleway", "steps", "pedestrian"].indexOf(t.highway) < 0;
-    });
     var signs = await liveCkanSql(liveCkanSignsSql(fix.lat, fix.lon));
     var codes = [];
     signs.forEach(function (s) { if (s.CODE_RPA && codes.indexOf(s.CODE_RPA) < 0) codes.push(s.CODE_RPA); });
@@ -9261,7 +9562,8 @@ async function destRunLookup(fix) {
       } catch (e) { /* keep the cached subset — codes still missing stay ambiguous, honestly */ }
     }
     var result = liveBuildResult({ signs: signs, canonByCode: canon, chain: chain,
-      crossWays: crossWays, houseLat: houseLat, houseLon: houseLon,
+      crossWays: crossWays, segment: fbSegment,
+      houseLat: houseLat, houseLon: houseLon,
       houseNumber: fix.houseNumber, streetName: fix.streetName, dataAsOf: dataAsOf, geoHit: geoHit });
     if (result.status !== "ok") {
       throw { liveError: result.error, title: "Couldn't tell which side",
@@ -9654,7 +9956,9 @@ function osmEventInMap(e) {
     closeSheet: closeSheet, sheetIsOpen: sheetIsOpen, SHEET_TABS: SHEET_TABS,
     renderSettingsLayers: renderSettingsLayers, setGpsStatusText: setGpsStatusText,
     destSearch: destSearch, destRunLookup: destRunLookup, destPickFeature: destPickFeature,
-    destBakedSlug: destBakedSlug, destEntries: destEntries, destResultHtml: destResultHtml,
+    destBakedSlug: destBakedSlug, destBakedAreaPick: destBakedAreaPick,
+    destBakedAreaWait: destBakedAreaWait, destBakedJunctionSegment: destBakedJunctionSegment,
+    destFallbackChain: destFallbackChain, destEntries: destEntries, destResultHtml: destResultHtml,
     destRender: destRender, destState: destState, destSetState: destSetState,
     moveEntryFor: moveEntryFor, rankMoveEntries: rankMoveEntries,
     _reportCache: function () { return _reportCache; },
