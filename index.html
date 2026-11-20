@@ -223,6 +223,11 @@
   .reportitem { border-top: 1px solid var(--line); padding: 10px 2px; font-size: 17px; text-align: left; }
   .reportitem:first-child { border-top: 0; }
   .reportitem .repflag { font-weight: 700; }
+  /* Verification loop (Nov 20): the Mapillary photo + the report photo
+     preview. Both <img> tags ship with NO src — the build gate forbids
+     external <img> srcs, so the src is set at runtime only. */
+  #verifyPhoto, #reportPhotoPreview { width: 100%; border-radius: 12px; margin-top: 10px; display: block; }
+  #verifyPhoto.hidden, #reportPhotoPreview.hidden { display: none; }
   /* Phase 5 piece 2: where-to-move rows — one per curb, longest stay first.
      Current-street rows are buttons (tap opens the map on that curb);
      other-street rows are plain divs (their map shows when that street is
@@ -392,20 +397,51 @@
   <!-- Phase 5 piece 3 (Nov 18): sign reports — a collapsed row in the same
        pattern as the map / where-to-move rows, so the compact one-screen main
        view stays compact. A report names the curb (prefilled from the tapped
-       map curb or the picked side) + what the sign says (free text). Reports
-       are community reports, never verified rules: they are shown labelled
-       unverified and never change a verdict, countdown, fine or map color.
-       Text only — photos need R2, which is not enabled on the account. -->
+       map curb or the picked side) + what the sign says (free text) + an
+       optional photo of the sign (downscaled on this device, stored with
+       the report). Reports are community reports, never verified rules:
+       they are shown labelled unverified. A report two drivers make in
+       the same words (corroborated) whose wording reads as one cleaning
+       window CAN change the shown rule through the override layer — an
+       uncorroborated report never changes anything. -->
   <div class="card" id="reportCard">
     <button class="limitrow" id="reportToggle" aria-expanded="false"><span id="reportToggleText">Report a sign</span><span class="chev" aria-hidden="true">&rsaquo;</span></button>
     <div id="reportBody" class="hidden">
       <div id="reportCurb" style="font-size:17px"></div>
       <textarea class="reporttext" id="reportText" rows="3" maxlength="500" aria-label="What does the sign say?" placeholder="What does the sign say?"></textarea>
+      <div style="margin-top:10px">
+        <label for="reportPhoto" style="font-size:17px">Photo of the sign (optional)</label>
+        <input type="file" id="reportPhoto" accept="image/*" capture="environment" aria-label="Photo of the sign" style="display:block;margin-top:6px;font-size:16px">
+      </div>
+      <img id="reportPhotoPreview" class="hidden" alt="Your sign photo">
+      <div style="margin-top:6px"><button class="linkbtn hidden" id="reportPhotoRemove" type="button">Remove photo</button></div>
       <div style="margin-top:10px"><button class="action primary" id="reportSubmit">Send report</button></div>
       <div id="reportStatus" style="font-size:17px;margin-top:10px"></div>
       <div id="reportList" style="margin-top:6px"></div>
-      <div class="note" style="margin-top:8px">Reports are unverified &mdash; they never change a verdict, a countdown, a fine or a map color. A report a second driver reports in the same words is shown as corroborated &mdash; still a report, never a verified rule.</div>
+      <div class="note" style="margin-top:8px">Reports are unverified &mdash; an uncorroborated report never changes a verdict, a countdown, a fine or a map color. A report a second driver makes in the same words is shown as corroborated; when it reads as one cleaning window it can change the shown rule (the override note on the window says so). A photo is downscaled on your phone before it is sent.</div>
     </div>
+  </div>
+
+  <!-- Verification loop, piece 1 (Nov 20): check the sign photo. Fetches
+       the nearest Mapillary street-level photo for the curb on screen, so
+       the actual sign can be read and compared with the map. Mapillary
+       is free; the City of Montreal itself uploaded 1M+ 360&deg; images
+       covering 3,000 km from Sept 2024. Needs a free Mapillary client
+       token (their developer dashboard — a free Mapillary account is
+       the one setup step); without it the button says so plainly and
+       nothing is fetched. The photo date is always shown, and a photo
+       older than a year is flagged stale — a sign can change. -->
+  <div class="card" id="verifyCard">
+    <div class="label">Check the sign photo</div>
+    <div class="note" style="margin-top:4px">Nearest Mapillary street photo for this curb &mdash; read the actual sign and compare it with the map. Imagery &copy; Mapillary contributors (CC BY-SA).</div>
+    <div style="margin-top:10px"><button class="action primary" id="verifyBtn">Show nearest street photo</button></div>
+    <div id="verifyStatus" style="font-size:17px;margin-top:10px"></div>
+    <img id="verifyPhoto" class="hidden" alt="Nearest street-level photo of this curb">
+    <div id="verifyMeta" style="font-size:16px;margin-top:8px"></div>
+    <div class="label" style="margin-top:12px">Mapillary token</div>
+    <input class="destinput" id="mapillaryToken" type="password" autocomplete="off" placeholder="Paste your Mapillary client token" aria-label="Mapillary client token">
+    <div style="margin-top:8px"><button class="action primary" id="mapillarySave">Save token</button> <button class="linkbtn" id="mapillaryClear" type="button">Clear</button></div>
+    <div class="note" style="margin-top:8px">Free client token from <a href="https://www.mapillary.com/dashboard/developers" target="_blank" rel="noopener">mapillary.com/dashboard/developers</a> (needs a free Mapillary account). Stored on this device only; sent only to Mapillary, as the token itself. No token is baked into the app.</div>
   </div>
 
   <div class="card" id="permitCard">
@@ -3164,7 +3200,7 @@ function showTab(name) {
   else if (name === "park") setLimitOpen(true);
   else if (name === "map") { try { renderMap(); osmAreaRetryIfEmpty(); } catch (e) { /* sizing only */ } }
   else if (name === "destination") destRender();
-  else if (name === "settings") renderSettingsLayers();
+  else if (name === "settings") { renderSettingsLayers(); renderVerifyCard(); }
   else if (name === "info") { try { renderInfoSheet(); } catch (e) { /* static sheet */ } }
   else if (name === "curb") renderCurbSheet();
   if (typeof window !== "undefined" && window.scrollTo) window.scrollTo(0, 0);
@@ -3310,10 +3346,42 @@ function init() {
     var key = reportCurbKey();
     if (!key) { if (st) st.textContent = "Pick your side first."; return; }
     if (st) st.textContent = "Sending\u2026";
-    submitSignReport(reportPayload(reportStreetSlug(), key, textEl.value)).then(function (res) {
+    submitSignReport(reportPayload(reportStreetSlug(), key, textEl.value, _reportPhotoDataUrl)).then(function (res) {
       if (st) st.textContent = reportSubmitMessage(res);
-      if (res.ok) { if (textEl) textEl.value = ""; fetchReports(); }
+      if (res.ok) { if (textEl) textEl.value = ""; clearReportPhoto(); fetchReports(); }
     });
+  });
+  /* Report photo: pick -> downscale on-device -> preview; remove clears.
+     The file input never uploads anything by itself. */
+  var photoInput = el("reportPhoto");
+  if (photoInput) photoInput.addEventListener("change", function () {
+    var f = photoInput.files && photoInput.files[0];
+    if (!f) { clearReportPhoto(); return; }
+    downscaleSignPhoto(f).then(function (u) {
+      if (u) { setReportPhoto(u); return; }
+      var st2 = el("reportStatus");
+      if (st2) st2.textContent = "That photo could not be read \u2014 try another, or send the report without one.";
+      clearReportPhoto();
+    });
+  });
+  var photoRemove = el("reportPhotoRemove");
+  if (photoRemove) photoRemove.addEventListener("click", function () { clearReportPhoto(); });
+  /* Mapillary verify-sign + token (Nov 20): the token field shows the
+     saved token (password type, bullets) so "saved" is visible. */
+  el("verifyBtn").addEventListener("click", function () { showVerifyPhoto(); });
+  el("mapillarySave").addEventListener("click", function () {
+    var t = el("mapillaryToken");
+    var v = t ? t.value : "";
+    setMapillaryToken(v);
+    var st3 = el("verifyStatus");
+    if (st3) st3.textContent = v ? "Token saved on this device." : "Token cleared.";
+  });
+  el("mapillaryClear").addEventListener("click", function () {
+    setMapillaryToken("");
+    var t = el("mapillaryToken");
+    if (t) t.value = "";
+    var st3 = el("verifyStatus");
+    if (st3) st3.textContent = "Token cleared.";
   });
   /* A current-street where-to-move row opens the map on that curb (read-only,
      like a curb tap). The rows are rebuilt on change, so the listener lives
@@ -4430,6 +4498,115 @@ function liveApplyDucharmeOverride(sides, streetName, limits) {
   }
 }
 
+/* ---- community override layer (Nov 20, the verification loop) ----
+   Generalises the Ducharme pattern: a reported correction flips the
+   rule for a side ONLY when it meets the standing standard — TWO
+   independent drivers reporting the same wording (the server marks
+   those rows status "corroborated", confirmations >= 2) AND the
+   wording parses as exactly ONE cleaning window under the same
+   whitelist grammar that reads city signs (liveParseWith, no canon
+   table here — the two agreeing reporters ARE the corroboration, the
+   way memoli's photo was for Ducharme). Anything else stays a report,
+   never a verdict:
+   - uncorroborated (one driver) -> no flip, whatever it says;
+   - wording that does not parse as one window -> no flip;
+   - two corroborated wordings that parse to DIFFERENT windows for the
+     same side -> conflict, no flip;
+   - a side with no established window (not_established) -> no flip:
+     a report alone never ESTABLISHES a rule, it only corrects an
+     established one, exactly like the Ducharme override;
+   - a whole-side ban side -> no flip (a ban is not a window).
+   The flip rewrites the window in place (same shape as the Ducharme
+   override) and discloses itself on w.override, with "(photo
+   attached)" when the corroborating report carries one. Re-running
+   is a no-op: once flipped, the current window equals the reported
+   one, so the "differs" test fails. The baked paint is a static
+   freeze and does NOT re-run this: the flip lands in the live lookup
+   (hero, where-to-move, Destination) and in the next bake, the same
+   way the Ducharme override reaches the bake through the pipeline.
+   reports: rows as the Worker returns them ({side, text, status,
+   confirmations, has_photo}) for THIS street. Returns {applied,
+   conflicts} so callers can say plainly what flipped. */
+function liveParseReportWindow(text) {
+  var t = liveNorm(text || "");
+  if (!t) return { win: null, err: "empty report" };
+  var body = t;
+  if (body.indexOf("\\P") !== 0 && body.indexOf("\\A") !== 0) {
+    /* Sign text as a driver types it usually has no \P/\A prefix
+       ("13h - 15h jeudi 1 avril - 30 nov") — the cleaning family is
+       the default; only an explicit \A prefix reads no-stopping. */
+    if (!/^\d/.test(body)) return { win: null, err: "not a sign window" };
+    body = "\\P " + body;
+  }
+  var vocab = {}, k;
+  for (k in LIVE_WEEKDAYS_FULL) vocab[k] = LIVE_WEEKDAYS_FULL[k];
+  for (k in LIVE_WEEKDAYS_ABBR) vocab[k] = LIVE_WEEKDAYS_ABBR[k];
+  var r = liveParseWith(LIVE_STRICT_RE, body, vocab);
+  if (!r.win) return { win: null, err: r.err };
+  /* Timed no-stopping (\A family) carries the flag the renderers key
+     off — the same flag liveParseSign sets for city signs. */
+  if (body.indexOf("\\A") === 0) r.win.no_stopping = true;
+  r.win.verbatim = body;
+  return { win: r.win, err: null };
+}
+function liveCommunityWindowKey(w) {
+  var s = w.season || {};
+  return [w.weekdays_iso.join(","), w.start, w.end,
+    s.start_month, s.start_day, s.end_month, s.end_day,
+    w.no_stopping ? "A" : "P"].join("|");
+}
+function liveApplyCommunityOverrides(sides, streetName, reports) {
+  var out = { applied: 0, conflicts: 0 };
+  if (!sides || !streetName || !reports || !reports.length) return out;
+  var slug = liveSlug(streetName);
+  if (!slug) return out;
+  /* Group corroborated reports per side by the window they parse to.
+     One corroborated wording = two independent reporters already, so
+     a group qualifies on its first member; a second corroborated
+     wording parsing to the SAME window only strengthens it. */
+  var bySide = { even: {}, odd: {} };
+  reports.forEach(function (r) {
+    if (!r || r.status !== "corroborated" || (r.confirmations || 0) < 2) return;
+    if (r.side !== "even" && r.side !== "odd") return;
+    var p = liveParseReportWindow(r.text);
+    if (!p.win) return;
+    var key = liveCommunityWindowKey(p.win);
+    var g = bySide[r.side][key] || (bySide[r.side][key] = { win: p.win, photo: false, wordings: 0 });
+    g.wordings++;
+    if (r.has_photo) g.photo = true;
+  });
+  ["even", "odd"].forEach(function (sideKey) {
+    var groups = bySide[sideKey];
+    var keys = Object.keys(groups);
+    if (!keys.length) return;
+    var side = sides[sideKey];
+    if (!side || side.status !== "established" || !side.windows || side.windows.length !== 1) return;
+    if (side.no_stopping_whole_side) return;
+    var cur = side.windows[0];
+    var curKey = liveCommunityWindowKey(cur);
+    /* Only groups that DIFFER from the shown window are candidates;
+       a group that already matches is the current rule, not a flip. */
+    var diff = keys.filter(function (k) { return k !== curKey; });
+    if (!diff.length) return;
+    if (diff.length > 1) { out.conflicts++; return; }
+    var g = groups[diff[0]];
+    var nw = g.win;
+    var oldVerbatim = cur.verbatim || "";
+    cur.weekdays_iso = nw.weekdays_iso.slice();
+    cur.weekdays_fr = nw.weekdays_fr.slice();
+    cur.start = nw.start; cur.end = nw.end;
+    cur.season = nw.season;
+    cur.verbatim = nw.verbatim;
+    if (nw.no_stopping) cur.no_stopping = true; else delete cur.no_stopping;
+    cur.override = "community-reported: 2+ drivers report the sign reads "
+      + nw.verbatim + (g.photo ? " (photo attached)" : "")
+      + "; city data says " + (oldVerbatim && oldVerbatim !== nw.verbatim ? oldVerbatim : "otherwise");
+    cur.communityOverride = true;
+    out.applied++;
+  });
+  return out;
+}
+
 /* ---- pure pipeline core: fetched signs + canon + centreline -> sides ---- */
 function liveBuildResult(input) {
   var chain = input.chain, refLat = input.houseLat, refLon = input.houseLon;
@@ -4513,6 +4690,19 @@ function liveBuildResult(input) {
   var sides = liveAssembleSides(attributed, banEvidence);
   var limits = liveDeriveLimits(attributed, sides);
   liveApplyDucharmeOverride(sides, input.streetName, limits);
+  /* Community override layer (Nov 20): corroborated reports for THIS
+     street, when the caller has them (input.communityReports) or when
+     the page already fetched them for this slug (areaReportsFor — the
+     template's cache; guarded, so the bake and the standalone suites,
+     where it does not exist, run exactly as before). Reports usually
+     land AFTER the lookup, so the template re-applies this when the
+     area reports arrive; the function is idempotent, so applying twice
+     (here and there) flips once. */
+  var commReports = input.communityReports || null;
+  if (!commReports && typeof areaReportsFor === "function") {
+    try { commReports = areaReportsFor(liveSlug(input.streetName)); } catch (e) { commReports = null; }
+  }
+  liveApplyCommunityOverrides(sides, input.streetName, commReports);
   return { status: "ok", sides: sides, limits: limits, counts: counts,
     banEvidence: banEvidence,
     segment: { min: Math.round(seg.min * 10) / 10, max: Math.round(seg.max * 10) / 10,
@@ -7282,7 +7472,7 @@ function mapDetailForSide(key, nowMs) {
     if (!av) av = limitOnlyVerdictForSideData(aside, null, nowMs, null);
     if (!av) return { key: key, sideLabel: alabel, color: acolor,
       main: "No verified window for this side \u2014 the data doesn't say.",
-      allowedUntil: null, comingUp: null, note: null, reportable: false };
+      allowedUntil: null, comingUp: null, note: corroboratedReportNote(am[1], am[2]), reportable: false };
     var aallowed = stayUntilTextFor(aside, null, av, nowMs);
     var acoming = null;
     var ar = nextWindowForSideData(aside, new Date(nowMs));
@@ -7291,7 +7481,7 @@ function mapDetailForSide(key, nowMs) {
       else acoming = "Coming up: " + windowHeadline(ar.win) + ".";
     }
     return { key: key, sideLabel: alabel, color: acolor, main: av.text,
-             allowedUntil: aallowed, comingUp: acoming, note: null, reportable: false };
+             allowedUntil: aallowed, comingUp: acoming, note: corroboratedReportNote(am[1], am[2]), reportable: false };
   }
   var sides = liveActiveSides();
   var side = sides[key];
@@ -7302,7 +7492,7 @@ function mapDetailForSide(key, nowMs) {
   if (!v) v = limitOnlyVerdictForSideData(side, limitForSideKey(key), nowMs, parkedAtForVerdict(key));
   if (!v) return { key: key, sideLabel: label, color: color,
     main: "No verified window for this side — the data doesn't say.",
-    allowedUntil: null, comingUp: null, note: null };
+    allowedUntil: null, comingUp: null, note: corroboratedReportNote(reportStreetSlug(), key) };
   var allowedUntil = stayUntilTextFor(side, limitForSideKey(key), v, nowMs);
   var comingUp = null;
   var r = nextWindowForSide(key, new Date(nowMs));
@@ -7315,7 +7505,7 @@ function mapDetailForSide(key, nowMs) {
   }
   return { key: key, sideLabel: label, color: color, main: v.text,
            allowedUntil: allowedUntil, comingUp: comingUp,
-           note: v.limitOnly ? "Cleaning is not established for this side — check the physical sign." : null };
+           note: v.limitOnly ? "Cleaning is not established for this side — check the physical sign." : corroboratedReportNote(reportStreetSlug(), key) };
 }
 function mapDetailHtml(key, nowMs) {
   var d = mapDetailForSide(key, nowMs);
@@ -7862,7 +8052,12 @@ function bakedPaintEntries() {
    is markers only (mapOverlays ov.reports) — it never touches a
    colour, a verdict, a countdown or a fine, the same structural guard
    as the report card. A failed fetch leaves the last fetch in place;
-   the baked paint never waits on it. */
+   the baked paint never waits on it.
+   The override layer is separate (Nov 20): when the area reports
+   land, applyCommunityOverridesToLive re-runs the community override
+   on the LIVE street's sides (hero / where-to-move / destination) —
+   the baked paint itself is a static freeze and is NOT rewritten, so
+   a flip there lands with the next bake. */
 var AREA_REPORTS_TTL_MS = 5 * 60 * 1000;
 var _areaReports = {}; /* slug -> { at, reports } */
 function areaReportsFor(slug, side) {
@@ -7870,6 +8065,29 @@ function areaReportsFor(slug, side) {
   if (!rec || !rec.reports) return [];
   if (!side) return rec.reports;
   return rec.reports.filter(function (r) { return r && r.side === side; });
+}
+/* The first corroborated report for a curb, as a plain-language note
+   for the curb detail sheet — display only, never a verdict. */
+function corroboratedReportNote(slug, side) {
+  var reps = areaReportsFor(slug, side);
+  for (var i = 0; i < reps.length; i++) {
+    var r = reps[i];
+    if (r && r.status === "corroborated" && (r.confirmations || 0) >= 2)
+      return "2+ drivers report the sign reads \u201c" + r.text + "\u201d \u2014 see Settings \u203a Report a sign.";
+  }
+  return null;
+}
+/* Re-run the community override on the live street's sides with the
+   reports now cached for it. Reports usually land AFTER the lookup,
+   so this is what actually flips a rule on screen; liveBuildResult
+   applies the same function at lookup time when reports are already
+   cached. Idempotent — a second run flips nothing twice. Returns the
+   number of sides flipped, so tests can observe it. */
+function applyCommunityOverridesToLive() {
+  if (!liveMode() || !LIVE || !LIVE.sides || typeof liveApplyCommunityOverrides !== "function") return 0;
+  var out = liveApplyCommunityOverrides(LIVE.sides, LIVE.streetName, areaReportsFor(reportStreetSlug()));
+  if (out && out.applied > 0) { try { renderAll(); } catch (e) { /* render is best effort here */ } }
+  return out ? out.applied : 0;
 }
 function fetchAreaReports(fetchImpl) {
   if (!reportsEnabled()) return Promise.resolve([]);
@@ -7889,7 +8107,7 @@ function fetchAreaReports(fetchImpl) {
       .then(function (resp) { return resp.json(); })
       .then(function (j) { _areaReports[slug] = { at: Date.now(), reports: (j && j.reports) || [] }; })
       .catch(function () { /* this slug keeps its last fetch (or none) */ });
-  })).then(function () { try { renderMap(); } catch (e) {} return []; });
+  })).then(function () { try { applyCommunityOverridesToLive(); } catch (e) {} try { renderMap(); } catch (e) {} return []; });
 }
 /* Metres per container pixel at a view (Web Mercator, tile size 256) --
    the same projection osmLatLngToWorld uses, so the paint window and the
@@ -9198,23 +9416,29 @@ function whereShowOnMap(key) {
   return mapSelectCurb(key);
 }
 
-/* ---- Phase 5 piece 3 (Nov 18): sign reports ----
+/* ---- Phase 5 piece 3 (Nov 18): sign reports, extended Nov 20 ----
    A driver reports a sign: WHICH curb (street + side, prefilled from the
-   tapped map curb or the picked side) + WHAT it says (free text). Text
-   only — photos need R2, which is not enabled on the account.
+   tapped map curb or the picked side) + WHAT it says (free text) + an
+   OPTIONAL photo of the sign (downscaled on-device to a JPEG, stored in
+   KV under photo:<report-id>; R2 is not enabled on the account, so KV
+   holds the photos until memoli enables R2 in the dashboard).
    Server: Worker jsm-parking-reports + KV on his Cloudflare account
    (see ~/workspace/ticket-saver-reports/). The D1 variant is kept there;
    same endpoints, so the app never changes if the store moves to D1.
-   HARD GUARD: reports are UNVERIFIED until they match city data or a
-   second independent report (same street + side + wording, different
-   reporter — the server flips those to "corroborated"). Corroborated is
-   still shown as a report, never as a verified rule. NOTHING in this
-   section is read by verdictForSideData, whereToMoveEntries, mapCurbColor
-   or any countdown/fine code: a report can NEVER change a verdict, a
-   countdown, a fine line or a map color — the guard is structural, not a
-   flag. The list is fetched only when the card opens, never on the 30 s
-   hero tick. Submit failure (offline / service down) is said plainly on
-   screen — never pretended sent.
+   GUARD (Nov 20, the verification loop — this REPLACES the Nov 18
+   "a report can NEVER change a verdict" rule): reports are UNVERIFIED
+   until a second independent report (same street + side + wording,
+   different reporter — the server flips those to "corroborated").
+   A corroborated report whose wording parses as ONE cleaning window
+   under the app's own sign grammar CAN flip the shown rule for that
+   side, through liveApplyCommunityOverrides (live-lookup.js) — two
+   independent drivers agreeing, in the same words, is the standing
+   standard; the flip discloses itself on the window's override note.
+   An UNCORROBORATED report never changes anything: no verdict, no
+   countdown, no fine line, no map color. The list is fetched only
+   when the card opens, never on the 30 s hero tick. Submit failure
+   (offline / service down) is said plainly on screen — never
+   pretended sent.
    Kill switch: set REPORTS_URL = "" and rebuild — the card hides entirely
    and nothing is fetched or sent. */
 var REPORTS_URL = "https://jsm-parking-reports.memoliro.workers.dev";
@@ -9271,8 +9495,10 @@ function validateReportText(t) {
   if (n.length > 500) return "That is too long \u2014 keep it under 500 characters.";
   return "";
 }
-function reportPayload(street, side, text) {
-  return { street: street, side: side, text: normalizeReportText(text), reporter_id: reportDeviceId() };
+function reportPayload(street, side, text, photoB64) {
+  var p = { street: street, side: side, text: normalizeReportText(text), reporter_id: reportDeviceId() };
+  if (photoB64 && reportPhotoDataUrlOk(photoB64)) p.photo_b64 = photoB64;
+  return p;
 }
 /* fetchImpl is injectable for tests; in the page it is the browser fetch.
    Resolves { ok, status, error } — never throws, so a dropped connection
@@ -9284,13 +9510,14 @@ function submitSignReport(payload, fetchImpl) {
       headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) })
     .then(function (resp) {
       return resp.json().then(function (j) {
-        return { ok: !!resp.ok && !!j.ok, status: j.status || "unverified", error: j.error || "" };
+        return { ok: !!resp.ok && !!j.ok, status: j.status || "unverified", error: j.error || "", has_photo: !!j.has_photo };
       });
     })
     .catch(function () { return { ok: false, error: "offline" }; });
 }
 function reportSubmitMessage(result) {
-  if (result.ok) return "Report sent \u2014 shown as unverified. It can take up to a minute to appear in the list below. It never changes a verdict.";
+  if (result.ok && result.has_photo) return "Report + photo sent \u2014 shown as unverified. It can take up to a minute to appear in the list below. It never changes a verdict on its own.";
+  if (result.ok) return "Report sent \u2014 shown as unverified. It can take up to a minute to appear in the list below. It never changes a verdict on its own.";
   return "Report NOT sent \u2014 you are offline or the service is down. Nothing was recorded; try again.";
 }
 function reportListHtml(reports) {
@@ -9299,9 +9526,223 @@ function reportListHtml(reports) {
     var flag = (r.status === "corroborated")
       ? "Reported by " + (r.confirmations || 2) + " drivers \u2014 still unverified"
       : "Unverified report";
+    var photo = r.has_photo
+      ? ' <a href="' + REPORTS_URL + "/photo?id=" + encodeURIComponent(r.id) + '" target="_blank" rel="noopener">Photo</a>'
+      : "";
     return '<div class="reportitem"><span class="repflag">' + esc(flag) + '</span> \u2014 '
-      + esc(reportSideLabel(r.side)) + ': ' + esc(r.text) + '</div>';
+      + esc(reportSideLabel(r.side)) + ': ' + esc(r.text) + photo + '</div>';
   }).join("");
+}
+/* ---- report photo (Nov 20) ----
+   The photo is downscaled ON the device (canvas, max 1024 px, JPEG
+   0.8, one retry at 768 px / 0.6) so a full-resolution phone photo
+   never leaves the phone and never lands in KV. The Worker enforces
+   the same cap server-side (400,000 base64 chars, JPEG magic) — a
+   photo that fails either check is refused, never stored. */
+var REPORT_PHOTO_MAX_B64 = 400000;
+var _reportPhotoDataUrl = null;
+function reportPhotoDataUrlOk(u) {
+  if (typeof u !== "string") return false;
+  var p = u;
+  if (p.indexOf("data:image/jpeg;base64,") === 0) p = p.slice(23);
+  else if (p.indexOf("data:image/jpg;base64,") === 0) p = p.slice(22);
+  else return false;
+  return p.length > 0 && p.length <= REPORT_PHOTO_MAX_B64 && p.indexOf("/9j/") === 0;
+}
+function setReportPhoto(dataUrl) {
+  _reportPhotoDataUrl = dataUrl || null;
+  var img = el("reportPhotoPreview");
+  if (img) { if (dataUrl) img.src = dataUrl; img.classList.toggle("hidden", !dataUrl); }
+  var rm = el("reportPhotoRemove");
+  if (rm) rm.classList.toggle("hidden", !dataUrl);
+  return _reportPhotoDataUrl;
+}
+function clearReportPhoto() {
+  var inp = el("reportPhoto");
+  if (inp) inp.value = "";
+  return setReportPhoto(null);
+}
+function downscaleSignPhoto(file, canvasFactory) {
+  /* canvasFactory is injectable for tests; in the page it is
+     document.createElement("canvas"). Resolves a JPEG data URL, or
+     null when the file cannot be read or is still over the cap after
+     the retry. Never throws. */
+  var makeCanvas = canvasFactory || (typeof document !== "undefined" && document.createElement
+    ? function () { return document.createElement("canvas"); } : null);
+  if (!file || !makeCanvas || typeof FileReader === "undefined" || typeof Image === "undefined")
+    return Promise.resolve(null);
+  function encode(img, maxPx, quality) {
+    return new Promise(function (resolve) {
+      var scale = Math.min(1, maxPx / Math.max(img.width, img.height));
+      var c = makeCanvas();
+      c.width = Math.max(1, Math.round(img.width * scale));
+      c.height = Math.max(1, Math.round(img.height * scale));
+      var ctx = c.getContext("2d");
+      if (!ctx) { resolve(null); return; }
+      ctx.drawImage(img, 0, 0, c.width, c.height);
+      var url = null;
+      try { url = c.toDataURL("image/jpeg", quality); } catch (e) { url = null; }
+      resolve(url && reportPhotoDataUrlOk(url) ? url : (url ? { url: url } : null));
+    });
+  }
+  return new Promise(function (resolve) {
+    var reader = new FileReader();
+    reader.onerror = function () { resolve(null); };
+    reader.onload = function () {
+      var img = new Image();
+      img.onerror = function () { resolve(null); };
+      img.onload = function () {
+        encode(img, 1024, 0.8).then(function (first) {
+          if (typeof first === "string") { resolve(first); return; }
+          if (!first) { resolve(null); return; }
+          /* Over the cap at 1024/q0.8: one retry, smaller + softer. */
+          encode(img, 768, 0.6).then(function (second) {
+            resolve(typeof second === "string" ? second : null);
+          });
+        });
+      };
+      img.src = reader.result;
+    };
+    try { reader.readAsDataURL(file); } catch (e) { resolve(null); }
+  });
+}
+
+/* ---- Mapillary verify-sign (Nov 20, verification loop piece 1) ----
+   Fetches the nearest Mapillary street-level photo for the curb on
+   screen, so the actual sign can be read and compared with the map.
+   Free API v4 (graph.mapillary.com, radius search max 50 m, added Apr
+   2026); the City of Montreal itself uploaded 1M+ 360 images / 3,000 km
+   from Sept 2024. Needs a free client token from the Mapillary
+   developer dashboard — a free Mapillary account, i.e. memoli's one
+   setup step; NO token is baked into the app, it lives in localStorage
+   on his device and is sent only to Mapillary. Thumb URLs have a TTL,
+   so they are fetched fresh on every tap, never cached. The photo date
+   (captured_at) is always shown; older than a year is flagged STALE
+   plainly — a sign can change, and a stale photo is a hint, not proof.
+   Google Street View was ruled out for this (ToS prohibits deriving
+   rules from it); Mapillary imagery is CC BY-SA and free to view. */
+var MAPILLARY_GRAPH = "https://graph.mapillary.com";
+var MAPILLARY_KEY = "ticketSaver.mapillary.v1";
+var MAPILLARY_STALE_DAYS = 365;
+var MAPILLARY_RADIUS_M = 50;
+function mapillaryToken() {
+  try { return (localStorage.getItem(MAPILLARY_KEY) || "").replace(/^\s+|\s+$/g, ""); }
+  catch (e) { return ""; }
+}
+function setMapillaryToken(t) {
+  try {
+    if (t) localStorage.setItem(MAPILLARY_KEY, t);
+    else localStorage.removeItem(MAPILLARY_KEY);
+  } catch (e) { /* private mode */ }
+  return mapillaryToken();
+}
+function mapillaryImagesUrl(lat, lon, token) {
+  return MAPILLARY_GRAPH + "/images?fields=id,thumb_1024_url,captured_at,computed_geometry,creator,is_pano"
+    + "&lat=" + Number(lat).toFixed(6) + "&lng=" + Number(lon).toFixed(6)
+    + "&radius=" + MAPILLARY_RADIUS_M + "&limit=5&access_token=" + encodeURIComponent(token);
+}
+function mapillaryViewerUrl(id) {
+  return "https://www.mapillary.com/app/?pKey=" + encodeURIComponent(id);
+}
+function mapillaryPhotoDate(capturedAt) {
+  var ms = Date.parse(capturedAt || "");
+  if (!isFinite(ms)) return null;
+  return new Date(ms).toISOString().slice(0, 10);
+}
+function mapillaryPhotoAge(capturedAt, nowMs) {
+  var dateText = mapillaryPhotoDate(capturedAt);
+  if (!dateText) return { dateText: "date unknown", ageDays: null, stale: true };
+  var ageDays = Math.floor(((nowMs || Date.now()) - Date.parse(capturedAt)) / 86400000);
+  return { dateText: dateText, ageDays: ageDays, stale: ageDays > MAPILLARY_STALE_DAYS };
+}
+function mapillaryPickNearest(images, lat, lon) {
+  var best = null, bestM = Infinity;
+  (images || []).forEach(function (im) {
+    if (!im || !im.id || !im.thumb_1024_url) return;
+    var g = im.computed_geometry || im.geometry;
+    var c = g && g.coordinates;
+    if (!c || c.length < 2) return;
+    var d = liveDistM(lat, lon, c[1], c[0]);
+    if (d < bestM) {
+      bestM = d;
+      best = { id: String(im.id), thumbUrl: im.thumb_1024_url, capturedAt: im.captured_at || null,
+        distM: Math.round(d), creator: (im.creator && im.creator.username) || null, isPano: !!im.is_pano };
+    }
+  });
+  return best;
+}
+/* Resolves { ok, photo, age } or { ok: false, error } — never throws.
+   Errors: "no-token" (nothing fetched), "no-photo" (nothing within
+   50 m), "offline" (fetch failed / bad response). */
+function fetchMapillaryPhoto(lat, lon, fetchImpl) {
+  var token = mapillaryToken();
+  if (!token) return Promise.resolve({ ok: false, error: "no-token" });
+  var f = fetchImpl || (typeof fetch === "function" ? fetch : null);
+  if (!f) return Promise.resolve({ ok: false, error: "offline" });
+  return f(mapillaryImagesUrl(lat, lon, token))
+    .then(function (resp) { return resp.json(); })
+    .then(function (j) {
+      var photo = mapillaryPickNearest(j && j.data, lat, lon);
+      if (!photo) return { ok: false, error: "no-photo" };
+      return { ok: true, photo: photo, age: mapillaryPhotoAge(photo.capturedAt, Date.now()) };
+    })
+    .catch(function () { return { ok: false, error: "offline" }; });
+}
+function mapillaryErrorText(error) {
+  if (error === "no-token") return "No Mapillary token saved yet \u2014 paste your free client token below, then tap again.";
+  if (error === "no-photo") return "No Mapillary photo within 50 m of this curb \u2014 this street may not be covered yet.";
+  return "Mapillary did not answer \u2014 check your connection and try again.";
+}
+/* The curb the photo is for: the live house when a live lookup is
+   showing, else this street's registry anchor, else the map centre. */
+function verifyPhotoPosition() {
+  if (liveMode() && LIVE && typeof LIVE.houseLat === "number" && typeof LIVE.houseLon === "number")
+    return { lat: LIVE.houseLat, lon: LIVE.houseLon };
+  try {
+    var reg = (DATA && DATA.streets) || [];
+    for (var i = 0; i < reg.length; i++) {
+      if (reg[i].slug === currentSlug() && typeof reg[i].lat === "number")
+        return { lat: reg[i].lat, lon: reg[i].lon };
+    }
+  } catch (e) { /* fall through to the map centre */ }
+  try {
+    var v = osmView();
+    if (v && typeof v.lat === "number") return { lat: v.lat, lon: v.lon };
+  } catch (e) { /* no position */ }
+  return null;
+}
+function renderVerifyPhoto(res) {
+  var st = el("verifyStatus"), img = el("verifyPhoto"), meta = el("verifyMeta");
+  if (!res || !res.ok) {
+    if (img) img.classList.add("hidden");
+    if (meta) meta.textContent = "";
+    if (st) st.textContent = res ? mapillaryErrorText(res.error) : "Mapillary did not answer.";
+    return;
+  }
+  var p = res.photo, age = res.age || { dateText: "date unknown", stale: true };
+  if (img) { img.src = p.thumbUrl; img.classList.remove("hidden"); }
+  if (st) st.textContent = "Nearest photo, " + p.distM + " m away" + (p.isPano ? " (360\u00b0)" : "") + ".";
+  if (meta) {
+    var s = "Photo from " + age.dateText;
+    if (age.ageDays !== null && age.ageDays !== undefined) s += " (" + age.ageDays + " days ago)";
+    if (age.stale) s += " \u2014 STALE: the sign may have changed since then. Treat it as a hint, not proof.";
+    else s += ". Compare it with the map.";
+    if (p.creator) s += " By " + p.creator + ".";
+    /* innerHTML, not appendChild: the meta line carries the viewer link
+       as markup, so the render works with no DOM helpers beyond el(). */
+    meta.innerHTML = esc(s) + ' <a href="' + mapillaryViewerUrl(p.id) + '" target="_blank" rel="noopener">Open on Mapillary</a>';
+  }
+}
+function showVerifyPhoto() {
+  var pos = verifyPhotoPosition();
+  var st = el("verifyStatus");
+  if (!pos) { if (st) st.textContent = "No position yet \u2014 open the map first."; return Promise.resolve({ ok: false, error: "no-position" }); }
+  if (st) st.textContent = "Looking for the nearest photo\u2026";
+  return fetchMapillaryPhoto(pos.lat, pos.lon).then(function (res) { renderVerifyPhoto(res); return res; });
+}
+function renderVerifyCard() {
+  var t = el("mapillaryToken");
+  if (t) t.value = mapillaryToken();
 }
 /* The card re-renders from cache only — no fetch here, so renderAll and the
    hero tick never hit the network. A stale cache from another street is
@@ -9341,7 +9782,7 @@ function fetchReports(fetchImpl) {
   return f(REPORTS_URL + "/reports?street=" + encodeURIComponent(slug))
     .then(function (resp) { return resp.json(); })
     .then(function (j) {
-      if (j && j.reports) { _reportCache = j.reports; _reportStreet = slug; renderReportCard(); }
+      if (j && j.reports) { _reportCache = j.reports; _reportStreet = slug; renderReportCard(); applyCommunityOverridesToLive(); }
     })
     .catch(function () {
       var st = el("reportStatus");
@@ -10035,6 +10476,8 @@ function osmEventInMap(e) {
     liveDeriveSegment: liveDeriveSegment, liveMapExtent: liveMapExtent,
     liveDedupeCrossings: liveDedupeCrossings, liveAssembleSides: liveAssembleSides,
     liveDeriveLimits: liveDeriveLimits,
+    liveParseReportWindow: liveParseReportWindow,
+    liveApplyCommunityOverrides: liveApplyCommunityOverrides,
     liveNomVoieCandidate: liveNomVoieCandidate, liveParseHouseNumber: liveParseHouseNumber,
     liveHouseFromFeature: liveHouseFromFeature, liveCacheKey: liveCacheKey,
     liveNearestAddressPoint: liveNearestAddressPoint, liveDistM: liveDistM,
@@ -10211,6 +10654,22 @@ function osmEventInMap(e) {
     reportListHtml: reportListHtml, renderReportCard: renderReportCard,
     setReportOpen: setReportOpen, reportOpen: reportOpen,
     fetchReports: fetchReports, openReportForm: openReportForm,
+    REPORT_PHOTO_MAX_B64: REPORT_PHOTO_MAX_B64,
+    reportPhotoDataUrlOk: reportPhotoDataUrlOk,
+    setReportPhoto: setReportPhoto, clearReportPhoto: clearReportPhoto,
+    downscaleSignPhoto: downscaleSignPhoto,
+    reportPhotoState: function () { return _reportPhotoDataUrl; },
+    MAPILLARY_STALE_DAYS: MAPILLARY_STALE_DAYS, MAPILLARY_RADIUS_M: MAPILLARY_RADIUS_M,
+    mapillaryToken: mapillaryToken, setMapillaryToken: setMapillaryToken,
+    mapillaryImagesUrl: mapillaryImagesUrl, mapillaryViewerUrl: mapillaryViewerUrl,
+    mapillaryPhotoDate: mapillaryPhotoDate, mapillaryPhotoAge: mapillaryPhotoAge,
+    mapillaryPickNearest: mapillaryPickNearest, fetchMapillaryPhoto: fetchMapillaryPhoto,
+    mapillaryErrorText: mapillaryErrorText, verifyPhotoPosition: verifyPhotoPosition,
+    renderVerifyPhoto: renderVerifyPhoto, showVerifyPhoto: showVerifyPhoto,
+    renderVerifyCard: renderVerifyCard,
+    areaReportsFor: areaReportsFor, fetchAreaReports: fetchAreaReports,
+    corroboratedReportNote: corroboratedReportNote,
+    applyCommunityOverridesToLive: applyCommunityOverridesToLive,
     showTab: showTab, currentTab: currentTab, TABS: TABS,
     closeSheet: closeSheet, sheetIsOpen: sheetIsOpen, SHEET_TABS: SHEET_TABS,
     renderSettingsLayers: renderSettingsLayers, setGpsStatusText: setGpsStatusText,
