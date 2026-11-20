@@ -593,7 +593,7 @@
   </div>
   <div class="card">
     <div class="label">Build &amp; nearby streets</div>
-    <div id="infoDiag" style="font-size:17px;text-align:left;margin-top:4px">Build 2026-11-19-areapaint-phone</div>
+    <div id="infoDiag" style="font-size:17px;text-align:left;margin-top:4px">Build 2026-11-20-mapfirst</div>
   </div>
   </section>
 
@@ -717,7 +717,7 @@ var INITIAL_STREET = "des-pins";
    INITIAL_STREET block, because the one-page gate slices the
    STREET_REGISTRY JSON up to the "initial street" comment — nothing may
    sit between the registry and that comment.) */
-var TICKET_SAVER_BUILD = "2026-11-19-areapaint-phone";
+var TICKET_SAVER_BUILD = "2026-11-20-mapfirst";
 /* Embedded generated data for the current street (see the data file — same
    content). */
 var DATA = STREET_DATA[INITIAL_STREET].data;
@@ -2861,25 +2861,40 @@ function onGpsError() {
   setGpsStatusText("📍 Location unavailable — home block (" + DATA.street.address_number + ")");
 }
 
-/* ---- GPS-first first paint (Nov 19; his call: the first paint should
-   centre on the GPS fix, not on the baked home street) ----
-   init() asks for a fix BEFORE the first render and holds only the map's
-   first tile paint until it lands or the bounded wait ends. Everything
-   else paints at once, and the map area shows a loading line while it
-   waits — never a blank frame, never a hang waiting for GPS. A fix that
-   lands in the wait centres the first paint on the fix itself; the
-   existing switch / lookup then takes over from there exactly as today
-   (a fix on another known street switches to that street, a fix on an
-   unknown street starts the live lookup whose house point centres the
-   map). A fix older than GPS_FIRST_FRESH_MS only centres the paint — a
-   cached fix must never drive a street switch or a lookup, so the fresh
-   15 s check runs instead and owns those. Denied, unavailable, timed
-   out, or still pending when the wait ends: paint home, as today, and
-   the 15 s check still runs (a slow cold fix may yet land). */
-var GPS_FIRST_WAIT_MS = 3000; /* longest the map's first paint waits for a fix */
+/* ---- GPS fix on first paint (Nov 19 centre-on-fix, kept; the Nov 19
+   hold is gone — see "Map first, rules after" above) ----
+   A fix that lands in the wait centres the paint on the fix itself (at
+   the user's zoom, never re-zoomed — Nov 20); the existing switch /
+   lookup then takes over from there exactly as today (a fix on another
+   known street switches to that street, a fix on an unknown street
+   starts the live lookup whose house point centres the map). A fix older
+   than GPS_FIRST_FRESH_MS only centres the paint — a cached fix must
+   never drive a street switch or a lookup, so the fresh 15 s check runs
+   instead and owns those. Denied, unavailable, timed out, or still
+   pending when the wait ends: the map is already on home, as painted,
+   and the 15 s check still runs (a slow cold fix may yet land). */
+/* ---- Map first, rules after (Nov 20; supersedes the Nov 19 GPS-first
+   first paint) ----
+   His Nov 20 verdict on the GPS-first paint was "first open should load
+   the map first then looking for parking rules": the old boot HELD the
+   map (renderMap returned early showing only "Finding your location…")
+   for up to 3 s while it waited for a GPS fix, and the fix then started
+   the parking-rules lookup — so the map, the tiles and the rules all
+   arrived together, late. The new order is: init renders the map FIRST
+   (home centre, last zoom — see osmInitialView), the Google API script
+   and the baked-paint file are already loading, and only THEN does the
+   boot GPS request go out. The GPS fix still centres the first paint
+   (his Nov 19 call) and still starts the lookup, but it can no longer
+   delay the map: a fix that lands while the user has already panned or
+   zoomed the live map does NOT yank the centre (see gpsFirstPaintFix),
+   and no lookup (Photon / Overpass / CKAN / signs file) runs before the
+   first renderMap. The "loading" line for the rules themselves is
+   unchanged — the hero still says the rules are loading until the
+   lookup lands; only the map no longer waits on it. */
+var GPS_FIRST_WAIT_MS = 3000; /* longest the boot fix is waited on before the fallback path runs (the map never waits — it paints first) */
 var GPS_FIRST_FRESH_MS = 10000; /* a fix older than this centres the paint only */
 var GPS_FIRST_MAX_AGE_MS = 60000; /* a cached fix up to this old may centre the first paint */
-var _bootMapHeld = false; /* true only between the boot GPS request and its fix-or-timeout */
+var _bootView = null; /* the view object the first renderMap created — a boot fix centres only while the user has not moved the map since (identity check in gpsFirstPaintFix) */
 function gpsFixIsFresh(pos) {
   if (!pos || typeof pos.timestamp !== "number") return true; /* no timestamp — treat the just-delivered fix as fresh */
   return (Date.now() - pos.timestamp) <= GPS_FIRST_FRESH_MS;
@@ -2888,11 +2903,19 @@ function gpsFirstPaintFix(pos) {
   var lat = pos && pos.coords ? pos.coords.latitude : null;
   var lon = pos && pos.coords ? pos.coords.longitude : null;
   if (typeof lat === "number" && typeof lon === "number" && isFinite(lat) && isFinite(lon)) {
-    /* Seed the first-paint centre on the fix itself (street level, the
-       same zoom the area layer needs) — the first osmView() reads this,
-       not the baked home default. */
-    _osmView = { lat: lat, lon: lon, zoom: OSM_ZOOM_DEFAULT, bearing: 0 };
-    _osmStreetKey = osmStreetKey();
+    /* Centre on the fix — but NEVER re-zoom (Nov 20 no-auto-zoom rule):
+       the map is already up at the user's zoom (the persisted last zoom
+       on open), and a boot fix forcing zoom 17 was one of the auto
+       zoom-ins. And only while the user has not moved the map since boot
+       (_bootView identity): with the map live from the first paint, a
+       fix landing seconds later must not yank a map the user is already
+       panning. No boot snapshot yet (suites never run init) means "not
+       moved", so the old centre-on-fix behaviour holds there. */
+    if (!_bootView || _osmView === _bootView) {
+      var v0 = osmView();
+      _osmView = { lat: lat, lon: lon, zoom: v0.zoom, bearing: v0.bearing || 0 };
+      _osmStreetKey = osmStreetKey();
+    }
   }
   if (gpsFixIsFresh(pos)) {
     onGpsFix(pos);
@@ -2913,25 +2936,25 @@ function gpsFirstPaintFix(pos) {
 function gpsFirstPaintStart() {
   if (typeof navigator === "undefined" || !navigator.geolocation
       || !navigator.geolocation.getCurrentPosition) return false; /* nothing to wait for — init runs the 15 s check as today */
-  _bootMapHeld = true;
+  /* Map-first (Nov 20): no hold any more — the map is already painted by
+     the time this runs (init calls it after the first renderMap), so a
+     boot fix only ever centres / looks up, never gates the map. */
   try { setGpsStatusText("📍 Finding your location…"); } catch (e) { /* never a gate */ }
   var done = false;
   function resolve(ok, pos) {
     if (done) return;
     done = true;
-    _bootMapHeld = false;
     try {
       if (ok && pos) {
         gpsFirstPaintFix(pos);
       } else {
-        /* No fix in the wait: paint home, as today — and still run the
-           15 s check, which may yet land a slow cold fix. */
+        /* No fix in the wait: the map is already on home, as painted —
+           still run the 15 s check, which may yet land a slow cold fix. */
         try { renderMap(); } catch (e0) { /* the paint must never throw the boot */ }
         checkGps();
       }
     } catch (e) {
       /* A GPS fault must never break the boot: home paint, as today. */
-      _bootMapHeld = false;
       try { renderMap(); } catch (e2) { /* the paint must never throw the boot */ }
     }
   }
@@ -3196,13 +3219,24 @@ function init() {
      already running (and visible) with no tap. */
   var armed = maybeAutoArmLimit(Date.now());
   if (armed) saveLimitTimer(armed.parkedAt, armed.limitMin);
-  /* GPS-first first paint: ask for a fix before the first render. While
-     a boot fix is outstanding the resolve runs the 15 s check itself when
-     the fix fails or is stale; when there is nothing to wait for, init
-     runs the check as today. */
-  var bootGpsPending = gpsFirstPaintStart();
+  /* Map first (Nov 20): the map renders BEFORE any GPS request or rules
+     lookup — the Google API script and the baked-paint file start
+     loading, then the first render paints the map at once (home centre,
+     last zoom). Only then does the boot GPS request go out; its fix
+     centres the map (never re-zooms) and starts the rules lookup after
+     the map is already up and interactive. */
+  gmapsLoad();
+  try { bakedPaintLoad(); } catch (e) { /* the live lookup covers a failed bake load */ }
   renderAll();
   try { renderMap(); } catch (e) { /* sizing only — the first render ran on an empty map body */ }
+  /* Snapshot the boot view now: a boot fix centres only while the user
+     has not moved the map since (the gpsFirstPaintFix identity check). */
+  _bootView = _osmView;
+  /* Rules after the map: ask for the boot fix now. While a boot fix is
+     outstanding the resolve runs the 15 s check itself when the fix
+     fails or is stale; when there is nothing to wait for, init runs the
+     check as today. */
+  var bootGpsPending = gpsFirstPaintStart();
   /* A running timer must not hide behind the collapsed tiles. */
   if (getLimitTimer()) setLimitOpen(true);
   SIDE_KEYS.forEach(function (key, i) {
@@ -3284,12 +3318,9 @@ function init() {
       }
     });
   }
-  /* Google Maps (Nov 19): load the API script once, at boot. */
-  gmapsLoad();
-  /* Baked area paint (Nov 19): start the one static-file load at boot
-     so the first paint can draw from it — the live prefetch still runs
-     in the background for streets outside the bake. */
-  try { bakedPaintLoad(); } catch (e) { /* the live lookup covers a failed bake load */ }
+  /* Google Maps (Nov 19) + baked area paint (Nov 19) already started at
+     the top of init, before the first render — the map loads first, the
+     rules after. Nothing to start here any more. */
   var po = el("permitOptions");
   if (po) po.addEventListener("change", function (e) {
     var t = e.target || e.srcElement;
@@ -4362,7 +4393,13 @@ function liveRpaCacheSave(codes) {
    sees no difference. PANNEAU_ID_PAN is synthesised (potId + panel
    index): the file is already deduped, so the synthetic ids only feed
    the parser's dedup bookkeeping with unique values. */
-var LIVE_SIGNS_FILE_URL = "montreal-signs.v1.json";
+/* Versioned (Nov 20): the ?v= query is the cache-buster — the phone
+   can never serve a stale cached copy under a new URL, even if its HTTP
+   cache held the old file. BUMP on every signs-file rebuild (same
+   string as LIVE_AREA_PAINT_URL in the template — bump both together),
+   or the phone keeps reading the old signs. The file on disk stays
+   montreal-signs.v1.json; only the fetched URL carries the version. */
+var LIVE_SIGNS_FILE_URL = "montreal-signs.v1.json?v=20261120a";
 var LIVE_SIGNS_FILE = null; /* decoded file, once loaded */
 var LIVE_SIGNS_FILE_PROMISE = null; /* in-flight load, for dedup */
 var LIVE_SIGNS_FILE_FAILED = false; /* a failed load never retries in-session */
@@ -7174,6 +7211,42 @@ function osmDefaultView() {
   var h = osmHomeLatLon();
   return { lat: h.lat, lon: h.lon, zoom: OSM_ZOOM_DEFAULT, bearing: 0 };
 }
+/* Persisted last zoom (Nov 20 no-auto-zoom rule): the map must never
+   force zoom 17 on open — a fresh open restores the zoom the user last
+   had (pinch / wheel / double-click / North all write it through
+   osmSetView or gmapsOnMapMove), and only a first-ever open, with
+   nothing persisted, falls back to the street-level default 17. North
+   still resets to 17 on tap (osmDefaultView, explicit) — and that 17 is
+   then the persisted zoom, as the map's zoom now is. A stored value
+   outside the map's own zoom range is ignored, never trusted. */
+var MAP_ZOOM_KEY = "ticketSaver.mapZoom.v1";
+function osmPersistedZoom() {
+  try {
+    if (typeof localStorage === "undefined" || !localStorage.getItem) return null;
+    var raw = localStorage.getItem(MAP_ZOOM_KEY);
+    if (raw === null || raw === undefined || raw === "") return null;
+    var z = parseInt(raw, 10);
+    if (!isFinite(z) || z < OSM_ZOOM_MIN || z > OSM_ZOOM_MAX) return null;
+    return z;
+  } catch (e) { return null; }
+}
+function osmPersistZoom(z) {
+  try {
+    if (typeof localStorage === "undefined" || !localStorage.setItem) return;
+    if (typeof z !== "number" || !isFinite(z)) return;
+    z = Math.max(OSM_ZOOM_MIN, Math.min(OSM_ZOOM_MAX, Math.round(z)));
+    localStorage.setItem(MAP_ZOOM_KEY, String(z));
+  } catch (e) { /* private mode — the session zoom still works, it just does not survive a reload */ }
+}
+/* The view a fresh open starts from: the home position, at the last
+   zoom the user had (persisted), or the street-level default when
+   nothing was ever persisted. This — not osmDefaultView — is what the
+   first osmView() reads, so opening the app never zooms in by itself. */
+function osmInitialView() {
+  var h = osmHomeLatLon();
+  var z = osmPersistedZoom();
+  return { lat: h.lat, lon: h.lon, zoom: (z === null ? OSM_ZOOM_DEFAULT : z), bearing: 0 };
+}
 /* The current view; a street change re-centres on the new street's
    position and NOTHING else — no auto re-zoom (Nov 19): the zoom (and
    heading) the user chose stays exactly where they left it, whether
@@ -7182,7 +7255,7 @@ function osmDefaultView() {
    prompt; it never moves the zoom. */
 function osmView() {
   var k = osmStreetKey();
-  if (!_osmView) { _osmView = osmDefaultView(); _osmStreetKey = k; }
+  if (!_osmView) { _osmView = osmInitialView(); _osmStreetKey = k; }
   else if (_osmStreetKey !== k) {
     var h = osmHomeLatLon();
     _osmView = { lat: h.lat, lon: h.lon, zoom: _osmView.zoom, bearing: _osmView.bearing || 0 };
@@ -7202,6 +7275,7 @@ function osmSetView(lat, lon, zoom, bearing) {
   var b = (typeof bearing === "number") ? osmNormBearing(bearing) : (osmView().bearing || 0);
   _osmView = { lat: lat, lon: lon, zoom: zoom, bearing: b };
   _osmStreetKey = osmStreetKey();
+  osmPersistZoom(zoom); /* the map's zoom now is the last zoom: the next open restores it, never forces 17 */
   renderMap();
   return _osmView;
 }
@@ -7211,6 +7285,7 @@ function osmSetView(lat, lon, zoom, bearing) {
 function osmRecentre() {
   _osmView = osmDefaultView();
   _osmStreetKey = osmStreetKey();
+  osmPersistZoom(_osmView.zoom); /* North's reset zoom is the map's zoom now: the next open restores it */
   renderMap();
   osmAreaScheduleRefresh();
   return _osmView;
@@ -7447,7 +7522,13 @@ var _areaTimer = null; /* the pending debounced refresh, if any */
    immediately, without waiting for a rebuild, and never changes a
    colour or a verdict. */
 var LIVE_AREA_PAINT_VERSION = 1;
-var LIVE_AREA_PAINT_URL = "montreal-area-paint.v1.json";
+/* Versioned (Nov 20): the ?v= query is the cache-buster — the phone
+   can never serve a stale cached copy under a new URL, even if its HTTP
+   cache held the old file. BUMP on every bake rebuild (same string as
+   LIVE_SIGNS_FILE_URL in live-lookup.js — bump both together), or the
+   phone keeps painting the old bake. The file on disk stays
+   montreal-area-paint.v1.json; only the fetched URL carries the version. */
+var LIVE_AREA_PAINT_URL = "montreal-area-paint.v1.json?v=20261120a";
 var _bakedPaint = null; /* decoded baked file, once loaded */
 var _bakedPaintPromise = null; /* in-flight load, for dedup */
 var _bakedPaintFailed = false; /* a failed load never retries in-session */
@@ -8241,6 +8322,7 @@ function gmapsOnMapMove(idle) {
     if (Math.abs(v.lat - lat) > 1e-9 || Math.abs(v.lon - lon) > 1e-9 || v.zoom !== z || (v.bearing || 0) !== hd) {
       _osmView = { lat: lat, lon: lon, zoom: z, bearing: hd };
       _osmStreetKey = osmStreetKey();
+      if (v.zoom !== z) osmPersistZoom(z); /* a pinch / wheel / double-click zoom is the user's zoom: the next open restores it */
     }
     if (idle) { renderMap(); osmAreaScheduleRefresh(); }
   } catch (e) { /* map events must never break the app */ }
@@ -8435,22 +8517,13 @@ function renderMap(nowMs) {
   if (!card) return;
   var body = el("mapBody");
   if (!body) return;
-  /* GPS-first first paint: while the boot fix is outstanding the map area
-     shows a loading line, not a map for the wrong place and not a blank
-     frame — the first paint centres on the fix (or on home once the
-     wait ends). The map signature is set to a hold sentinel, so the
-     paint after the hold always re-renders: without it, a home fallback
-     would compute the same signature as the pre-hold paint and the
-     loading line would stick. */
-  if (_bootMapHeld) {
-    var holdHtml = '<div class="note" style="padding:12px 0">Finding your location…</div>';
-    setMapChrome(holdHtml);
-    _mapChromeHtml = holdHtml; /* record what was written: without this the
-      paint after the hold would compare against the pre-hold chrome and
-      skip the rewrite, leaving the loading line stuck */
-    _mapSig = "gpsfirst-hold";
-    return;
-  }
+  /* Map-first (Nov 20): NO hold any more — the Nov 19 GPS-first hold
+     returned early here showing only "Finding your location…" for up to
+     3 s, so the map (tiles + controls) arrived together with the rules,
+     late. The map now renders on the first call, at the home centre,
+     while the boot fix is still outstanding; the fix centres it (at the
+     user's zoom) when it lands, and the rules load after. The GPS row
+     still says "Finding your location…" while it waits. */
   /* The Google map is created once, on the first render after the API
      loads; before that (no key yet, script still loading) the div stays
      empty and the chrome carries the note. Creating it here — not in
@@ -9486,6 +9559,8 @@ function osmEventInMap(e) {
     osmLatLngToWorld: osmLatLngToWorld, osmWorldToLatLng: osmWorldToLatLng,
     osmProjectLocal: osmProjectLocal, osmLocalToLatLng: osmLocalToLatLng,
     osmRefLatLon: osmRefLatLon, osmHomeLatLon: osmHomeLatLon, osmStreetKey: osmStreetKey, osmDefaultView: osmDefaultView,
+    osmInitialView: osmInitialView, osmPersistedZoom: osmPersistedZoom, osmPersistZoom: osmPersistZoom,
+    MAP_ZOOM_KEY: MAP_ZOOM_KEY,
     osmView: osmView, osmSetView: osmSetView, osmRecentre: osmRecentre, osmMapSize: osmMapSize,
     osmSetBearing: osmSetBearing, osmRotateBy: osmRotateBy, osmNormBearing: osmNormBearing,
     osmPillState: osmPillState, osmAreaPillHtml: osmAreaPillHtml,
@@ -9521,7 +9596,9 @@ function osmEventInMap(e) {
     openCurbSheet: openCurbSheet, renderCurbSheet: renderCurbSheet, osmCentreOnGps: osmCentreOnGps,
     checkGps: checkGps, onGpsFix: onGpsFix, onGpsError: onGpsError,
     gpsFirstPaintStart: gpsFirstPaintStart, gpsFirstPaintFix: gpsFirstPaintFix,
-    gpsFirstPaintHeld: function () { return _bootMapHeld; },
+    /* Map-first (Nov 20): the boot hold is gone — the map never waits on
+       GPS any more. The seam stays so the suites can assert "never held". */
+    gpsFirstPaintHeld: function () { return false; },
     gpsFixIsFresh: gpsFixIsFresh, gpsRecordFix: gpsRecordFix,
     GPS_FIRST_WAIT_MS: GPS_FIRST_WAIT_MS, GPS_FIRST_FRESH_MS: GPS_FIRST_FRESH_MS,
     GPS_FIRST_MAX_AGE_MS: GPS_FIRST_MAX_AGE_MS,
